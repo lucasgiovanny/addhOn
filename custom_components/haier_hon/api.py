@@ -13,7 +13,7 @@ class HonApiClient:
         self._hon = None
 
     async def get_devices(self):
-        """Esegue il login ed estrae i dispositivi in modo sicuro da pyhOn."""
+        """Esegue il login ed estrae i dispositivi usando la sintassi nativa di pyhOn v0.17.5."""
         try:
             if self._hon is None:
                 _LOGGER.info("Inizializzazione della sessione pyhOn per %s...", self._username)
@@ -27,28 +27,30 @@ class HonApiClient:
                 return appliances
 
             for appliance in self._hon.appliances:
-                appliance_id = appliance.info.get("applianceId")
+                # pyhOn memorizza l'ID in appliance.info.get("applianceId") o appliance.id
+                appliance_id = appliance.info.get("applianceId") or getattr(appliance, "id", None)
                 if not appliance_id:
                     continue
                 
-                # Funzione di supporto interna per estrarre in sicurezza i valori da pyhOn v0.17.5
+                # Funzione di supporto interna per estrarre i dati in base a come pyhOn espone lo stato
                 def get_param_value(key, default=0):
                     try:
-                        # In pyhOn si accede ai parametri tramite l'attributo .parameters
-                        if key in appliance.parameters:
-                            val = appliance.parameters[key].value
-                            return val if val is not None else default
-                        # Ripiego se la libreria espone la proprietà direttamente o tramite dizionario
-                        val = appliance.get(key)
-                        if hasattr(val, "value"):
-                            return val.value
-                        return val if val is not None else default
+                        # 1. Prova a prenderlo dai parametri attuali di pyhOn
+                        if hasattr(appliance, "parameters") and key in appliance.parameters:
+                            return appliance.parameters[key].value
+                        # 2. Prova a prenderlo dal dizionario delle proprietà/stato
+                        if hasattr(appliance, "properties") and key in appliance.properties:
+                            return appliance.properties[key].get("value", default)
+                        if hasattr(appliance, "status") and key in appliance.status:
+                            return appliance.status[key]
+                        # 3. Ripiego provando a leggere l'attributo direttamente se esistente
+                        return getattr(appliance, key, default)
                     except Exception:
                         return default
 
-                # Mappiamo i dati usando la funzione sicura che non va mai in crash
+                # Costruiamo la struttura attesa da climate.py e sensor.py
                 appliance_data = {
-                    "applianceId": appliance_id,
+                    "applianceId": str(appliance_id),
                     "shadow": {
                         "parameters": {
                             "onOffStatus": {"value": int(get_param_value("onOffStatus", 0))},
@@ -74,12 +76,12 @@ class HonApiClient:
                 return False
                 
             for appliance in self._hon.appliances:
-                if appliance.info.get("applianceId") == appliance_id:
+                current_id = appliance.info.get("applianceId") or getattr(appliance, "id", None)
+                if str(current_id) == str(appliance_id):
                     for key, value in parameters.items():
-                        # Usiamo l'approccio standard di pyhOn per inviare il comando
-                        if key in appliance.parameters:
+                        if hasattr(appliance, "parameters") and key in appliance.parameters:
                             await appliance.parameters[key].set_value(value)
-                        else:
+                        elif hasattr(appliance, "set_parameter"):
                             await appliance.set_parameter(key, value)
                     return True
             return False
