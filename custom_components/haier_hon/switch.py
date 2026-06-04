@@ -19,12 +19,12 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    # FIX: accesso coerente alla struttura hass.data[DOMAIN][entry_id]["coordinator"]
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     entities = []
     for appliance_id, data in coordinator.data.items():
         if data.get("type") in APPLIANCE_WASH_GROUP:
             entities.append(HonWashingMachineSwitch(coordinator, appliance_id))
-            # Aggiunge switch pausa solo se il device supporta pauseProgram + resumeProgram
             appliance = data.get("appliance")
             if appliance and hasattr(appliance, "commands"):
                 cmds = appliance.commands if isinstance(appliance.commands, dict) else {}
@@ -35,17 +35,7 @@ async def async_setup_entry(
 
 
 class HonWashingMachineSwitch(HonBaseEntity, SwitchEntity):
-    """Switch per alimentazione lavatrice (on/off).
-
-    FIX: il comando 'settings' della WM HW80-B14959TU1IT non espone
-    'onOffStatus' (ha solo category/httpEndpoint/mqttEndpoint).
-    Lo stato ON/OFF si determina da 'machMode':
-        "0" = In attesa / Standby → spenta
-        qualsiasi altro valore    → accesa/in ciclo
-    Per avviare si usa startProgram.send() direttamente (onOffStatus
-    NON è un parametro di startProgram su questo modello).
-    Per spegnere si usa stopProgram.onOffStatus = "0" (confermato dai diagnostics).
-    """
+    """Switch per alimentazione lavatrice (on/off)."""
 
     _attr_icon = "mdi:power"
 
@@ -57,75 +47,62 @@ class HonWashingMachineSwitch(HonBaseEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """Stato acceso/spento.
-
-        FIX: settings.onOffStatus NON esiste per questa WM.
-        Usiamo machMode: "0" = standby/spenta, qualsiasi altro = accesa.
-        """
-        val = self._get_attr(WM_ATTR_STATUS, "0")  # WM_ATTR_STATUS = "machMode"
+        val = self._get_attr(WM_ATTR_STATUS, "0")
         return str(val) != "0"
 
     async def async_turn_on(self, **kwargs) -> None:
-        """Avvia la lavatrice tramite startProgram.
-
-        FIX: 'onOffStatus' NON è un parametro di startProgram su questo modello.
-        pyhOn avvia il ciclo con i parametri correnti (programma già selezionato
-        tramite il select entity) semplicemente chiamando command.send().
-        """
         appliance = self._appliance
-        if not appliance:
-            _LOGGER.error("Switch: Appliance non disponibile")
+        client = self._hon_client
+        if not appliance or not client:
+            _LOGGER.error("Switch ON: appliance o client non disponibile")
             return
         try:
-            commands = appliance.commands if isinstance(appliance.commands, dict) else {}
-            command = commands.get("startProgram")
-            if not command:
-                _LOGGER.error(
-                    "Switch: Comando 'startProgram' non trovato. Disponibili: %s",
-                    list(commands.keys()),
-                )
-                return
-            await command.send()
+            def _do():
+                async def _inner():
+                    commands = appliance.commands if isinstance(appliance.commands, dict) else {}
+                    command = commands.get("startProgram")
+                    if not command:
+                        raise RuntimeError(
+                            f"Comando 'startProgram' non trovato. Disponibili: {list(commands.keys())}"
+                        )
+                    await command.send()
+                client.run_command_sync(_inner())
+
+            await self.hass.async_add_executor_job(_do)
             _LOGGER.info("Switch ON: startProgram inviato")
             await self.coordinator.async_request_refresh()
         except Exception as err:
             _LOGGER.error("Switch ON: Errore: %s", err, exc_info=True)
 
     async def async_turn_off(self, **kwargs) -> None:
-        """Spegne la lavatrice tramite stopProgram.onOffStatus = "0".
-
-        Confermato dai diagnostics: stopProgram ha il parametro 'onOffStatus'.
-        """
         appliance = self._appliance
-        if not appliance:
-            _LOGGER.error("Switch: Appliance non disponibile")
+        client = self._hon_client
+        if not appliance or not client:
+            _LOGGER.error("Switch OFF: appliance o client non disponibile")
             return
         try:
-            commands = appliance.commands if isinstance(appliance.commands, dict) else {}
-            command = commands.get("stopProgram")
-            if command:
-                if hasattr(command, "parameters") and "onOffStatus" in command.parameters:
-                    command.parameters["onOffStatus"].value = "0"
-                await command.send()
-                _LOGGER.info("Switch OFF: stopProgram inviato")
-            else:
-                # Fallback: prova con settings se disponibile (non atteso su questo modello)
-                _LOGGER.error(
-                    "Switch OFF: Comando 'stopProgram' non trovato. Disponibili: %s",
-                    list(commands.keys()),
-                )
-                return
+            def _do():
+                async def _inner():
+                    commands = appliance.commands if isinstance(appliance.commands, dict) else {}
+                    command = commands.get("stopProgram")
+                    if not command:
+                        raise RuntimeError(
+                            f"Comando 'stopProgram' non trovato. Disponibili: {list(commands.keys())}"
+                        )
+                    if hasattr(command, "parameters") and "onOffStatus" in command.parameters:
+                        command.parameters["onOffStatus"].value = "0"
+                    await command.send()
+                client.run_command_sync(_inner())
+
+            await self.hass.async_add_executor_job(_do)
+            _LOGGER.info("Switch OFF: stopProgram inviato")
             await self.coordinator.async_request_refresh()
         except Exception as err:
             _LOGGER.error("Switch OFF: Errore: %s", err, exc_info=True)
 
 
 class HonWashingMachinePauseSwitch(HonBaseEntity, SwitchEntity):
-    """Switch per mettere in pausa / riprendere il programma lavatrice.
-
-    Usa pauseProgram e resumeProgram — entrambi confermati dai diagnostics
-    con parametro 'pause'.
-    """
+    """Switch per mettere in pausa / riprendere il programma lavatrice."""
 
     _attr_icon = "mdi:pause-circle"
 
@@ -137,44 +114,34 @@ class HonWashingMachinePauseSwitch(HonBaseEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """True = in pausa. machMode "2" = In pausa (dal WM_STATE_MAP)."""
-        val = self._get_attr(WM_ATTR_STATUS, "0")  # WM_ATTR_STATUS = "machMode"
+        val = self._get_attr(WM_ATTR_STATUS, "0")
         return str(val) == "2"
 
-    async def async_turn_on(self, **kwargs) -> None:
-        """Mette in pausa il programma corrente."""
+    async def _send_pause_command(self, command_name: str, pause_value: str) -> None:
         appliance = self._appliance
-        if not appliance:
+        client = self._hon_client
+        if not appliance or not client:
             return
         try:
-            commands = appliance.commands if isinstance(appliance.commands, dict) else {}
-            command = commands.get("pauseProgram")
-            if not command:
-                _LOGGER.error("Pausa: comando 'pauseProgram' non trovato")
-                return
-            if hasattr(command, "parameters") and "pause" in command.parameters:
-                command.parameters["pause"].value = "1"
-            await command.send()
-            _LOGGER.info("Pausa: programma messo in pausa")
+            def _do():
+                async def _inner():
+                    commands = appliance.commands if isinstance(appliance.commands, dict) else {}
+                    command = commands.get(command_name)
+                    if not command:
+                        raise RuntimeError(f"Comando '{command_name}' non trovato")
+                    if hasattr(command, "parameters") and "pause" in command.parameters:
+                        command.parameters["pause"].value = pause_value
+                    await command.send()
+                client.run_command_sync(_inner())
+
+            await self.hass.async_add_executor_job(_do)
+            _LOGGER.info("Pausa: %s inviato", command_name)
             await self.coordinator.async_request_refresh()
         except Exception as err:
-            _LOGGER.error("Pausa ON: Errore: %s", err, exc_info=True)
+            _LOGGER.error("Pausa %s: Errore: %s", command_name, err, exc_info=True)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._send_pause_command("pauseProgram", "1")
 
     async def async_turn_off(self, **kwargs) -> None:
-        """Riprende il programma in pausa."""
-        appliance = self._appliance
-        if not appliance:
-            return
-        try:
-            commands = appliance.commands if isinstance(appliance.commands, dict) else {}
-            command = commands.get("resumeProgram")
-            if not command:
-                _LOGGER.error("Pausa: comando 'resumeProgram' non trovato")
-                return
-            if hasattr(command, "parameters") and "pause" in command.parameters:
-                command.parameters["pause"].value = "0"
-            await command.send()
-            _LOGGER.info("Pausa: programma ripreso")
-            await self.coordinator.async_request_refresh()
-        except Exception as err:
-            _LOGGER.error("Pausa OFF: Errore: %s", err, exc_info=True)
+        await self._send_pause_command("resumeProgram", "0")

@@ -1,80 +1,161 @@
-import logging
+"""Climate entity per Haier hOn - condizionatore AS35PBPHRA-PRE."""
+from __future__ import annotations
+
 import asyncio
+import logging
+
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import ClimateEntityFeature, HVACMode
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .base_entity import HonBaseEntity
+from .const import (
+    APPLIANCE_AC,
+    DOMAIN,
+    AC_MODE_MAP,
+    AC_MODE_MAP_REVERSE,
+    AC_FAN_MAP,
+    AC_FAN_MAP_REVERSE,
+)
+
 _LOGGER = logging.getLogger(__name__)
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Configura l'entità climate basandosi sul coordinator."""
-    coordinator = hass.data["haier_hon"][entry.entry_id]
-    async_add_entities([HaierClimateEntity(coordinator, aid) for aid in coordinator.data.keys()])
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    entities = [
+        HaierClimateEntity(coordinator, aid)
+        for aid, data in coordinator.data.items()
+        if data.get("type") == APPLIANCE_AC
+    ]
+    async_add_entities(entities)
 
-class HaierClimateEntity(CoordinatorEntity, ClimateEntity):
+
+class HaierClimateEntity(HonBaseEntity, ClimateEntity):
     """Rappresentazione del condizionatore Haier hOn."""
 
-    def __init__(self, coordinator, appliance_id):
-        super().__init__(coordinator)
-        self._appliance_id = appliance_id
-        
-        self._attr_name = "Condizionatore Haier"
-        self._attr_unique_id = f"haier_{appliance_id}_climate"
+    def __init__(self, coordinator, appliance_id: str) -> None:
+        super().__init__(coordinator, appliance_id)
+        device_name = self._appliance_data.get("name", "Condizionatore Haier")
+        self._attr_name = device_name
+        self._attr_unique_id = f"{appliance_id}_climate"
         self._attr_temperature_unit = "°C"
+        self._attr_target_temperature_step = 1.0
+        self._attr_min_temp = 16.0
+        self._attr_max_temp = 30.0
         self._attr_supported_features = (
             ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE
         )
-        self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL, HVACMode.HEAT, HVACMode.FAN_ONLY]
-        self._attr_fan_modes = ["auto", "low", "medium", "high"]
-
-    @property
-    def available(self) -> bool:
-        return self.coordinator.last_update_success and self._appliance_id in self.coordinator.data
-
-    @property
-    def _device_data(self):
-        return self.coordinator.data.get(self._appliance_id, {})
+        self._attr_hvac_modes = [
+            HVACMode.OFF,
+            HVACMode.AUTO,
+            HVACMode.COOL,
+            HVACMode.DRY,
+            HVACMode.HEAT,
+            HVACMode.FAN_ONLY,
+        ]
+        self._attr_fan_modes = list(AC_FAN_MAP.values())
 
     @property
     def hvac_mode(self) -> HVACMode:
-        if not self.available:
+        on_off = self._get_attr("settings.onOffStatus", "0")
+        if str(on_off) == "0":
             return HVACMode.OFF
-        params = self._device_data.get("shadow", {}).get("parameters", {})
-        on_off = params.get("onOffStatus", {}).get("value")
-        
-        if on_off == 0 or on_off is None:
-            return HVACMode.OFF
-            
-        mode = params.get("machMode", {}).get("value")
-        mapping = {1: HVACMode.COOL, 2: HVACMode.HEAT, 4: HVACMode.FAN_ONLY}
-        return mapping.get(mode, HVACMode.OFF)
+        mode_val = str(self._get_attr("settings.machMode", "1"))
+        return getattr(HVACMode, AC_MODE_MAP.get(mode_val, "cool").upper(), HVACMode.COOL)
 
     @property
-    def target_temperature(self) -> float:
-        if not self.available:
+    def target_temperature(self) -> float | None:
+        val = self._get_attr("settings.tempSel")
+        try:
+            return float(val) if val is not None else 24.0
+        except (ValueError, TypeError):
             return 24.0
-        temp = self._device_data.get("shadow", {}).get("parameters", {}).get("tempSel", {}).get("value")
-        return float(temp) if temp is not None else 24.0
+
+    @property
+    def current_temperature(self) -> float | None:
+        val = self._get_attr("tempIndoor")
+        try:
+            return float(val) if val is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    @property
+    def fan_mode(self) -> str | None:
+        val = str(self._get_attr("settings.windSpeed", "0"))
+        return AC_FAN_MAP.get(val, "auto")
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Invia il cambio modalità ed esegue un refresh forzato immediato."""
-        api_client = self.coordinator.api_client
-        
+        """Invia il cambio modalità."""
+        appliance = self._appliance
+        if not appliance:
+            _LOGGER.error("Climate: appliance non disponibile per %s", self._appliance_id)
+            return
         try:
-            async with asyncio.timeout(10):
-                if hvac_mode == HVACMode.OFF:
-                    await api_client.set_device_status(self._appliance_id, {"onOffStatus": 0})
-                else:
-                    mode_mapping = {HVACMode.COOL: 1, HVACMode.HEAT: 2, HVACMode.FAN_ONLY: 4}
-                    mach_mode = mode_mapping.get(hvac_mode, 1)
-                    await api_client.set_device_status(
-                        self._appliance_id, {"onOffStatus": 1, "machMode": mach_mode}
-                    )
-                await self.coordinator.async_request_refresh()
+            client = self._hon_client
+            if client is None:
+                _LOGGER.error("Climate: HonClient non disponibile")
+                return
+
+            if hvac_mode == HVACMode.OFF:
+                await self._send_command_in_executor(client, appliance, {"onOffStatus": "0"})
+            else:
+                mode_key = AC_MODE_MAP_REVERSE.get(hvac_mode.value, "1")
+                await self._send_command_in_executor(
+                    client, appliance, {"onOffStatus": "1", "machMode": mode_key}
+                )
+            await self.coordinator.async_request_refresh()
         except Exception as err:
-            _LOGGER.error("Errore nell'invio del comando HVAC: %s", err)
+            _LOGGER.error("Climate: errore set_hvac_mode: %s", err, exc_info=True)
+
+    async def async_set_temperature(self, **kwargs) -> None:
+        """Invia la temperatura target."""
+        temp = kwargs.get("temperature")
+        if temp is None:
+            return
+        appliance = self._appliance
+        client = self._hon_client
+        if not appliance or not client:
+            return
+        try:
+            await self._send_command_in_executor(client, appliance, {"tempSel": str(int(temp))})
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("Climate: errore set_temperature: %s", err, exc_info=True)
+
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        """Invia la velocità ventola."""
+        appliance = self._appliance
+        client = self._hon_client
+        if not appliance or not client:
+            return
+        try:
+            speed_key = AC_FAN_MAP_REVERSE.get(fan_mode, "0")
+            await self._send_command_in_executor(client, appliance, {"windSpeed": speed_key})
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("Climate: errore set_fan_mode: %s", err, exc_info=True)
+
+    async def _send_command_in_executor(self, client, appliance, params: dict) -> None:
+        """Invia un comando settings tramite pyhOn sul loop dedicato (in executor)."""
+        def _do_send():
+            async def _inner():
+                commands = appliance.commands if isinstance(appliance.commands, dict) else {}
+                command = commands.get("settings")
+                if command is None:
+                    raise RuntimeError("Comando 'settings' non trovato sul dispositivo AC")
+                for key, value in params.items():
+                    if hasattr(command, "parameters") and key in command.parameters:
+                        command.parameters[key].value = value
+                    else:
+                        _LOGGER.warning("Climate: parametro '%s' non trovato nel comando settings", key)
+                await command.send()
+
+            client.run_command_sync(_inner())
+
+        await self.hass.async_add_executor_job(_do_send)
