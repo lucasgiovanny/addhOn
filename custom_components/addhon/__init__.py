@@ -22,6 +22,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import (
     APPLIANCE_TD,
     ATTR_LEVEL,
+    CONF_ENABLE_DEBUG,
+    CONF_ENABLE_MQTT_DEBUG,
     DOMAIN,
     PLATFORMS,
     SCAN_INTERVAL,
@@ -32,6 +34,7 @@ from .logging_utils import (
     MQTT_LOG_LEVELS,
     apply_integration_log_level,
     apply_mqtt_log_level,
+    reset_integration_log_level,
     silence_mqtt_noise,
 )
 
@@ -96,6 +99,59 @@ def _async_register_services(hass: HomeAssistant) -> None:
             _handle_set_log_level,
             schema=level_schema,
         )
+
+
+@callback
+def _apply_debug_options(entry: ConfigEntry, *, reset_when_off: bool = True) -> None:
+    """Allinea i livelli di log ai due toggle persistiti in entry.options.
+
+    enable_debug=True  -> logger dell'integrazione a DEBUG; False -> NOTSET
+                          (tornano a ereditare il livello configurato in HA).
+    enable_mqtt_debug=True -> logger MQTT realtime a DEBUG; False -> WARNING
+                          (silenziato).
+
+    Il livello MQTT si applica DOPO quello dell'integrazione, così il livello
+    esplicito del figlio MQTT vince sulla cascata del padre: attivare il DEBUG
+    dell'integrazione NON riaccende il rumore realtime se il toggle MQTT è off.
+    NB i logger sono globali al processo (vedi OptionsFlowHandler): con piu'
+    entry (raro, multi-account) i livelli sono condivisi e cambiare le opzioni di
+    una entry li ri-applica in base a QUELLA entry, potendo azzerare il debug
+    attivo di un'altra. L'installazione tipica e' a singolo account.
+
+    reset_when_off=True (default, usato dal listener delle opzioni): un toggle
+    OFF AZZERA il livello (NOTSET / WARNING), così disattivarlo dalla UI ha
+    effetto immediato e cancella anche un eventuale override manuale fatto col
+    service set_log_level. reset_when_off=False (usato in async_setup_entry): un
+    toggle OFF NON tocca i logger, così un DEBUG dell'integrazione impostato a
+    runtime coi service sopravvive ai re-setup/retry (es. login instabile) invece
+    di essere ri-azzerato a ogni tentativo; il silenziamento MQTT di default alla
+    prima registrazione resta comunque garantito da _async_register_services (che
+    pero', su un reload dell'unica entry che rimuove e ri-registra i service,
+    ri-silenzia anche un eventuale livello MQTT alzato a runtime).
+    """
+    if entry.options.get(CONF_ENABLE_DEBUG, False):
+        apply_integration_log_level(logging.DEBUG)
+    elif reset_when_off:
+        reset_integration_log_level()
+    if entry.options.get(CONF_ENABLE_MQTT_DEBUG, False):
+        apply_mqtt_log_level(logging.DEBUG)
+    elif reset_when_off:
+        silence_mqtt_noise()
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ri-applica a caldo i livelli di log quando i toggle cambiano (no reload).
+
+    Un reload butterebbe giù auth e canale MQTT solo per cambiare un livello di
+    log; qui ri-applichiamo i livelli al volo, come fanno i service esistenti.
+    """
+    _LOGGER.debug(
+        "Options debug: opzioni aggiornate entry=%s enable_debug=%s enable_mqtt_debug=%s",
+        entry.entry_id,
+        entry.options.get(CONF_ENABLE_DEBUG, False),
+        entry.options.get(CONF_ENABLE_MQTT_DEBUG, False),
+    )
+    _apply_debug_options(entry)
 
 
 def _redact_email(email: str | None) -> str | None:
@@ -189,6 +245,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # registra il service di debug. Fatto PRIMA del setup di pyhOn così il
     # logger è già a WARNING quando il client MQTT inizia a (ri)connettersi.
     _async_register_services(hass)
+
+    # Applica SUBITO i toggle di debug persistiti, ma DOPO _async_register_services
+    # (che alla prima registrazione silenzia il rumore MQTT di default) così il
+    # toggle MQTT persistito, se attivo, vince su quel silenziamento. Applicarli
+    # qui e non a fine setup fa sì che il livello DEBUG copra anche il percorso di
+    # setup (login, discovery, primo refresh): è proprio ciò che si vuole tracciare
+    # quando si attiva il debug per problemi di discovery. reset_when_off=False: un
+    # toggle OFF non deve ri-azzerare un DEBUG impostato a runtime coi service, che
+    # deve sopravvivere ai retry di un setup che fallisce (il silenziamento MQTT di
+    # default resta garantito da _async_register_services).
+    _apply_debug_options(entry, reset_when_off=False)
 
     # FIX: la chiave salvata dal config_flow è "email", non "username"
     email = entry.data.get("email")
@@ -321,6 +388,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         await _async_close_client(hon_client)
         raise
+
+    # Setup riuscito: registra un listener che ri-applica a caldo i toggle di
+    # debug quando cambiano (async_on_unload rimuove il listener allo scarico
+    # dell'entry, senza un reload). I livelli sono già stati applicati a inizio
+    # setup; qui resta solo da agganciare l'aggiornamento a caldo.
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
 
