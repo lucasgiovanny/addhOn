@@ -358,6 +358,24 @@
       "energy_saving": {
         "name": "Risparmio Energetico"
       },
+      "quick_cool": {
+        "name": "Super Cool"
+      },
+      "quick_freeze": {
+        "name": "Super Freeze"
+      },
+      "auto_set": {
+        "name": "Auto-Set"
+      },
+      "holiday_mode": {
+        "name": "Modalità Vacanza"
+      },
+      "filter_change": {
+        "name": "Cambio Filtro"
+      },
+      "ch2o_cleaning": {
+        "name": "Pulizia Formaldeide"
+      },
       "light": {
         "name": "Luce"
       },
