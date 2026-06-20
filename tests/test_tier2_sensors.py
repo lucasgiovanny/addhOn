@@ -319,6 +319,12 @@ class Tier2GatingTest(unittest.IsolatedAsyncioTestCase):
         state = next(e for e in added if e._attr_unique_id == "x-1_state")
         self.assertIsNone(state.native_value)
 
+    async def test_dryer_temp_level(self) -> None:
+        # TD gains a temperature-level sensor (tempLevel); live-confirmed on HD100.
+        added = await _build_sensors("TD", {"tempLevel": "4", "machMode": "1"})
+        tl = next(e for e in added if e._attr_unique_id == "x-1_temp_level")
+        self.assertEqual(tl.native_value, 4.0)
+
 
 class Tier2BinaryGatingTest(unittest.IsolatedAsyncioTestCase):
     async def test_cooling_binary_gating(self) -> None:

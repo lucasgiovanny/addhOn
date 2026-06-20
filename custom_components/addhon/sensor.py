@@ -286,6 +286,11 @@ _DRYER: tuple[HonSensorEntityDescription, ...] = (
     _DELAY,
     _ERRORS,
     HonSensorEntityDescription(
+        key="temp_level",
+        icon="mdi:thermometer-lines",
+        attr_key="tempLevel",
+    ),
+    HonSensorEntityDescription(
         key="total_washes",
         attr_key=TD_ATTR_CYCLES,
         state_class=SensorStateClass.TOTAL_INCREASING,

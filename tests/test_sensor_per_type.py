@@ -204,7 +204,7 @@ class PerTypeTableTest(unittest.TestCase):
         self.assertEqual(
             self._keys("TD"),
             ["state", "remaining_time", "program_name", "program_phase", "dry_level",
-             "loading_percentage", "delay_time", "errors", "total_washes"],
+             "loading_percentage", "delay_time", "errors", "temp_level", "total_washes"],
         )
 
     def test_td_has_no_water_or_energy(self) -> None:
@@ -250,7 +250,7 @@ class SensorBuildTest(unittest.IsolatedAsyncioTestCase):
             {e._attr_unique_id for e in added},
             {"td-1_state", "td-1_remaining_time", "td-1_program_name",
              "td-1_program_phase", "td-1_dry_level", "td-1_loading_percentage",
-             "td-1_delay_time", "td-1_errors", "td-1_total_washes"},
+             "td-1_delay_time", "td-1_errors", "td-1_temp_level", "td-1_total_washes"},
         )
         cycles = next(e for e in added if e._attr_unique_id == "td-1_total_washes")
         self.assertEqual(cycles.native_value, 42.0)  # reads programsCounter

@@ -128,6 +128,9 @@
       "dry_level": {
         "name": "Livello Asciugatura"
       },
+      "temp_level": {
+        "name": "Livello Temperatura"
+      },
       "spin_speed": {
         "name": "Centrifuga"
       },
