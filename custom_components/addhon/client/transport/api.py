@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from pprint import pformat
 from typing import Any
 
 from . import device as _device
 from .connection import HonConnection
 from .parse import parse_appliance_list
+from ...debug_utils import redact_identity
+from ...error_codes import APPLIANCE_LIST_EMPTY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class HonApi:
             f"{API_URL}/unified-api/v1/view/appliance-list",
             json={"deviceId": device_id},
         ) as resp:
-            result = await resp.json()
+            result = await resp.json(content_type=None)
         appliances = parse_appliance_list(result)
         if not appliances:
             # Request/auth OK but 0 appliances: log the response structure to
@@ -80,13 +81,14 @@ class HonApi:
             # unified-api list includes offline ones too).
             modules = result.get("modules") if isinstance(result, dict) else None
             _LOGGER.warning(
-                "hOn API: 0 appliances (request OK). result keys=%s; modules keys=%s. "
+                "[%s] hOn API: 0 appliances (request OK). result keys=%s; modules keys=%s. "
                 "If the appliances appear in the hOn app, it is more likely an API change "
                 "than an empty/unshared account.",
+                APPLIANCE_LIST_EMPTY.label,
                 sorted(result.keys()) if isinstance(result, dict) else "n/a",
                 sorted(modules.keys()) if isinstance(modules, dict) else "n/a",
             )
-            _LOGGER.debug("hOn raw appliance response: %s", result)
+            _LOGGER.debug("hOn raw appliance response: %s", redact_identity(result))
         return appliances
 
     async def load_commands(self, appliance: Any) -> dict:
@@ -106,23 +108,25 @@ class HonApi:
             params["series"] = series
         url = f"{API_URL}/commands/v1/retrieve"
         async with self._connection.get(url, params=params) as response:
-            data = await response.json()
+            data = await response.json(content_type=None)
         payload = data.get("payload") if isinstance(data, dict) else None
         # Error-branch on any invalid shape (non-dict or empty payload) -> {}. The pop
         # below REMOVES resultCode from the returned dict (the parser does not want it
         # in the command entries) while validating it.
         if not isinstance(payload, dict) or not payload:
-            _LOGGER.error("hOn load_commands: invalid payload: %s", data)
+            # data is the raw cloud response (mirrors the device context: macAddress,
+            # etc.) and this ERROR is never gated -> redact identity before logging.
+            _LOGGER.error("hOn load_commands: invalid payload: %s", redact_identity(data))
             return {}
         if payload.pop("resultCode", None) != "0":
-            _LOGGER.error("hOn load_commands: resultCode != 0: %s", data)
+            _LOGGER.error("hOn load_commands: resultCode != 0: %s", redact_identity(data))
             return {}
         return payload
 
     async def load_command_history(self, appliance: Any) -> list:
         url = f"{API_URL}/commands/v1/appliance/{appliance.mac_address}/history"
         async with self._connection.get(url) as response:
-            result = await response.json()
+            result = await response.json(content_type=None)
         if not isinstance(result, dict) or not result.get("payload"):
             return []
         payload = result["payload"]
@@ -132,7 +136,7 @@ class HonApi:
     async def load_favourites(self, appliance: Any) -> list:
         url = f"{API_URL}/commands/v1/appliance/{appliance.mac_address}/favourite"
         async with self._connection.get(url) as response:
-            result = await response.json()
+            result = await response.json(content_type=None)
         if not isinstance(result, dict) or not result.get("payload"):
             return []
         payload = result["payload"]
@@ -143,7 +147,7 @@ class HonApi:
         url = f"{API_URL}/commands/v1/retrieve-last-activity"
         params = {"macAddress": appliance.mac_address}
         async with self._connection.get(url, params=params) as response:
-            result = await response.json()
+            result = await response.json(content_type=None)
         if isinstance(result, dict):
             activity = result.get("attributes")
             if isinstance(activity, dict) and activity:
@@ -154,7 +158,7 @@ class HonApi:
         url = f"{API_URL}/commands/v1/appliance-model"
         params = {"code": appliance.code, "macAddress": appliance.mac_address}
         async with self._connection.get(url, params=params) as response:
-            result = await response.json()
+            result = await response.json(content_type=None)
         if isinstance(result, dict):
             payload = result.get("payload")
             if isinstance(payload, dict):
@@ -170,7 +174,7 @@ class HonApi:
         }
         url = f"{API_URL}/commands/v1/context"
         async with self._connection.get(url, params=params) as response:
-            data = await response.json()
+            data = await response.json(content_type=None)
         payload = data.get("payload", {}) if isinstance(data, dict) else {}
         return payload if isinstance(payload, dict) else {}
 
@@ -181,7 +185,7 @@ class HonApi:
         }
         url = f"{API_URL}/commands/v1/statistics"
         async with self._connection.get(url, params=params) as response:
-            data = await response.json()
+            data = await response.json(content_type=None)
         payload = data.get("payload", {}) if isinstance(data, dict) else {}
         return payload if isinstance(payload, dict) else {}
 
@@ -189,14 +193,14 @@ class HonApi:
         url = f"{API_URL}/commands/v1/maintenance-cycle"
         params = {"macAddress": appliance.mac_address}
         async with self._connection.get(url, params=params) as response:
-            data = await response.json()
+            data = await response.json(content_type=None)
         payload = data.get("payload", {}) if isinstance(data, dict) else {}
         return payload if isinstance(payload, dict) else {}
 
     async def load_aws_token(self) -> str:
         url = f"{API_URL}/auth/v1/introspection"
         async with self._connection.get(url) as response:
-            data = await response.json()
+            data = await response.json(content_type=None)
         payload = data.get("payload", {}) if isinstance(data, dict) else {}
         token = payload.get("tokenSigned", "") if isinstance(payload, dict) else ""
         return token if isinstance(token, str) else ""
@@ -230,12 +234,23 @@ class HonApi:
             data["programName"] = program_name.upper()
         url = f"{API_URL}/commands/v1/send"
         async with self._connection.post(url, json=data) as response:
-            json_data = await response.json()
+            json_data = await response.json(content_type=None)
             payload = json_data.get("payload") if isinstance(json_data, dict) else None
             if isinstance(payload, dict) and payload.get("resultCode") == "0":
                 return True
-            _LOGGER.error("hOn send_command failed: %s", await response.text())
-            _LOGGER.error("%s - Payload:\n%s", url, pformat(data))
+            # The request payload (data) carries macAddress, transactionId (= MAC)
+            # and device.mobileId; the response may echo them too. Log only the
+            # command + resultCode at ERROR (no identity, always emitted), and the
+            # full REDACTED payload/response at DEBUG (gated) for troubleshooting.
+            result_code = payload.get("resultCode") if isinstance(payload, dict) else None
+            _LOGGER.error(
+                "hOn send_command failed: command=%s resultCode=%s", command, result_code
+            )
+            _LOGGER.debug(
+                "hOn send_command failed payload (redacted)=%s response=%s",
+                redact_identity(data),
+                redact_identity(json_data),
+            )
         return False
 
     async def close(self) -> None:

@@ -7,7 +7,15 @@ import logging
 import threading
 from typing import Any
 
-from .debug_utils import debug_key_sample, redact_email
+from .debug_utils import debug_key_sample, redact_email, redact_id, redact_mac
+from .error_codes import (
+    APPLIANCE_LOAD_FAILED,
+    UNKNOWN,
+    HonCodedError,
+    HonErrorCode,
+    classify,
+    phase_timeout_code,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,9 +83,9 @@ def _debug_appliance_consumption(stage: str, appliance, attributes: dict | None 
         "merged_keys=%d %s merged_values=%s; "
         "load_statistics=%s update=%s commands=%s",
         stage,
-        _get_name(appliance),
+        redact_id(_get_name(appliance)),
         _get_type(appliance),
-        getattr(appliance, "unique_id", None) or _get_serial(appliance) or "<no-id>",
+        redact_mac(getattr(appliance, "unique_id", None) or _get_serial(appliance)) or "<no-id>",
         type(getattr(appliance, "statistics", None)).__name__,
         len(stats),
         debug_key_sample(stats),
@@ -231,9 +239,46 @@ def _is_missing_session_error(err: BaseException) -> bool:
 
 
 def _requires_reauth(err: BaseException) -> bool:
+    # A coded error already decided its routing (e.g. a phase-attributed loop timeout
+    # is non-reauth; an auth-step code is reauth). Duck-typed so this stays decoupled
+    # from error_codes.HonErrorCode and keeps working under the test stubs.
+    code = getattr(err, "error_code", None)
+    if code is not None and hasattr(code, "requires_reauth"):
+        return bool(code.requires_reauth)
     return (
         _is_auth_error(err) or _is_missing_session_error(err)
     ) and not _is_retryable_server_error(err)
+
+
+def _representative_failure(
+    failures: list[tuple[str, Exception]]
+) -> tuple[HonErrorCode, Exception | None]:
+    """Pick a representative (code, error) from per-appliance update failures (CR#6).
+
+    The all-failed (and first-poll) paths used to raise a bare RuntimeError, which
+    classify() maps to UNKNOWN (ADDHON-999) -- losing the real cause from the logs,
+    the UpdateFailed message and Download Diagnostics. This surfaces a MEANINGFUL,
+    NON-AUTH code instead: deterministically, the FIRST failure (in poll order) whose
+    classify() is neither UNKNOWN nor a reauth code; if none qualifies, fall back to
+    APPLIANCE_LOAD_FAILED (ADDHON-220) paired with the first error.
+
+    Rejecting reauth codes is what keeps routing correct. Every error here already
+    passed the non-auth gate (_requires_reauth was False at the call site), but
+    classify() is substring-based and could still name an auth code (e.g. a message
+    that merely contains "login")  -- surfacing it would flip the transient
+    UpdateFailed into a reauth (ConfigEntryAuthFailed). APPLIANCE_LOAD_FAILED is
+    requires_reauth=False, so the fallback stays non-auth too.
+    """
+    chosen: Exception | None = None  # the first failure, kept as the fallback cause
+    for _name, err in failures:
+        if chosen is None:
+            chosen = err
+        code = classify(err)
+        if code is not UNKNOWN and not code.requires_reauth:
+            return code, err
+    # No meaningful non-auth code found (or -- defensively -- an empty list, which the
+    # two gated call sites never pass): fall back to APPLIANCE_LOAD_FAILED, NEVER UNKNOWN.
+    return APPLIANCE_LOAD_FAILED, chosen
 
 
 class HonClient:
@@ -251,14 +296,31 @@ class HonClient:
     _RUN_TIMEOUT = 60
     _CANCEL_TIMEOUT = 5
 
-    def __init__(self, email: str, password: str) -> None:
+    def __init__(self, email: str, password: str, validation: bool = False) -> None:
         self._email = email
         self._password = password
+        # validation=True (config-flow): authenticate + count appliances only, no MQTT
+        # and no per-appliance loads (issue #30). Runtime keeps the full setup.
+        self._validation = validation
+        # Last classified error code (for the downloadable diagnostics / log parity).
+        self.last_error_code: Any = None
         self._hon_instance = None
         self._api = None
         self._hon_loop: asyncio.AbstractEventLoop | None = None
         self._hon_thread: threading.Thread | None = None
         self._lifecycle_lock = threading.RLock()
+        # Flipped True after the first poll that returns data. Until then the poll is
+        # STRICT (any per-appliance error re-raises -> ConfigEntryNotReady -> HA retries
+        # setup), because platform setup iterates the FIRST snapshot once and there is
+        # no dynamic discovery: an appliance missing from that snapshot would get NO
+        # entities until a reload. Steady-state polls are resilient (skip the failed
+        # appliance, keep the others).
+        self._first_poll_done = False
+        # Realtime notify callback, kept on the CLIENT (not the session): the
+        # session is rebuilt on every setup/re-auth with its own _notify_function
+        # reset to None, so storing it here lets setup_sync re-apply it and the
+        # MQTT push survive a re-auth (#20).
+        self._notify_function: Any = None
 
     # -- Dedicated loop management ---------------------------------------------
 
@@ -332,7 +394,7 @@ class HonClient:
 
             try:
                 return future.result(timeout=self._RUN_TIMEOUT)
-            except concurrent.futures.TimeoutError:
+            except concurrent.futures.TimeoutError as timeout_err:
                 drain_future: concurrent.futures.Future = concurrent.futures.Future()
 
                 def _cancel_and_drain() -> None:
@@ -363,7 +425,14 @@ class HonClient:
                     drain_future.result(timeout=self._CANCEL_TIMEOUT)
                 except Exception as err:
                     _LOGGER.debug("Timeout while cancelling hOn task: %s", err)
-                raise
+                # The bare concurrent.futures.TimeoutError has no message and the
+                # cancelled coroutine's own exception is gone, so re-raise it as a
+                # phase-attributed coded error: the dedicated loop runs setup() on the
+                # hOn session, which records where it stalled (auth / appliance list /
+                # MQTT) in _setup_phase. This is what turns the #30 "spins then
+                # cannot_connect" into a precise ADDHON-NNN. (phase "" -> LOOP_TIMEOUT.)
+                phase = getattr(self._hon_instance, "_setup_phase", "") or ""
+                raise HonCodedError(phase_timeout_code(phase), phase=phase) from timeout_err
 
     def _cancel_pending_tasks(self, loop: asyncio.AbstractEventLoop) -> None:
         """Cancel leftover tasks before stopping the dedicated loop."""
@@ -437,13 +506,27 @@ class HonClient:
                 if self._hon_loop is None or not self._hon_loop.is_running():
                     self._start_hon_loop()
 
-                self._hon_instance = create_session(self._email, self._password)
+                self._hon_instance = create_session(
+                    self._email,
+                    self._password,
+                    enable_mqtt=not self._validation,
+                    minimal=self._validation,
+                )
                 _LOGGER.debug("Hon instance created")
 
                 # Login + aiohttp session init, on the dedicated loop
                 self._api = self._run_on_hon_loop(self._hon_instance.__aenter__())
                 _LOGGER.info("Connection to hOn succeeded for %s", redact_email(self._email))
-            except Exception:
+                # Re-apply the realtime notify callback to the freshly built session
+                # (rebuilt on every setup/re-auth with _notify_function=None);
+                # without this the MQTT push is a permanent no-op after a re-auth (#20).
+                if self._notify_function is not None:
+                    self._hon_instance.subscribe_updates(self._notify_function)
+            except Exception as err:
+                self.last_error_code = classify(err)
+                _LOGGER.error(
+                    "hOn setup failed [%s]: %s", self.last_error_code.label, err
+                )
                 self._close_sync()
                 raise
 
@@ -500,7 +583,7 @@ class HonClient:
                                 _LOGGER.debug(
                                     "load_statistics after update() failed for '%s' "
                                     "(type=%s): %s",
-                                    _get_name(appliance),
+                                    redact_id(_get_name(appliance)),
                                     _get_type(appliance),
                                     err,
                                 )
@@ -509,7 +592,7 @@ class HonClient:
                             "(type=%s); statistics reloaded if available; "
                             "load_attributes/load_commands fallback not run in this cycle.",
                             len(attrs_after_update),
-                            _get_name(appliance),
+                            redact_id(_get_name(appliance)),
                             _get_type(appliance),
                         )
                         return
@@ -561,6 +644,64 @@ class HonClient:
             _LOGGER.error("hOn re-authentication failed: %s", err)
             return False
 
+    # -- Realtime push (MQTT) --------------------------------------------------
+
+    @staticmethod
+    def _appliance_id(appliance: Any) -> str:
+        return (
+            getattr(appliance, "unique_id", None)
+            or _get_serial(appliance)
+            or str(id(appliance))
+        )
+
+    @staticmethod
+    def _build_appliance_entry(appliance: Any) -> dict[str, Any]:
+        """Coordinator entry for one appliance from its CURRENT in-memory state.
+
+        Shared by the HTTP poll (async_get_appliances_data) and the realtime
+        snapshot so the two never diverge in shape. Reads only, no network.
+        """
+        return {
+            "appliance": appliance,
+            "type": _get_type(appliance),
+            "name": _get_name(appliance),
+            "model": _get_model(appliance),
+            "serial": _get_serial(appliance),
+            "mac": _get_mac(appliance),
+            "attributes": _get_attributes(appliance),
+            "statistics": _debug_container_to_dict(
+                getattr(appliance, "statistics", None), "statistics"
+            ),
+            "settings": dict(appliance.settings) if hasattr(appliance, "settings") else {},
+        }
+
+    def build_realtime_snapshot(self) -> dict[str, Any]:
+        """Coordinator snapshot from the appliances already mutated in-memory by the
+        MQTT push (NO HTTP poll). Built on the awscrt thread by the notify callback;
+        a failing appliance is skipped, never the whole snapshot."""
+        hon = self._hon_instance
+        appliances = getattr(hon, "appliances", None) or [] if hon is not None else []
+        data: dict[str, Any] = {}
+        for appliance in appliances:
+            try:
+                data[self._appliance_id(appliance)] = self._build_appliance_entry(appliance)
+            except Exception as err:  # pragma: no cover - defensive
+                _LOGGER.debug("Realtime snapshot: skipping an appliance: %s", err)
+        return data
+
+    def subscribe_updates(self, notify_function: Any) -> None:
+        """Register (or clear with None) the realtime notify callback.
+
+        Stored on the client so it survives a re-auth (which rebuilds the session):
+        setup_sync re-applies it to the new session (#20). Forwarded to the current
+        session when one exists; if none exists (before setup, or after close on the
+        unload detach) it is just remembered -- NO raise, so subscribe_updates(None)
+        on unload is a clean no-op (#28)."""
+        self._notify_function = notify_function
+        hon = self._hon_instance
+        if hon is not None:
+            hon.subscribe_updates(notify_function)
+
     # -- Data polling ----------------------------------------------------------
 
     async def async_get_appliances_data(self) -> dict[str, Any]:
@@ -568,6 +709,7 @@ class HonClient:
 
         while True:
             data: dict[str, Any] = {}
+            failed_appliances: list[tuple[str, Exception]] = []
             retry_after_reauth = False
             try:
                 appliances = await self.async_get_appliances()
@@ -587,8 +729,8 @@ class HonClient:
                     _LOGGER.debug(
                         "Discovery: appliance inventory from the cloud - %s",
                         "; ".join(
-                            f"type={_get_type(a)} mac={_get_mac(a) or '<no-mac>'} "
-                            f"name={_get_name(a)}"
+                            f"type={_get_type(a)} mac={redact_mac(_get_mac(a)) or '<no-mac>'} "
+                            f"name={redact_id(_get_name(a))}"
                             for a in appliances
                         ),
                     )
@@ -610,8 +752,8 @@ class HonClient:
                         idx,
                         len(appliances),
                         _get_type(appliance),
-                        _get_mac(appliance) or "<no-mac>",
-                        _get_name(appliance),
+                        redact_mac(_get_mac(appliance)) or "<no-mac>",
+                        redact_id(_get_name(appliance)),
                     )
                     last_err = None
                     for attempt in range(3):
@@ -638,64 +780,102 @@ class HonClient:
                     if last_err is not None:
                         raise last_err
 
-                    appliance_id = (
-                        getattr(appliance, "unique_id", None)
-                        or _get_serial(appliance)
-                        or str(id(appliance))
-                    )
+                    appliance_id = self._appliance_id(appliance)
                     attributes = _get_attributes(appliance)
                     name = _get_name(appliance)
                     app_type = _get_type(appliance)
-
-                    data[appliance_id] = {
-                        "appliance": appliance,
-                        "type": app_type,
-                        "name": name,
-                        "model": _get_model(appliance),
-                        "serial": _get_serial(appliance),
-                        "mac": _get_mac(appliance),
-                        "attributes": attributes,
-                        "statistics": _debug_container_to_dict(
-                            getattr(appliance, "statistics", None), "statistics"
-                        ),
-                        "settings": dict(appliance.settings) if hasattr(appliance, "settings") else {},
-                    }
+                    data[appliance_id] = self._build_appliance_entry(appliance)
                     _debug_appliance_consumption("coordinator snapshot", appliance, attributes)
                     _LOGGER.debug(
                         "Updated '%s' (type=%s, mac=%s, id=%s) - %d attributes",
-                        name, app_type, _get_mac(appliance) or "<no-mac>",
-                        appliance_id, len(attributes),
+                        redact_id(name), app_type, redact_mac(_get_mac(appliance)) or "<no-mac>",
+                        redact_mac(appliance_id), len(attributes),
                     )
 
                 except Exception as err:
                     _LOGGER.warning(
                         "Error updating '%s' (type=%s): %s",
-                        _get_name(appliance), _get_type(appliance), err,
+                        redact_id(_get_name(appliance)), _get_type(appliance), err,
                         exc_info=True,
                     )
                     if _requires_reauth(err):
                         if reauth_attempted:
                             raise RuntimeError(
                                 f"Haier auth error while updating "
-                                f"'{_get_name(appliance)}': {err}"
+                                f"'{redact_id(_get_name(appliance))}': {err}"
                             ) from err
                         _LOGGER.warning("Haier auth error, starting re-authentication")
                         if not await self._async_reauth():
                             raise RuntimeError(
                                 f"Haier auth error while updating "
-                                f"'{_get_name(appliance)}': {err}"
+                                f"'{redact_id(_get_name(appliance))}': {err}"
                             ) from err
                         reauth_attempted = True
                         retry_after_reauth = True
                         break
-                    raise RuntimeError(
-                        f"Error updating '{_get_name(appliance)}': {err}"
-                    ) from err
+                    # FIRST poll: STRICT. Platform setup iterates this snapshot once and
+                    # there is no dynamic-discovery path, so an appliance absent from the
+                    # first snapshot would get NO entities until a reload. Re-raise so the
+                    # first refresh fails -> ConfigEntryNotReady -> HA retries setup until
+                    # the full inventory loads. (Also surfaces genuine setup-time bugs.)
+                    if not self._first_poll_done:
+                        # Same code-preservation as the all-failed path (CR#6): a bare
+                        # RuntimeError would classify to UNKNOWN. Reuse the helper (with
+                        # a single failure) so the real non-auth cause is surfaced while
+                        # the STRICT first-poll semantics are unchanged (it still
+                        # re-raises -> UpdateFailed -> ConfigEntryNotReady -> HA retries).
+                        code, cause = _representative_failure(
+                            [(redact_id(_get_name(appliance)), err)]
+                        )
+                        raise HonCodedError(
+                            code, "Error updating an appliance on the first poll"
+                        ) from cause
+                    # Steady state: per-appliance resilience. A non-auth failure on ONE
+                    # appliance (a transient cloud 5xx that outlived the retries, a
+                    # malformed payload, ...) must NOT blank EVERY device. Record it and
+                    # move on: this appliance is simply absent from the snapshot (its
+                    # entities go unavailable until the next poll succeeds) while the
+                    # others stay live. A TOTAL failure (all errored -> empty data) is
+                    # re-raised below so the coordinator marks the cycle failed instead of
+                    # publishing an empty snapshot that silently blanks everything.
+                    failed_appliances.append((redact_id(_get_name(appliance)), err))
+                    continue
 
             if retry_after_reauth:
                 continue
 
+            if appliances and not data and failed_appliances:
+                # Every appliance failed this cycle: surface a failed update (the
+                # coordinator keeps its last good snapshot and retries) instead of
+                # returning an empty one that would blank all devices at once. Carry a
+                # representative NON-AUTH code so the ADDHON-NNN catalog reports the real
+                # cause instead of UNKNOWN (CR#6); the redacted names go to the WARNING,
+                # never into the HonCodedError message (its contract forbids identity).
+                code, cause = _representative_failure(failed_appliances)
+                _LOGGER.warning(
+                    "[%s] Update failed for all %d appliances: %s",
+                    code.label,
+                    len(failed_appliances),
+                    ", ".join(name for name, _err in failed_appliances),
+                )
+                raise HonCodedError(
+                    code,
+                    f"Update failed for all {len(failed_appliances)} appliance(s)",
+                ) from cause
+
+            if failed_appliances:
+                _LOGGER.warning(
+                    "Partial update: %d/%d appliances updated this cycle, "
+                    "skipped (unavailable until next poll): %s",
+                    len(data),
+                    len(appliances),
+                    ", ".join(name for name, _err in failed_appliances),
+                )
+
             _LOGGER.info("Loaded %d hOn devices with data", len(data))
+            # From now on the poll is resilient (skip a failed appliance, keep the rest):
+            # all entities have been created from this first complete snapshot.
+            self._first_poll_done = True
             return data
 
     # -- Closing ---------------------------------------------------------------

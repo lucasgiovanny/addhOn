@@ -339,6 +339,125 @@ class ProgramSelectTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({}, coordinator.pending_programs)
         self.assertEqual(1, coordinator.refreshes)
 
+    async def test_button_debug_log_redacts_store_keys(self) -> None:
+        # CR#1: the press + "consumed and removed" DEBUG logs dump the pending-program
+        # store, whose KEYS are the MAC-derived appliance id. The raw MAC must NOT reach
+        # the log (the AST guard can't catch the old dict(store)); behaviour unchanged.
+        from custom_components.addhon.select import HonProgramSelect
+        from custom_components.addhon.button import HonProgramCommandButton
+        from custom_components.addhon import button as button_mod
+
+        mac = "AA:BB:CC:DD:EE:FF"
+        start = RecordingCommand({"program": Param(values={"1": "Cotone", "2": "Sintetici"})})
+        # appliance keyed under the MAC so the entity's _appliance_id (and thus the
+        # store key) is the MAC -- the exact identity that must not reach the log.
+        coordinator = FakeCoordinator({mac: {
+            "type": "WM", "name": "Washer",
+            "appliance": types.SimpleNamespace(commands={"startProgram": start}),
+            "attributes": {}, "settings": {},
+        }})
+
+        select_entity = HonProgramSelect(coordinator, mac, FakeClient())
+        self._attach(select_entity)
+        button = HonProgramCommandButton(
+            coordinator, mac, FakeClient(),
+            command_name="startProgram", unique_suffix="start_program",
+            translation_key="start_program", icon="mdi:play-circle",
+        )
+        self._attach(button)
+
+        await select_entity.async_select_option("Sintetici")
+        with self.assertLogs(button_mod._LOGGER.name, level="DEBUG") as logs:
+            await button.async_press()
+        blob = "\n".join(logs.output)
+        # behaviour unchanged: program applied + started, pending cleared
+        self.assertEqual("2", start.parameters["program"].value)
+        self.assertEqual(1, start.send_calls)
+        self.assertEqual({}, coordinator.pending_programs)
+        # both store-dump debug lines fired, with the MAC key masked
+        self.assertTrue(any("press" in ln and "store=" in ln for ln in logs.output))
+        self.assertTrue(any("consumed and removed" in ln for ln in logs.output))
+        self.assertNotIn(mac, blob)        # raw MAC key never logged
+        self.assertNotIn("AA:BB", blob)
+        self.assertIn("'***': '2'", blob)  # masked key, program-code value preserved
+
+    async def test_select_debug_log_redacts_store_keys(self) -> None:
+        # CR#1 (sibling site): the select before/after-selection DEBUG logs dump the
+        # same store -> the MAC key must be masked while the selection still stores
+        # under the real id (redaction is log-only, behaviour unchanged).
+        from custom_components.addhon.select import HonProgramSelect
+        from custom_components.addhon import select as select_mod
+
+        mac = "AA:BB:CC:DD:EE:FF"
+        start = RecordingCommand({"program": Param(values={"1": "Cotone", "2": "Sintetici"})})
+        coordinator = FakeCoordinator({mac: {
+            "type": "WM", "name": "Washer",
+            "appliance": types.SimpleNamespace(commands={"startProgram": start}),
+            "attributes": {}, "settings": {},
+        }})
+        select_entity = HonProgramSelect(coordinator, mac, FakeClient())
+        self._attach(select_entity)
+
+        with self.assertLogs(select_mod._LOGGER.name, level="DEBUG") as logs:
+            await select_entity.async_select_option("Sintetici")
+        blob = "\n".join(logs.output)
+        self.assertEqual("2", coordinator.pending_programs.get(mac))  # stored under real id
+        self.assertTrue(any("selection" in ln and "store=" in ln for ln in logs.output))
+        self.assertNotIn(mac, blob)
+        self.assertIn("'***': '2'", blob)  # the "after selection" dump masks the key
+
+    async def test_start_button_sends_command_swapped_by_program_apply(self) -> None:
+        # #6: on a washer/dryer whose 'program' is a HonParameterProgram, setting its
+        # value SWAPS the active startProgram command in the appliance dict
+        # (category setter). The button must send the NEW (selected) command, not the
+        # stale pre-swap object.
+        from custom_components.addhon.button import HonProgramCommandButton
+
+        appliance = types.SimpleNamespace(commands={})
+        new_cmd = RecordingCommand({"prStr": Param("X")})
+
+        class ProgramSwapParam:
+            """Mimics HonParameterProgram: .value setter replaces the active command
+            in appliance.commands[name] with the selected category's command."""
+
+            def __init__(self) -> None:
+                self._value = None
+
+            @property
+            def value(self):
+                return self._value
+
+            @value.setter
+            def value(self, v) -> None:
+                self._value = v
+                appliance.commands["startProgram"] = new_cmd  # category swap
+
+        old_cmd = RecordingCommand({"program": ProgramSwapParam()})
+        appliance.commands["startProgram"] = old_cmd
+
+        coordinator = FakeCoordinator(
+            {"washer-1": {"type": "WM", "name": "W", "appliance": appliance,
+                          "attributes": {}, "settings": {}}}
+        )
+        coordinator.pending_programs = {"washer-1": "2"}
+
+        button = HonProgramCommandButton(
+            coordinator, "washer-1", FakeClient(),
+            command_name="startProgram", unique_suffix="start_program",
+            translation_key="start_program", icon="mdi:play-circle",
+            command_parameters={"prStr": "Y"},  # fixed params must land on the NEW command
+        )
+        self._attach(button)
+
+        await button.async_press()
+
+        # The selected (swapped) command was sent; the stale pre-swap one was NOT.
+        self.assertEqual(1, new_cmd.send_calls)
+        self.assertEqual(0, old_cmd.send_calls)
+        self.assertEqual("2", old_cmd.parameters["program"].value)  # program applied
+        # The fixed parameters were applied to the NEW (swapped) command, not the stale one.
+        self.assertEqual("Y", new_cmd.parameters["prStr"].value)
+
     async def test_stop_button_ignores_pending_program(self) -> None:
         from custom_components.addhon.button import HonProgramCommandButton
 

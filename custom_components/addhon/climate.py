@@ -21,6 +21,9 @@ from .const import (
     AC_FAN_MAP_REVERSE,
     AC_ATTR_MODE,
     AC_ATTR_TEMP,
+    AC_TEMP_PARAM,
+    AC_MODE_PARAM,
+    AC_FAN_PARAM,
     AC_ATTR_ON_OFF,
     AC_ATTR_CURRENT_TEMP,
     AC_ATTR_FAN_SPEED,
@@ -30,15 +33,27 @@ from .const import (
     AC_SWING_MODE_ON,
     AC_SWING_MODE_OFF,
 )
-from .debug_utils import command_names
+from .debug_utils import command_names, redact_id
 from .ac_command import (
     async_send_settings,
     fixed_vertical_value,
     param_allowed_values,
     settings_param,
 )
+from .hon_commands import param_range
 
 _LOGGER = logging.getLogger(__name__)
+
+# Full HA mode list, used as the fallback when the device's machMode enum is not
+# readable (so a device we cannot introspect keeps offering every mode, as before).
+_DEFAULT_HVAC_MODES = [
+    HVACMode.OFF,
+    HVACMode.AUTO,
+    HVACMode.COOL,
+    HVACMode.DRY,
+    HVACMode.HEAT,
+    HVACMode.FAN_ONLY,
+]
 
 
 async def async_setup_entry(
@@ -54,14 +69,14 @@ async def async_setup_entry(
         _LOGGER.debug(
             "Climate debug: evaluating appliance '%s' id=%s type=%s commands=%s attributes=%d",
             data.get("name"),
-            aid,
+            redact_id(aid),
             data.get("type"),
             command_names(appliance),
             len(data.get("attributes", {})) if isinstance(data.get("attributes"), dict) else 0,
         )
         if data.get("type") == APPLIANCE_AC:
             entities.append(HaierClimateEntity(coordinator, aid, client))
-            _LOGGER.debug("Climate debug: created climate entity for id=%s", aid)
+            _LOGGER.debug("Climate debug: created climate entity for id=%s", redact_id(aid))
     async_add_entities(entities)
 
 
@@ -73,9 +88,14 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
         self._attr_name = None
         self._attr_unique_id = f"{appliance_id}_climate"
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
-        self._attr_target_temperature_step = 1.0
-        self._attr_min_temp = 16.0
-        self._attr_max_temp = 30.0
+        # Setpoint range/step read from the device's real tempSel parameter (see
+        # min_temp/max_temp/target_temperature_step below), not hardcoded: a model
+        # with a different range or half-degree step must be honoured so the UI
+        # only offers values the device accepts. Fallback to 16-30/1.0 if absent.
+        self._temp_param = settings_param(self._appliance, AC_TEMP_PARAM)
+        self._temp_fallback_range = (
+            param_range(self._temp_param) if self._temp_param is not None else None
+        ) or (16.0, 30.0, 1.0)
         self._attr_supported_features = (
             ClimateEntityFeature.TARGET_TEMPERATURE
             | ClimateEntityFeature.FAN_MODE
@@ -90,25 +110,77 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
         if self._swing_supported:
             self._attr_supported_features |= ClimateEntityFeature.SWING_MODE
             self._attr_swing_modes = [AC_SWING_MODE_OFF, AC_SWING_MODE_ON]
-        # Force the native HA enums for the command panel
-        self._attr_hvac_modes = [
-            HVACMode.OFF,
-            HVACMode.AUTO,
-            HVACMode.COOL,
-            HVACMode.DRY,
-            HVACMode.HEAT,
-            HVACMode.FAN_ONLY,
-        ]
-        self._attr_fan_modes = list(AC_FAN_MAP_REVERSE.keys())
+        # hvac_modes / fan_modes derived from the device's real machMode/windSpeed
+        # enum (capability-gate, like swing above): the UI must not offer a mode
+        # the device would reject at runtime. When the enum is NOT readable (param
+        # absent or no values, e.g. a model ported without a runtime schema) we
+        # fall back to the full HA list to avoid hiding modes a device supports but
+        # does not expose -- the engine enum setter still rejects an invalid value.
+        self._attr_hvac_modes = self._derive_hvac_modes()
+        self._attr_fan_modes = self._derive_fan_modes()
         _LOGGER.debug(
             "Climate debug: initialized '%s' id=%s hvac_modes=%s fan_modes=%s temp_range=%s-%s",
-            self._attr_unique_id,
-            appliance_id,
+            redact_id(self._attr_unique_id, appliance_id),
+            redact_id(appliance_id),
             self._attr_hvac_modes,
             self._attr_fan_modes,
-            self._attr_min_temp,
-            self._attr_max_temp,
+            self.min_temp,
+            self.max_temp,
         )
+
+    def _derive_hvac_modes(self) -> list[HVACMode]:
+        """Supported HVAC modes from the device's machMode enum (OFF always present).
+
+        Falls back to the full HA list when the enum is unreadable (param absent or
+        empty values), to avoid regressing devices we cannot introspect.
+        """
+        param = settings_param(self._appliance, AC_MODE_PARAM)
+        values = param_allowed_values(param) if param is not None else []
+        if not values:
+            return list(_DEFAULT_HVAC_MODES)
+        modes = [HVACMode.OFF]  # OFF is onOffStatus, never a machMode value
+        for code in values:  # keep the device's enum order (stable)
+            name = AC_MODE_MAP.get(str(code))
+            if name is None:
+                continue
+            try:
+                mode = HVACMode(name)
+            except ValueError:
+                continue
+            if mode not in modes:
+                modes.append(mode)
+        # Only OFF resolved (enum present but none mapped): keep the full list.
+        return modes if len(modes) > 1 else list(_DEFAULT_HVAC_MODES)
+
+    def _derive_fan_modes(self) -> list[str]:
+        """Supported fan modes from the device's windSpeed enum, full list as fallback."""
+        param = settings_param(self._appliance, AC_FAN_PARAM)
+        values = param_allowed_values(param) if param is not None else []
+        if not values:
+            return list(AC_FAN_MAP_REVERSE.keys())
+        modes: list[str] = []
+        for code in values:
+            name = AC_FAN_MAP.get(str(code))
+            if name and name not in modes:
+                modes.append(name)
+        return modes or list(AC_FAN_MAP_REVERSE.keys())
+
+    @property
+    def _live_temp_range(self) -> tuple[float, float, float]:
+        """(min, max, step) read from the runtime tempSel parameter, fallback to snapshot."""
+        return param_range(self._temp_param) or self._temp_fallback_range
+
+    @property
+    def min_temp(self) -> float:
+        return self._live_temp_range[0]
+
+    @property
+    def max_temp(self) -> float:
+        return self._live_temp_range[1]
+
+    @property
+    def target_temperature_step(self) -> float:
+        return self._live_temp_range[2]
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -117,8 +189,8 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
         if str(on_off) == "0":
             _LOGGER.debug(
                 "Climate debug: hvac_mode '%s' id=%s onOffStatus=%s -> OFF",
-                self._attr_unique_id,
-                self._appliance_id,
+                redact_id(self._attr_unique_id, self._appliance_id),
+                redact_id(self._appliance_id),
                 on_off,
             )
             return HVACMode.OFF
@@ -134,8 +206,8 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
             mode = HVACMode(str(mode_str).lower())
             _LOGGER.debug(
                 "Climate debug: hvac_mode '%s' id=%s onOffStatus=%s machMode=%s -> %s",
-                self._attr_unique_id,
-                self._appliance_id,
+                redact_id(self._attr_unique_id, self._appliance_id),
+                redact_id(self._appliance_id),
                 on_off,
                 mode_val,
                 mode,
@@ -196,19 +268,16 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Send the mode change, converting the HVACMode into the exact hOn numeric code."""
         appliance = self._appliance
-        if not appliance:
+        client = self._hon_client
+        # Both checks BEFORE the try: a missing appliance/client must surface the
+        # specific key, not be rewrapped into command_error by the except below
+        # (consistent with set_temperature/fan/swing).
+        if not appliance or not client:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="appliance_or_client_unavailable",
             )
         try:
-            client = self._hon_client
-            if client is None:
-                raise HomeAssistantError(
-                    translation_domain=DOMAIN,
-                    translation_key="appliance_or_client_unavailable",
-                )
-
             if hvac_mode == HVACMode.OFF:
                 _LOGGER.debug("Climate debug: set_hvac_mode OFF -> onOffStatus=0")
                 await self._send_command_in_executor(client, appliance, {"onOffStatus": "0"})
@@ -237,8 +306,30 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
             ) from err
 
     async def async_turn_on(self) -> None:
-        """Turn on the air conditioner, putting it in COOL mode."""
-        await self.async_set_hvac_mode(HVACMode.COOL)
+        """Turn the AC back on, restoring its last mode.
+
+        HA convention for TURN_ON is to resume the previous operating state, not
+        force a fixed mode. We send only onOffStatus=1: the device keeps its stored
+        machMode, so it resumes the last mode (the old code forced COOL).
+        """
+        appliance = self._appliance
+        client = self._hon_client
+        if not appliance or not client:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="appliance_or_client_unavailable",
+            )
+        try:
+            _LOGGER.debug("Climate debug: turn_on -> onOffStatus=1 (mode preserved)")
+            await self._send_command_in_executor(client, appliance, {"onOffStatus": "1"})
+            await self._async_request_command_refresh()
+        except Exception as err:
+            _LOGGER.error("Climate: turn_on error: %s", err, exc_info=True)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_error",
+                translation_placeholders={"error": str(err)},
+            ) from err
 
     async def async_turn_off(self) -> None:
         """Turn off the air conditioner."""
@@ -258,8 +349,13 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
                 translation_key="appliance_or_client_unavailable",
             )
         try:
-            _LOGGER.debug("Climate debug: set_temperature %s -> tempSel=%s", temp, int(temp))
-            await self._send_command_in_executor(client, appliance, {"tempSel": str(int(temp))})
+            # Do NOT int()-truncate: an integer value stays a clean int string
+            # ("23"), a fractional one keeps its decimals ("23.5") and the engine
+            # Range setter validates it against the device's real step/grid
+            # (mirrors number.py; the old int() silently dropped the half degree).
+            send_value = str(int(temp)) if float(temp).is_integer() else str(temp)
+            _LOGGER.debug("Climate debug: set_temperature %s -> tempSel=%s", temp, send_value)
+            await self._send_command_in_executor(client, appliance, {"tempSel": send_value})
             await self._async_request_command_refresh()
         except Exception as err:
             _LOGGER.error("Climate: set_temperature error: %s", err, exc_info=True)

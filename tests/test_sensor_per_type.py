@@ -561,5 +561,99 @@ class LoadingPercentageBuildTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class ZeroPlaceholderFallbackTest(unittest.IsolatedAsyncioTestCase):
+    """#10: a zero/empty primary value is a placeholder MISS, so the attr_fallbacks
+    chain keeps looking (actualWeight=0 -> weight; temp=0 -> temperature)."""
+
+    async def _value(self, app_type: str, key: str, attributes: dict) -> object:
+        from custom_components.addhon import sensor
+        from custom_components.addhon.const import DOMAIN
+
+        uid = f"{app_type.lower()}-1"
+        data = {uid: {"type": app_type, "name": app_type, "attributes": attributes, "settings": {}}}
+        coordinator = FakeCoordinator(data)
+        hass = FakeHass({DOMAIN: {"entry-1": {"coordinator": coordinator}}})
+        added: list = []
+        await sensor.async_setup_entry(hass, FakeEntry(), added.extend)
+        entity = next(e for e in added if e._attr_unique_id == f"{uid}_{key}")
+        return entity.native_value
+
+    async def test_zero_actual_weight_falls_back_to_weight(self) -> None:
+        # device-WM.json shape: actualWeight=0, weight=3 -> must read 3, not 0.
+        value = await self._value("WM", "estimated_weight", {"actualWeight": 0, "weight": 3})
+        self.assertEqual(value, 3.0)
+
+    async def test_zero_actual_weight_as_string_falls_back(self) -> None:
+        value = await self._value("WM", "estimated_weight", {"actualWeight": "0", "weight": "3"})
+        self.assertEqual(value, 3.0)
+
+    async def test_real_actual_weight_wins(self) -> None:
+        value = await self._value("WM", "estimated_weight", {"actualWeight": 5, "weight": 3})
+        self.assertEqual(value, 5.0)
+
+    async def test_both_zero_stays_zero(self) -> None:
+        # Genuinely zero (no better source) -> 0.0, not None.
+        value = await self._value("WM", "estimated_weight", {"actualWeight": 0, "weight": 0})
+        self.assertEqual(value, 0.0)
+
+    async def test_only_fallback_present(self) -> None:
+        value = await self._value("WM", "estimated_weight", {"weight": 4})
+        self.assertEqual(value, 4.0)
+
+    async def test_dishwasher_zero_temp_falls_back_to_temperature(self) -> None:
+        value = await self._value("DW", "wash_temperature", {"temp": 0, "temperature": 55})
+        self.assertEqual(value, 55.0)
+
+    async def test_dishwasher_real_temp_wins(self) -> None:
+        value = await self._value("DW", "wash_temperature", {"temp": 40, "temperature": 55})
+        self.assertEqual(value, 40.0)
+
+    async def test_float_zero_string_primary_falls_back(self) -> None:
+        # A "0.0" numeric STRING is also a placeholder zero -> fall back to weight.
+        value = await self._value("WM", "estimated_weight", {"actualWeight": "0.0", "weight": 3})
+        self.assertEqual(value, 3.0)
+
+    async def test_float_zero_primary_falls_back(self) -> None:
+        # A float 0.0 primary is a placeholder zero -> fall back to weight.
+        value = await self._value("WM", "estimated_weight", {"actualWeight": 0.0, "weight": 3})
+        self.assertEqual(value, 3.0)
+
+
+class IsZeroishTest(unittest.TestCase):
+    """#10 helper contract: _is_zeroish flags placeholder zero/empty values across
+    ints, floats, numeric strings and the empty string, but NOT real values, non-numeric
+    strings or None. Direct unit test: _get_attr collapses "" -> None before the entity
+    path, so the empty-string branch is otherwise unreachable from native_value."""
+
+    def test_empty_string_is_zeroish(self) -> None:
+        from custom_components.addhon.sensor import _is_zeroish
+
+        self.assertTrue(_is_zeroish(""))
+
+    def test_numeric_zero_values_are_zeroish(self) -> None:
+        from custom_components.addhon.sensor import _is_zeroish
+
+        for value in (0, 0.0, "0", "0.0", "00", " 0 "):
+            self.assertTrue(_is_zeroish(value), value)
+
+    def test_nonzero_values_are_not_zeroish(self) -> None:
+        from custom_components.addhon.sensor import _is_zeroish
+
+        for value in (1, 3.5, "3", "0.1", -0.0001):
+            self.assertFalse(_is_zeroish(value), value)
+
+    def test_negative_zero_is_zeroish(self) -> None:
+        from custom_components.addhon.sensor import _is_zeroish
+
+        self.assertTrue(_is_zeroish(-0.0))
+
+    def test_non_numeric_and_none_are_not_zeroish(self) -> None:
+        # Non-numeric / unconvertible inputs hit the except branch -> False (not a miss).
+        from custom_components.addhon.sensor import _is_zeroish
+
+        for value in ("abc", None, [], {}, object()):
+            self.assertFalse(_is_zeroish(value), value)
+
+
 if __name__ == "__main__":
     unittest.main()

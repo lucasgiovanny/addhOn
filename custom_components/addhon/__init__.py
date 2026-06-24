@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import timedelta
+from typing import NoReturn
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -37,6 +38,7 @@ from .logging_utils import (
     reset_integration_log_level,
     silence_mqtt_noise,
 )
+from .debug_utils import redact_mac
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,6 +182,37 @@ async def _async_close_client(client) -> None:
         _LOGGER.warning("Error closing HonClient: %s", err)
 
 
+def _raise_setup_error(err: Exception) -> NoReturn:
+    """Classify a SETUP failure and raise the matching HA exception.
+
+    An auth error triggers the reauth flow (ConfigEntryAuthFailed); anything else is
+    ConfigEntryNotReady so HA retries setup later. Extracted from async_setup_entry so
+    the branch is unit-testable (a swapped branch would otherwise pass the suite). (#11)
+    """
+    from .error_codes import classify
+    from .hon_client import _requires_reauth
+
+    code = classify(err)
+    if _requires_reauth(err):
+        raise ConfigEntryAuthFailed(f"[{code.label}] Invalid hOn credentials: {err}") from err
+    raise ConfigEntryNotReady(f"[{code.label}] Unable to connect to hOn: {err}") from err
+
+
+def _raise_update_error(err: Exception) -> NoReturn:
+    """Classify a COORDINATOR update failure and raise the matching HA exception.
+
+    An auth error triggers the reauth flow (ConfigEntryAuthFailed); anything else is a
+    transient UpdateFailed (the coordinator keeps its last good snapshot and retries).
+    Extracted for unit-testing (#11)."""
+    from .error_codes import classify
+    from .hon_client import _requires_reauth
+
+    code = classify(err)
+    if _requires_reauth(err):
+        raise ConfigEntryAuthFailed(f"[{code.label}] Invalid hOn credentials: {err}") from err
+    raise UpdateFailed(f"[{code.label}] hOn update error: {err}") from err
+
+
 # "Washer-only" sensors that were mistakenly created on the tumble dryers (TD)
 # too: a tumble dryer does not use water and does not report loadingPercentage
 # (the app gates that statistic to WM/WD), so they stayed forever "unknown"
@@ -197,7 +230,10 @@ _TD_REMOVED_SUFFIXES = (
 def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove from the registry the legacy entities no longer provided by the integration.
 
-    - "Power" switch (unique_id '<id>_power'), removed in the 2.3/2.4 refactor.
+    - "Power" SWITCH (unique_id '<id>_power'), removed in the 2.3/2.4 refactor.
+      Scoped to the switch domain on purpose: the legitimate WH `power` sensor
+      (unique_id '<id>_power') and KT `current_power` sensor (unique_id
+      '<id>_current_power') both end in '_power' and must NOT be purged.
     - Washer-only sensors on the tumble dryers (TD): '<td_id>_total_water',
       '_total_energy', '_current_energy', '_current_water', '_loading_percentage'.
       Removed ONLY on devices of type TD (cross-checked with the coordinator),
@@ -227,10 +263,11 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
     for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         checked += 1
         unique_id = reg_entry.unique_id or ""
-        if unique_id.endswith("_power"):
+        domain = (reg_entry.entity_id or "").split(".", 1)[0]
+        if domain == "switch" and unique_id.endswith("_power"):
             registry.async_remove(reg_entry.entity_id)
             removed += 1
-            _LOGGER.info("Removed legacy power entity: %s", reg_entry.entity_id)
+            _LOGGER.info("Removed legacy power switch: %s", reg_entry.entity_id)
         elif unique_id in td_orphans:
             registry.async_remove(reg_entry.entity_id)
             removed += 1
@@ -247,7 +284,7 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the Haier hOn integration from a Config Entry."""
-    from .hon_client import HonClient, _requires_reauth
+    from .hon_client import HonClient
 
     # Silence by default the noise of the realtime MQTT attempts and register
     # the debug service. Done BEFORE the client setup so the logger is already at
@@ -298,9 +335,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.error("Unable to connect to hOn: %s", err)
         await _async_close_client(hon_client)
-        if _requires_reauth(err):
-            raise ConfigEntryAuthFailed(f"Invalid hOn credentials: {err}") from err
-        raise ConfigEntryNotReady(f"Unable to connect to hOn: {err}") from err
+        _raise_setup_error(err)
 
     async def async_update_data() -> dict:
         """Fetch the updated data from all the hOn devices."""
@@ -309,10 +344,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data = await hon_client.async_get_appliances_data()
             summary = [
                 {
-                    "id": appliance_id,
+                    "id": redact_mac(appliance_id),
                     "name": appliance_data.get("name"),
                     "type": appliance_data.get("type"),
-                    "mac": appliance_data.get("mac"),
+                    "mac": redact_mac(appliance_data.get("mac")),
                     "attributes": len(appliance_data.get("attributes", {}))
                     if isinstance(appliance_data.get("attributes"), dict)
                     else 0,
@@ -329,10 +364,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return data
         except Exception as err:
-            _LOGGER.debug("Coordinator debug: hOn data update failed: %s", err, exc_info=True)
-            if _requires_reauth(err):
-                raise ConfigEntryAuthFailed(f"Invalid hOn credentials: {err}") from err
-            raise UpdateFailed(f"hOn update error: {err}") from err
+            from .error_codes import classify
+
+            hon_client.last_error_code = classify(err)
+            _LOGGER.debug(
+                "Coordinator debug: hOn data update failed [%s]: %s",
+                hon_client.last_error_code.label,
+                err,
+                exc_info=True,
+            )
+            _raise_update_error(err)
 
     stored = False
     try:
@@ -354,6 +395,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             len(coordinator.data) if isinstance(coordinator.data, dict) else 0,
         )
         coordinator.hon_client = hon_client
+
+        # Realtime: wire MQTT pushes to the coordinator (#4). Without this the push
+        # channel was inert and entities only refreshed on the 60s poll. The push
+        # arrives on the awscrt thread, so the snapshot is built THERE (a coherent
+        # intra-thread read of the just-mutated appliances) and the publish is hopped
+        # onto the HA event loop via call_soon_threadsafe; async_set_updated_data
+        # publishes WITHOUT triggering a new poll (the 60s poll stays as a
+        # reconciliation safety-net). Detached on unload.
+        @callback
+        def _publish_realtime(snapshot: dict) -> None:
+            if snapshot:
+                coordinator.async_set_updated_data(snapshot)
+
+        def _on_realtime_push(_arg) -> None:
+            # Runs on the awscrt thread; must never let an exception reach it.
+            try:
+                snapshot = hon_client.build_realtime_snapshot()
+                hass.loop.call_soon_threadsafe(_publish_realtime, snapshot)
+            except Exception as err:  # pragma: no cover - defensive
+                _LOGGER.debug("Setup debug: realtime push handling failed: %s", err)
+
+        try:
+            hon_client.subscribe_updates(_on_realtime_push)
+            entry.async_on_unload(lambda: hon_client.subscribe_updates(None))
+            _LOGGER.debug("Setup debug: realtime MQTT push wired to coordinator")
+        except Exception as err:  # pragma: no cover - realtime is best-effort
+            _LOGGER.warning("Setup debug: could not wire realtime MQTT push: %s", err)
 
         # Integration version, for the diagnostics device's sw_version ("Firmware:"
         # row on the device card). Lazy import so the test stubs that import this

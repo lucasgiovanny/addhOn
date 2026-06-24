@@ -32,6 +32,7 @@ from .const import (
     DOMAIN,
     PROGRAM_PARAM_NAMES,
 )
+from .debug_utils import redact_id
 from .hon_commands import SETTINGS_COMMANDS, param_range, param_values
 
 _LOGGER = logging.getLogger(__name__)
@@ -379,7 +380,7 @@ def _appliance_block(appliance_id: str, data: Mapping) -> dict:
     _LOGGER.debug(
         "Diagnostics debug: appliance id=%s name=%s type=%s attrs=%d commands=%d "
         "unmapped_attrs=%d unmapped_params=%d",
-        appliance_id,
+        redact_id(appliance_id),
         data.get("name"),
         app_type,
         len(attributes),
@@ -405,6 +406,19 @@ def _appliance_block(appliance_id: str, data: Mapping) -> dict:
 def _coordinator(hass: HomeAssistant, entry: ConfigEntry):
     entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
     return entry_data.get("coordinator")
+
+
+def _last_error(hass: HomeAssistant, entry: ConfigEntry) -> dict | None:
+    """The last classified setup/update error code, for issue triage.
+
+    Static code+reason (no device identity), pulled from the client. None when no
+    failure has been recorded (or the client is absent, e.g. a failed setup)."""
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    client = entry_data.get("client")
+    code = getattr(client, "last_error_code", None)
+    if code is None:
+        return None
+    return {"code": code.label, "reason": code.reason_en}
 
 
 async def async_get_config_entry_diagnostics(
@@ -435,6 +449,7 @@ async def async_get_config_entry_diagnostics(
             },
             "options": dict(entry.options),
         },
+        "last_error": _last_error(hass, entry),
         "appliances": appliances,
     }
 

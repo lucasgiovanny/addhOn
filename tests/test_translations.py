@@ -76,6 +76,20 @@ class TranslationsContentTest(unittest.TestCase):
             for key in ("cannot_connect", "invalid_auth", "unknown"):
                 self.assertIn(key, errors, f"{lang}: missing error.{key}")
 
+    def test_per_code_error_strings_carry_error_code_placeholder(self) -> None:
+        # #30: the precise ADDHON-NNN codes are injected via {error_code}. Every
+        # config.error string must carry the placeholder -- including the two
+        # generic buckets (cannot_connect/invalid_auth): a ui=False code routed
+        # there by config_flow._error_base_and_code still yields a non-empty
+        # code.label (e.g. ADDHON-150/210/320), so the buckets must surface it too
+        # (greptile P2: the label was computed and passed but never shown).
+        for lang in LANGS:
+            errors = self.data[lang]["config"]["error"]
+            for key, text in errors.items():
+                self.assertIn(
+                    "{error_code}", text, f"{lang}: error.{key} must carry {{error_code}}"
+                )
+
     def test_abort_keys_present(self) -> None:
         for lang in LANGS:
             abort = self.data[lang]["config"]["abort"]
@@ -94,6 +108,25 @@ class TranslationsContentTest(unittest.TestCase):
 
     def test_en_it_have_identical_structure(self) -> None:
         self.assertEqual(_dotted_keys(self.data["en"]), _dotted_keys(self.data["it"]))
+
+    def test_no_dead_pyhon_references(self) -> None:
+        """#17 regression guard: the strangler fully removed pyhOn (native client in
+        hon_client.py), so no user-facing translation string may mention it again.
+        A case-insensitive scan of the raw files catches any re-introduction in any
+        key (service descriptions, labels, etc.), not only the ones #17 touched."""
+        for lang in LANGS:
+            offenders = [
+                line.strip()
+                for line in (TRANSLATIONS / f"{lang}.json")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if "pyhon" in line.lower()
+            ]
+            self.assertEqual(
+                [],
+                offenders,
+                f"{lang}.json must not reintroduce a dead pyhOn reference (#17): {offenders}",
+            )
 
 
 class TranslationsMatchConfigFlowTest(unittest.TestCase):

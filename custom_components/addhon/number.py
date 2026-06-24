@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import math
 
 from homeassistant.components.number import (
     NumberDeviceClass,
@@ -46,7 +47,13 @@ from .const import (
     APPLIANCE_WC,
     DOMAIN,
 )
-from .hon_commands import async_send_command, find_settings_param, param_range
+from .debug_utils import redact_id
+from .hon_commands import (
+    async_send_command,
+    find_settings_param,
+    param_range,
+    param_values,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,6 +132,89 @@ NUMBERS: dict[str, tuple[HonNumberEntityDescription, ...]] = {
 }
 
 
+def _is_enum_param(param) -> bool:
+    """True if the parameter is an enum (no numeric range), not a range parameter.
+
+    Mirrors param_range()'s internal duck-type: a range parameter exposes min/max/step,
+    an enum does not. We test this directly (instead of `param_values()` being non-empty)
+    because HonParameterRange ALSO has a `.values` property - and on a malformed range it
+    can loop forever - so `.values` cannot discriminate enum from range.
+    """
+    return not all(hasattr(param, attr) for attr in ("min", "max", "step"))
+
+
+def _numeric_enum_set(param) -> list[float] | None:
+    """Sorted distinct NUMERIC values of an enum param, or None.
+
+    Returns None if the enum has no values or ANY value is non-numeric (a mode-style
+    enum like ['low','high'] is not a sensible number control -> the caller skips it
+    rather than fabricating bounds).
+    """
+    out: list[float] = []
+    for value in param_values(param):
+        try:
+            out.append(float(str(value).replace(",", ".")))
+        except (TypeError, ValueError):
+            return None
+    if not out:
+        return None
+    return sorted(set(out))
+
+
+def _enum_step(values: list[float]) -> float:
+    """A step that TILES a discrete numeric set so every member is reachable from min.
+
+    For an integer-valued set this is the gcd of the gaps (e.g. {0,2,5} -> gcd(2,3)=1,
+    so HA offers 0..5 and the membership check rejects 1/3/4; {0,2,4} -> 2, an exact
+    tiling). For a non-integer set it falls back to the smallest gap. With NumberMode.BOX
+    the step is mostly HA-side validation; the authoritative guard is the membership
+    check in async_set_native_value.
+    """
+    if len(values) < 2:
+        return 1.0
+    diffs = [round(b - a, 6) for a, b in zip(values, values[1:])]
+    if all(float(v).is_integer() for v in values):
+        gcd = 0
+        for diff in diffs:
+            gcd = math.gcd(gcd, int(round(diff)))
+        return float(gcd) if gcd else 1.0
+    smallest = min(diffs)
+    return smallest if smallest > 0 else 1.0
+
+
+# Tolerance for matching a UI value to a discrete enum member. A value can drift from
+# the canonical member by float arithmetic (e.g. a step-0.5 set: min + n*step). ONE
+# source for both the membership guard and the snap so they can never disagree.
+_SET_EPSILON = 1e-6
+
+
+def _snap_to_set(value: float, enum_set: list[float]) -> float | None:
+    """Nearest enum member within _SET_EPSILON of `value`, else None (incl. non-float).
+
+    The caller must SERIALIZE this snapped (canonical) member, NOT the raw drifted
+    value -- otherwise a tolerated value like 2.0000001 is sent as "2.0000001" and the
+    cloud enum setter rejects it (clean_value not in the allowed set), surfacing as an
+    opaque command_error instead of being applied (CR#7)."""
+    try:
+        wanted = float(value)
+    except (TypeError, ValueError):
+        return None
+    best: float | None = None
+    best_delta = _SET_EPSILON
+    for allowed in enum_set:
+        delta = abs(wanted - allowed)
+        if delta < best_delta:
+            best, best_delta = allowed, delta
+    return best
+
+
+def _value_in_set(value: float, enum_set: list[float]) -> bool:
+    """Membership in a discrete numeric set with a small float tolerance.
+
+    Thin predicate over _snap_to_set so the guard and the snap share one tolerance."""
+    return _snap_to_set(value, enum_set) is not None
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -142,15 +232,38 @@ async def async_setup_entry(
             if found is None:
                 continue
             command_name, param = found
+            # An enum-typed setpoint (e.g. tempSelZ3 = ['0','2','5'] on some multidoor
+            # models) has no min/max/step, so a plain number would fabricate 0..100
+            # bounds and the cloud enum setter would reject every legitimate pick. Derive
+            # the discrete numeric set instead; a non-numeric enum is not a number control
+            # at all -> skip it (gate off) rather than offer fabricated bounds.
+            enum_set: list[float] | None = None
+            if _is_enum_param(param):
+                enum_set = _numeric_enum_set(param)
+                if enum_set is None:
+                    _LOGGER.debug(
+                        "Number debug: skip non-numeric enum setpoint '%s' (param=%s)",
+                        description.key,
+                        description.param,
+                    )
+                    continue
             entities.append(
-                HonNumber(coordinator, appliance_id, description, command_name, param, client)
+                HonNumber(
+                    coordinator,
+                    appliance_id,
+                    description,
+                    command_name,
+                    param,
+                    client,
+                    enum_set,
+                )
             )
             created.append(description.key)
         _LOGGER.debug(
             "Number debug: '%s' (type=%s, id=%s) -> %d/%d numbers %s",
             data.get("name", "Haier"),
             app_type,
-            appliance_id,
+            redact_id(appliance_id),
             len(created),
             len(NUMBERS.get(app_type, ())),
             created,
@@ -171,23 +284,32 @@ class HonNumber(HonBaseEntity, NumberEntity):
         command_name: str,
         param,
         client=None,
+        enum_set: list[float] | None = None,
     ) -> None:
         super().__init__(coordinator, appliance_id, client)
         self.entity_description = description
         self._command_name = command_name
         self._param = param
+        # Discrete numeric set for an enum-typed setpoint (None for a normal range):
+        # fixes the bounds AND the picked value is validated against it before sending.
+        self._enum_set = enum_set
         self._attr_translation_key = description.translation_key or description.key
         self._attr_unique_id = f"{appliance_id}_{description.key}"
         # Range snapshot used as fallback; the live bounds are re-read from the
-        # parameter on each access (the engine rules can change them at runtime).
-        self._fallback_range = param_range(param) or (
-            description.fallback_min,
-            description.fallback_max,
-            description.fallback_step,
-        )
+        # parameter on each access (the engine rules can change them at runtime). For an
+        # enum the "range" is derived from the discrete set (min/max + a tiling step),
+        # never the fabricated 0..100 default.
+        if enum_set:
+            self._fallback_range = (enum_set[0], enum_set[-1], _enum_step(enum_set))
+        else:
+            self._fallback_range = param_range(param) or (
+                description.fallback_min,
+                description.fallback_max,
+                description.fallback_step,
+            )
         _LOGGER.debug(
             "Number debug: init '%s' id=%s param=%s cmd=%s range=%s",
-            self._attr_unique_id, appliance_id, description.param, command_name, self._live_range,
+            redact_id(self._attr_unique_id, appliance_id), redact_id(appliance_id), description.param, command_name, self._live_range,
         )
 
     @property
@@ -229,6 +351,26 @@ class HonNumber(HonBaseEntity, NumberEntity):
                 translation_domain=DOMAIN,
                 translation_key="appliance_or_client_unavailable",
             )
+        # Enum setpoint: reject a value outside the discrete set up front (clear message,
+        # no pointless cloud round-trip) instead of letting the cloud enum setter raise an
+        # opaque ValueError that would surface as a generic command_error.
+        if self._enum_set is not None:
+            snapped = _snap_to_set(value, self._enum_set)
+            if snapped is None:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="invalid_setpoint",
+                    translation_placeholders={
+                        "value": str(value),  # the original drifted value, for the user
+                        "allowed": ", ".join(
+                            str(int(v)) if float(v).is_integer() else str(v)
+                            for v in self._enum_set
+                        ),
+                    },
+                )
+            # Snap to the canonical member so the serialize below emits the exact enum
+            # string ("2", "10.5"), not the drifted "2.0000001" the cloud would reject.
+            value = snapped
         # ALWAYS send a string: the client's str_to_float does `int(string)` and catches
         # only ValueError, so a fractional float (5.5) would be truncated to 5
         # WITHOUT error. The string "5.5" instead stays 5.5 and the range setter
@@ -238,7 +380,7 @@ class HonNumber(HonBaseEntity, NumberEntity):
         try:
             _LOGGER.debug(
                 "Number debug: set %s=%s (cmd=%s) id=%s",
-                param, send_value, self._command_name, self._appliance_id,
+                param, send_value, self._command_name, redact_id(self._appliance_id),
             )
             await async_send_command(
                 self.hass, client, appliance, self._command_name, {param: send_value}

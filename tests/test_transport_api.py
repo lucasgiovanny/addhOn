@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import re
 import sys
 import types
@@ -397,6 +398,27 @@ class ApiHardeningTest(unittest.TestCase):
                 )
                 self.assertEqual(got, {})
 
+    def test_load_commands_failure_redacts_identity_in_log(self) -> None:
+        # #33: both failure branches log the raw cloud response at ERROR (never
+        # gated); identity in the body must be redacted.
+        mac = "AA:BB:CC:DD:EE:FF"
+        logger = "custom_components.addhon.client.transport.api"
+        for body in (
+            {"macAddress": mac, "payload": {}},                   # invalid-payload branch
+            {"macAddress": mac, "payload": {"resultCode": "1"}},  # resultCode != 0 branch
+            {"meta": {"macAddress": mac}, "payload": {}},         # nested mac (recursion)
+            {"payload": {"resultCode": "1", "dev": {"macAddress": mac}}},  # nested mac
+        ):
+            with self.subTest(body=body):
+                with self.assertLogs(logger, level="ERROR") as cm:
+                    got = _run(
+                        _call(FakeConnection(copy.deepcopy(body))).load_commands(FakeAppliance())
+                    )
+                self.assertEqual(got, {})
+                blob = "\n".join(cm.output)
+                self.assertNotIn(mac, blob)
+                self.assertIn("***", blob)
+
     def test_commands_result_code_nonzero(self) -> None:
         body = {"payload": {"resultCode": "1", "settings": {}}}
         self.assertEqual(_oracle_commands(copy.deepcopy(body)), {})
@@ -524,6 +546,25 @@ class SendCommandTest(unittest.TestCase):
                 ok = _run(_call(conn).send_command(FakeAppliance(), "x", {}, {}))
                 self.assertFalse(ok)
 
+    def test_send_command_failure_redacts_identity_in_logs(self) -> None:
+        # #23: on failure the request payload (macAddress, transactionId=MAC,
+        # device.mobileId) must NOT be logged in cleartext; only command+resultCode
+        # at ERROR, the redacted payload at DEBUG.
+        self._patch_clock("2026-06-18T12:34:56.789012")
+        conn = FakeConnection({"payload": {"resultCode": "7"}}, mobile_id="SECRET_MOBILE")
+        app = FakeAppliance()  # mac_address = "AA:BB:CC:DD:EE:FF"
+        logger = "custom_components.addhon.client.transport.api"
+        with self.assertLogs(logger, level="DEBUG") as cm:
+            ok = _run(_call(conn).send_command(app, "setParameters", {"tempSelZ1": 4}, {}))
+        self.assertFalse(ok)
+        blob = "\n".join(cm.output)
+        self.assertNotIn(app.mac_address, blob)   # mac (also covers transactionId=<mac>_<ts>)
+        self.assertNotIn("SECRET_MOBILE", blob)   # device.mobileId (nested)
+        errors = "\n".join(r.getMessage() for r in cm.records if r.levelno == logging.ERROR)
+        self.assertIn("setParameters", errors)    # command in the ERROR line
+        self.assertIn("7", errors)                # resultCode in the ERROR line
+        self.assertIn("***", blob)                # redaction marker
+
 
 class CommandTimestampTest(unittest.TestCase):
     def test_format_millis_and_z(self) -> None:
@@ -624,6 +665,50 @@ class ApiIntentionalNarrowingTest(unittest.TestCase):
         self.assertEqual(_oracle_aws_token(copy.deepcopy(body)), 123)
         got = _run(_call(FakeConnection(body)).load_aws_token())
         self.assertEqual(got, "")
+
+
+_NO_CT = object()
+
+
+class _StrictResponse(FakeResponse):
+    """json() requires content_type=None to be passed explicitly; otherwise it
+    raises, simulating aiohttp's ContentTypeError on a wrong Content-Type."""
+
+    async def json(self, content_type=_NO_CT):
+        if content_type is _NO_CT:
+            raise AssertionError("response.json() called without content_type=None")
+        return self._body
+
+
+class _StrictConnection(FakeConnection):
+    def _ctx(self, method, url, kwargs):
+        return _ReqCtx(self, method, url, kwargs, _StrictResponse(self._body, self._text))
+
+
+class ContentTypeTest(unittest.TestCase):
+    """#8: every api.py call-site must pass content_type=None (the cloud sometimes
+    returns valid JSON with a non-JSON Content-Type)."""
+
+    def test_load_appliances_passes_content_type_none(self) -> None:
+        body = {"modules": {"applianceList": {"payload": {"appliances": [{"a": 1}]}}}}
+        # Would raise if load_appliances called .json() without content_type=None.
+        _run(_call(_StrictConnection(body)).load_appliances())
+
+    def test_load_commands_passes_content_type_none(self) -> None:
+        body = {"payload": {"resultCode": "0"}}
+        app = FakeAppliance(eepromId="EE", fwVersion="1.2", series="S")
+        _run(_call(_StrictConnection(body)).load_commands(app))
+
+    def test_send_command_passes_content_type_none(self) -> None:
+        # Write path: the cloud's non-JSON Content-Type response motivated #8.
+        conn = _StrictConnection({"payload": {"resultCode": "0"}})
+        _run(_call(conn).send_command(FakeAppliance(), "setParameters", {"x": 1}, {}))
+
+    def test_load_attributes_passes_content_type_none(self) -> None:
+        _run(_call(_StrictConnection({})).load_attributes(FakeAppliance()))
+
+    def test_load_statistics_passes_content_type_none(self) -> None:
+        _run(_call(_StrictConnection({})).load_statistics(FakeAppliance()))
 
 
 if __name__ == "__main__":
