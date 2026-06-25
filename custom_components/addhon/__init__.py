@@ -182,6 +182,25 @@ async def _async_close_client(client) -> None:
         _LOGGER.warning("Error closing HonClient: %s", err)
 
 
+@callback
+def _persist_refresh_token(hass: HomeAssistant, entry: ConfigEntry, hon_client) -> None:
+    """Copy a rotated refresh token into entry.data, once, only on a real change.
+
+    Single source of truth for the write rule, used by BOTH the initial setup and the
+    coordinator update path, so a token rotated later (a runtime `auth.refresh()` or a
+    background `_async_reauth()`) still reaches `entry.data` and survives a restart -- not
+    just the first login. The non-empty AND changed guard reads `entry.data` live each
+    call, so it never wipes a good token and never writes on an unchanged poll (no entry
+    churn). HA-loop only (`@callback`). NEVER logs the token value."""
+    new_token = hon_client.refresh_token
+    stored = entry.data.get("refresh_token", "")
+    if new_token and new_token != stored:
+        _LOGGER.debug("Persisting rotated refresh token")
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, "refresh_token": new_token}
+        )
+
+
 def _raise_setup_error(err: Exception) -> NoReturn:
     """Classify a SETUP failure and raise the matching HA exception.
 
@@ -305,6 +324,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # FIX: the key saved by the config_flow is "email", not "username"
     email = entry.data.get("email")
     password = entry.data.get("password")
+    # Persisted refresh token (added for 2FA): runtime refreshes instead of doing a
+    # full login, so an account with email-OTP is not re-challenged on every restart.
+    # "" on legacy entries / non-2FA accounts -> a normal login as before.
+    refresh_token = entry.data.get("refresh_token", "")
 
     _LOGGER.debug(
         "Setup debug: starting setup entry=%s title=%s email=%s platforms=%s scan_interval=%ss",
@@ -322,7 +345,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         return False
 
-    hon_client = HonClient(email=email, password=password)
+    hon_client = HonClient(email=email, password=password, refresh_token=refresh_token)
 
     # Initial client setup in executor (does not block HA's event loop)
     try:
@@ -333,15 +356,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _async_close_client(hon_client)
         raise
     except Exception as err:
+        # A background setup cannot prompt for a 2FA code: an MFA challenge (carried
+        # MFA_REQUIRED -> requires_reauth) is routed by _raise_setup_error to
+        # ConfigEntryAuthFailed -> the reauth flow, which CAN prompt for the OTP.
         _LOGGER.error("Unable to connect to hOn: %s", err)
         await _async_close_client(hon_client)
         _raise_setup_error(err)
+
+    # Persist a rotated refresh token so the next restart keeps skipping the full login
+    # (and the 2FA prompt). Single helper, change-guarded (see _persist_refresh_token).
+    _persist_refresh_token(hass, entry, hon_client)
 
     async def async_update_data() -> dict:
         """Fetch the updated data from all the hOn devices."""
         try:
             _LOGGER.debug("Coordinator debug: starting hOn data update")
             data = await hon_client.async_get_appliances_data()
+            # A runtime token refresh / background re-auth may have rotated the refresh
+            # token during this fetch; persist it (only on a real change) so it survives a
+            # restart -- not just the initial setup.
+            _persist_refresh_token(hass, entry, hon_client)
             summary = [
                 {
                     "id": redact_mac(appliance_id),
@@ -367,6 +401,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .error_codes import classify
 
             hon_client.last_error_code = classify(err)
+            # Attribute the phase to THIS update failure (a carried HonCodedError.phase, or
+            # the live auth phase if a re-auth was in flight) so diagnostics never shows a
+            # phase/mfa-summary left over from the last login event.
+            hon_client.last_error_phase = (
+                getattr(err, "phase", None)
+                or getattr(hon_client._hon_instance, "auth_phase", "")
+                or None
+            )
+            hon_client.last_mfa_summary = None
             _LOGGER.debug(
                 "Coordinator debug: hOn data update failed [%s]: %s",
                 hon_client.last_error_code.label,

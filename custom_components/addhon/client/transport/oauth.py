@@ -11,14 +11,23 @@ orchestration that uses these pieces lives in the session/auth.
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 import secrets
+from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit, urlunsplit
 
 # Endpoints/identifiers of the hOn cloud.
 AUTH_API = "https://account2.hon-smarthome.com"
+_AUTH_HOST = urlsplit(AUTH_API).netloc
+# Schemes aiohttp's TCPConnector will actually connect (allowed_protocol_schema_set):
+# an off-host URL with one of these must be re-pinned, or the login fetch leaves the
+# auth host. Other schemes (hon://, javascript:, data:, file:, ftp:) are refused by
+# aiohttp, so they are left verbatim -- pinning them would WRONGLY turn a refused
+# scheme into a fetchable on-host URL.
+_FETCHABLE_SCHEMES = ("http", "https", "ws", "wss", "tcp")
 APP = "hon"
 CLIENT_ID = (
     "3MVG9QDx8IX8nP5T2Ha8ofvlmjLZl5L_gvfbT9."
@@ -70,6 +79,44 @@ def extract_login_url(text: str) -> str | None:
     return url
 
 
+def absolutize(href: str) -> str:
+    """Resolve a scraped login href against the auth host.
+
+    The login pages return token / ProgressiveLogin hrefs that may be RELATIVE
+    ('/finaltok', 'apex/x'), already ABSOLUTE ('https://account2.../x'), or a
+    custom-scheme redirect ('hon://...'). The aiohttp ClientSession has no
+    `base_url`, so a relative href must be made absolute before it is fetched
+    (a bare relative URL raises InvalidUrlClientError). This is the single seam
+    that unifies the URL handling of the login flow.
+
+    `urljoin(AUTH_API, href)` is byte-identical to the historical `AUTH_API + href`
+    concat on every href the concat resolved correctly -- including the live
+    relative token path AND the empty/query-only href the progressive regex can
+    yield -- and fixes the relative-vs-absolute mismatch (a relative href that
+    was previously fetched bare, and an absolute href that was previously concat-
+    corrupted).
+
+    Security: the login flow never legitimately leaves the auth host, so the result
+    is PINNED to it. The check is on the RESOLVED host (not the raw text), so it
+    cannot be slipped by a protocol-relative '//host', an injected absolute URL, a
+    whitespace/control-char bypass (' //evil', '/\\t/evil'), a scheme-mismatch empty
+    authority ('http:///evil'), or a non-http but still-fetchable scheme ('ws://evil')
+    -- any off-host result whose scheme aiohttp would connect is re-pinned to AUTH_API
+    with the foreign host demoted to a path segment. Schemes aiohttp refuses (e.g. the
+    'hon://' redirect) are returned verbatim.
+    """
+    resolved = urljoin(AUTH_API, href)
+    parts = urlsplit(resolved)
+    if parts.scheme in _FETCHABLE_SCHEMES and parts.netloc != _AUTH_HOST:
+        # Off-host http(s) result: rebuild on the auth host, demoting the foreign
+        # authority+path to a single path. Rebuild with urlunsplit (fixed scheme+host)
+        # rather than re-joining a "/"+netloc string -- the latter re-promotes an empty
+        # netloc ('http:///evil' -> '//evil' -> https://evil) straight back off-host.
+        demoted = "/" + (parts.netloc + parts.path).lstrip("/")
+        resolved = urlunsplit(("https", _AUTH_HOST, demoted, parts.query, parts.fragment))
+    return resolved
+
+
 def generate_nonce() -> str:
     """Nonce in 8-4-4-4-12 format."""
     nonce = secrets.token_hex(16)
@@ -109,3 +156,186 @@ def build_login_payload(
     body = "&".join(f"{k}={quote(json.dumps(v))}" for k, v in data.items())
     params: dict[str, Any] = {"r": 3, "other.LightningLoginCustom.login": 1}
     return body, params
+
+
+# --- Two-factor (email OTP) on the Salesforce ProgressiveLogin page -----------
+# Reverse-engineered + validated live (2026-06-25): when 2FA email is enabled, the
+# post-login `/apex/ProgressiveLogin` page is the OTP step. It drives Salesforce JS
+# Remoting (@RemoteAction on `ProgressiveLoginController`) for send/verify + a VF
+# form postback to finish. These pure helpers scrape that page and build the calls;
+# the HTTP orchestration lives in `auth.HonAuth`. Standard Salesforce web shapes,
+# NOT copied from the hOn app (the app uses AWS Cognito, a different mechanism).
+APEXREMOTE_PATH = "/apexremote"
+_REMOTE_ACTION_CLASS = "ProgressiveLoginController"
+_HIDDEN_INPUT_RE = re.compile(r"<input\b[^>]*type=\"hidden\"[^>]*>", re.I)
+_ATTR_RE = re.compile(r"(\w[\w:.\-]*)\s*=\s*\"([^\"]*)\"")
+_JSFCLJS_RE = re.compile(r"jsfcljs\(document\.forms\['([^']+)'\],'([^']+)'")
+_VID_RE = re.compile(r'"vid":"([^"]+)"')
+# Tolerant of quote style / spaces around '=' so a VF template tweak does not silently
+# turn the OTP page back into a non-detected "no href" failure.
+_EMAILCODE_RE = re.compile(r"""name\s*=\s*["']emailcode["']""", re.I)
+
+
+@dataclass(frozen=True)
+class MfaContext:
+    """Opaque-but-redaction-aware state to resume an email-OTP challenge.
+
+    Carries the per-method JS-Remoting credentials (csrf + signed authorization)
+    scraped from the page, the shared ViewState id and the VF form fields needed for
+    the finish postback. `__str__`/`__repr__` mask the secrets so a stray log line
+    cannot leak them (the OTP code itself is never stored here)."""
+
+    challenge_kind: str  # "email" (the only factor reachable on the Salesforce path)
+    can_resend: bool
+    host: str  # https://<host> for the /apexremote and finish POSTs
+    referer: str  # the ProgressiveLogin page URL (Referer header)
+    vid: str  # ViewState id, shared by every remoting ctx
+    verify: dict = field(repr=False)  # {method, csrf, authorization, ns, ver}
+    resend: dict = field(repr=False)
+    vf_action: str  # absolute URL of the ProgressiveLogin VF form
+    vf_hidden: dict = field(repr=False)  # the ViewState hidden inputs (echoed back)
+    finish_marker: str  # the commandLink name fired by finishFlowCall/jsfcljs
+    expid: str  # email branding (Candy/Haier/.../SmartHome)
+    locale: str | None
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"MfaContext(kind={self.challenge_kind}, can_resend={self.can_resend})"
+
+    __repr__ = __str__
+
+
+def _remote_descriptor(page: str, method: str) -> dict[str, Any]:
+    """Extract one @RemoteAction descriptor ({csrf, authorization, ns, ver}) by name.
+
+    Defensive: a malformed match (bad JSON, a non-dict payload, or a non-numeric
+    `ver` if Salesforce changes the descriptor shape) yields the empty/default
+    descriptor (no csrf/authorization) so detect_progressive_otp falls back to None
+    instead of raising a hard login failure."""
+    match = re.search(r'\{"name":"' + re.escape(method) + r'"[^{}]*\}', page)
+    try:
+        data = json.loads(match.group(0)) if match else {}
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        ver = int(float(data.get("ver", 45)))
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads (non-strict) accepts Infinity / 1e400, which
+        # int(float(...)) cannot convert -- keep it inert like the other malformed cases.
+        ver = 45
+    return {
+        "method": method,
+        "ns": data.get("ns", ""),
+        "ver": ver,
+        "csrf": data.get("csrf", ""),
+        "authorization": data.get("authorization", ""),
+    }
+
+
+def _brand_from_url(url: str) -> str:
+    """The expid branding the OTP email; mirrors the page's own fallback to SmartHome."""
+    low = url.lower()
+    for brand in ("Candy", "Haier", "Hoover", "Rosieres", "SmartHome"):
+        if brand.lower() in low:
+            return brand
+    return "SmartHome"
+
+
+def is_progressive_otp(page: str) -> bool:
+    """True if the ProgressiveLogin page is the 2FA email-OTP step.
+
+    Requires ALL the markers so a privacy-only or plain redirect ProgressiveLogin
+    page (no OTP) is NOT mistaken for a challenge (the detector stays inert)."""
+    low = page.lower()
+    return (
+        "progressivelogincontroller" in low
+        and "verifyemailotp" in low
+        and bool(_EMAILCODE_RE.search(low))
+    )
+
+
+def detect_progressive_otp(page: str, page_url: str) -> MfaContext | None:
+    """Build an :class:`MfaContext` if `page` is the OTP step, else None.
+
+    Returns None on anything ambiguous (no OTP markers, or the remoting credentials
+    are missing) so the caller falls back to its existing behaviour -- the detection
+    is purely additive and inert on non-2FA accounts."""
+    if not is_progressive_otp(page):
+        return None
+    verify = _remote_descriptor(page, "verifyEmailOTP")
+    if not verify["csrf"] or not verify["authorization"]:
+        return None  # cannot drive the verify call -> not a usable challenge
+    resend = _remote_descriptor(page, "resendEmailCode")
+    vid_match = _VID_RE.search(page)
+    if vid_match is None:
+        # The ViewState id is sent in every /apexremote ctx ("vid"); without it the
+        # remoting call would be rejected with a confusing error. Stay inert (like the
+        # csrf/authorization guard) so the caller falls back to the pre-MFA path.
+        return None
+    hidden: dict[str, str] = {}
+    for tag in _HIDDEN_INPUT_RE.findall(page):
+        attrs = {k.lower(): html.unescape(v) for k, v in _ATTR_RE.findall(tag)}
+        if "name" in attrs:
+            hidden[attrs["name"]] = attrs.get("value", "")
+    jsf = _JSFCLJS_RE.search(page)
+    form_name = jsf.group(1) if jsf else "ProgressiveLogin:j_id8"
+    finish_marker = jsf.group(2).split(",")[0] if jsf else "ProgressiveLogin:j_id8:j_id12"
+    form_open = re.search(r'<form\b[^>]*name="' + re.escape(form_name) + r'"[^>]*>', page)
+    action = "/ProgressiveLogin"
+    if form_open:
+        action = dict(_ATTR_RE.findall(form_open.group(0))).get("action", action)
+    query = parse_qs(urlsplit(page_url).query)
+    # Fall back to the auth host if the page URL is relative (no netloc).
+    netloc = urlsplit(page_url).netloc or urlsplit(AUTH_API).netloc
+    host = f"https://{netloc}"
+    return MfaContext(
+        challenge_kind="email",
+        can_resend=bool(resend["csrf"]),
+        host=host,
+        referer=page_url,
+        vid=vid_match.group(1),
+        verify=verify,
+        resend=resend,
+        vf_action=urljoin(f"{host}/", action),
+        vf_hidden=hidden,
+        finish_marker=finish_marker,
+        expid=_brand_from_url(page_url),
+        locale=query.get("locale", [None])[0],
+    )
+
+
+def build_remoting_payload(vid: str, descriptor: dict, data: list, tid: int) -> dict:
+    """JSON body for a Salesforce JS-Remoting `/apexremote` POST."""
+    return {
+        "action": _REMOTE_ACTION_CLASS,
+        "method": descriptor["method"],
+        "data": data,
+        "type": "rpc",
+        "tid": tid,
+        "ctx": {
+            "csrf": descriptor["csrf"],
+            "vid": vid,
+            "ns": descriptor["ns"],
+            "ver": descriptor["ver"],
+            "authorization": descriptor["authorization"],
+        },
+    }
+
+
+def build_finish_body(context: MfaContext) -> dict[str, str]:
+    """Form-urlencoded body of the VF finish postback (ViewState + commandLink)."""
+    body = dict(context.vf_hidden)
+    body[context.finish_marker] = context.finish_marker
+    return body
+
+
+def parse_remoting_result(text: str) -> dict[str, Any]:
+    """First entry of a JS-Remoting JSON response (`[{...}]`), or {} if unparseable."""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if isinstance(parsed, list):
+        return parsed[0] if parsed and isinstance(parsed[0], dict) else {}
+    return parsed if isinstance(parsed, dict) else {}

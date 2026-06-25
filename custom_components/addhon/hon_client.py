@@ -10,6 +10,7 @@ from typing import Any
 from .debug_utils import debug_key_sample, redact_email, redact_id, redact_mac
 from .error_codes import (
     APPLIANCE_LOAD_FAILED,
+    MFA_REQUIRED,
     UNKNOWN,
     HonCodedError,
     HonErrorCode,
@@ -296,14 +297,28 @@ class HonClient:
     _RUN_TIMEOUT = 60
     _CANCEL_TIMEOUT = 5
 
-    def __init__(self, email: str, password: str, validation: bool = False) -> None:
+    def __init__(
+        self,
+        email: str,
+        password: str,
+        validation: bool = False,
+        refresh_token: str = "",
+    ) -> None:
         self._email = email
         self._password = password
+        # Persisted OAuth refresh token: lets runtime setup refresh instead of doing a
+        # full login, which is what skips the 2FA prompt on every restart (an account
+        # with email-OTP would otherwise re-challenge each time). "" = full login.
+        self._refresh_token = refresh_token
         # validation=True (config-flow): authenticate + count appliances only, no MQTT
         # and no per-appliance loads (issue #30). Runtime keeps the full setup.
         self._validation = validation
         # Last classified error code (for the downloadable diagnostics / log parity).
         self.last_error_code: Any = None
+        # Login phase reached at the last failure ("authenticate"/"mfa_verify"/...), and a
+        # leak-proof 2FA summary, surfaced in the downloadable diagnostics for triage.
+        self.last_error_phase: str | None = None
+        self.last_mfa_summary: dict | None = None
         self._hon_instance = None
         self._api = None
         self._hon_loop: asyncio.AbstractEventLoop | None = None
@@ -500,8 +515,15 @@ class HonClient:
         """
         # The hOn session comes from the native factory (client/).
         from .client.factory import create_session
+        from .client.transport.auth import MFAChallengeRequired
 
         with self._lifecycle_lock:
+            # Fresh attempt: clear any stale failure record so (a) a success leaves the
+            # diagnostics last_error empty, and (b) a new failure is never shown with a
+            # phase/mfa-summary left over from a prior attempt (the three move together).
+            self.last_error_code = None
+            self.last_error_phase = None
+            self.last_mfa_summary = None
             try:
                 if self._hon_loop is None or not self._hon_loop.is_running():
                     self._start_hon_loop()
@@ -511,6 +533,7 @@ class HonClient:
                     self._password,
                     enable_mqtt=not self._validation,
                     minimal=self._validation,
+                    refresh_token=self._refresh_token,
                 )
                 _LOGGER.debug("Hon instance created")
 
@@ -522,10 +545,32 @@ class HonClient:
                 # without this the MQTT push is a permanent no-op after a re-auth (#20).
                 if self._notify_function is not None:
                     self._hon_instance.subscribe_updates(self._notify_function)
+                # Sync the SEED to the live (possibly just-minted/rotated) token so a later
+                # _async_reauth()/restart re-seeds the new session from the current token
+                # instead of the stale one -> no needless full login / 2FA re-prompt; also
+                # keeps diagnostics had_refresh_token accurate. (#1)
+                self._refresh_token = self.refresh_token or self._refresh_token
+            except MFAChallengeRequired as err:
+                # 2FA email-OTP challenge: KEEP the dedicated loop + half-open session
+                # alive so submit_mfa_code_sync() can resume on the SAME session. Do NOT
+                # _close_sync(). The interactive config flow drives the resume; a
+                # background caller (async_setup_entry) closes the client itself and
+                # routes to the reauth flow. last_error_code set for diagnostics parity.
+                self.last_error_code = MFA_REQUIRED
+                self.last_error_phase = "mfa_challenge"
+                ctx = getattr(err, "context", None)
+                self.last_mfa_summary = {
+                    "challenge_kind": getattr(ctx, "challenge_kind", None),
+                    "can_resend": getattr(ctx, "can_resend", None),
+                }
+                _LOGGER.info("hOn login needs 2FA verification [%s]", MFA_REQUIRED.label)
+                raise
             except Exception as err:
-                self.last_error_code = classify(err)
+                self.last_error_phase = getattr(self._hon_instance, "auth_phase", "") or None
+                self.last_error_code = classify(err, phase=self.last_error_phase)
                 _LOGGER.error(
-                    "hOn setup failed [%s]: %s", self.last_error_code.label, err
+                    "hOn setup failed [%s] (phase=%s): %s",
+                    self.last_error_code.label, self.last_error_phase or "?", err,
                 )
                 self._close_sync()
                 raise
@@ -534,6 +579,56 @@ class HonClient:
         """Verify that the setup completed successfully."""
         if self._api is None:
             raise RuntimeError("setup_sync() did not complete the hOn login")
+
+    # -- Two-factor (email OTP) resume -----------------------------------------
+
+    @property
+    def refresh_token(self) -> str:
+        """The current OAuth refresh token after a successful login (for persistence)."""
+        hon = self._hon_instance
+        return getattr(hon, "refresh_token", "") if hon is not None else ""
+
+    def submit_mfa_code_sync(self, context: Any, code: str) -> None:
+        """Resume a paused 2FA login with the user's OTP, on the dedicated loop.
+
+        Runs setup to completion on the SAME (kept-alive) session. Call in executor."""
+        with self._lifecycle_lock:
+            if self._hon_instance is None:
+                raise RuntimeError("no pending MFA challenge")
+            try:
+                self._api = self._run_on_hon_loop(
+                    self._hon_instance.submit_mfa_code(context, code)
+                )
+            except Exception as err:
+                # Record the precise code/phase so the form + diagnostics reflect the real
+                # cause (wrong code vs service error vs token-after-verify), not a stale one.
+                self.last_error_phase = getattr(self._hon_instance, "auth_phase", "") or "mfa_verify"
+                self.last_error_code = classify(err, phase=self.last_error_phase)
+                raise
+            # 2FA resolved: clear the challenge record set by setup_sync's MFA branch so a
+            # later (unrelated) failure is never shown with the stale 2FA phase/summary.
+            self.last_error_code = None
+            self.last_error_phase = None
+            self.last_mfa_summary = None
+            # Sync the seed to the token just minted by the 2FA flow so a later reauth/
+            # restart does not re-trigger the OTP (#1).
+            self._refresh_token = self.refresh_token or self._refresh_token
+            _LOGGER.info("hOn 2FA verification succeeded for %s", redact_email(self._email))
+            # Re-apply the realtime notify callback to the now-completed session (#20).
+            if self._notify_function is not None:
+                self._hon_instance.subscribe_updates(self._notify_function)
+
+    def resend_mfa_code_sync(self, context: Any) -> None:
+        """(Re)send the email OTP for a pending challenge, on the dedicated loop."""
+        with self._lifecycle_lock:
+            if self._hon_instance is None:
+                raise RuntimeError("no pending MFA challenge")
+            try:
+                self._run_on_hon_loop(self._hon_instance.resend_mfa_code(context))
+            except Exception as err:
+                self.last_error_phase = "mfa_send"
+                self.last_error_code = classify(err, phase=self.last_error_phase)
+                raise
 
     def run_command_sync(self, coro) -> Any:
         """Run a client coroutine (e.g. command.send()) on the dedicated loop.
@@ -641,7 +736,15 @@ class HonClient:
             _LOGGER.info("hOn re-authentication succeeded")
             return True
         except Exception as err:
+            # A background re-auth cannot prompt for a 2FA code: setup_sync keeps the
+            # half-open session alive on MFAChallengeRequired (for the interactive
+            # resume that does not exist here), so close it to avoid leaking the
+            # loop/session. The failure routes to the reauth flow via the caller.
             _LOGGER.error("hOn re-authentication failed: %s", err)
+            try:
+                await loop.run_in_executor(None, self._close_sync)
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                _LOGGER.debug("hOn re-auth cleanup close failed", exc_info=True)
             return False
 
     # -- Realtime push (MQTT) --------------------------------------------------
@@ -873,6 +976,13 @@ class HonClient:
                 )
 
             _LOGGER.info("Loaded %d hOn devices with data", len(data))
+            # Keep the SEED current with a mid-life token rotation (a runtime auth.refresh()
+            # during this poll rotates the live token but not the seed): without this, an
+            # _async_reauth() that fires after a rotation would re-seed the new session from
+            # a consumed token and fall back to a full login / 2FA re-prompt. The restart
+            # path is already covered by entry.data persistence; this covers in-process
+            # reauth after a rotation. (#1 residual)
+            self._refresh_token = self.refresh_token or self._refresh_token
             # From now on the poll is resilient (skip a failed appliance, keep the rest):
             # all entities have been created from this first complete snapshot.
             self._first_poll_done = True
