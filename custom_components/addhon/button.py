@@ -17,10 +17,12 @@ from .const import (
     CONF_ENABLE_MQTT_DEBUG,
     DOMAIN,
     PROGRAM_PARAM_NAMES,
+    PROGRAM_PENDING_OPTIONS,
     PROGRAM_PENDING_STORE,
 )
 from .debug_utils import command_names, param_snapshot, redact_id, redact_store
 from .logging_utils import reset_integration_log_level, silence_mqtt_noise
+from .program_options import apply_pending_options
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,11 +133,21 @@ class HonProgramCommandButton(HonBaseEntity, ButtonEntity):
             if self._command_name == "startProgram"
             else None
         )
+        # (a) Snapshot-copy the buffered program OPTIONS (#35): only startProgram carries
+        # them; stopProgram never touches the option buffer. Applied AFTER the program
+        # swap, BELOW. A copy so a concurrent buffer write cannot mutate it mid-send.
+        options_store = self._coordinator_store(PROGRAM_PENDING_OPTIONS)
+        pending_options = (
+            dict(options_store.get(self._appliance_id) or {})
+            if self._command_name == "startProgram"
+            else {}
+        )
         _LOGGER.debug(
-            "Button debug: press '%s' id=%s pending_program=%s store=%s commands=%s",
+            "Button debug: press '%s' id=%s pending_program=%s options=%s store=%s commands=%s",
             self._command_name,
             redact_id(self._appliance_id),
             pending_program,
+            sorted(pending_options),
             redact_store(store),
             command_names(appliance),
         )
@@ -199,6 +211,21 @@ class HonProgramCommandButton(HonBaseEntity, ButtonEntity):
                         )
                         command = refreshed
                         params = getattr(command, "parameters", {})
+                    # (b) Apply the buffered program options to the POST-SWAP command
+                    # (#35): selecting the program swaps the active startProgram command,
+                    # so the options must land on the new one. apply_pending_options skips
+                    # an option the selected program does not expose (debug). The engine
+                    # setter validates each value; a bad value raises BEFORE send() below,
+                    # so nothing is transmitted and the option buffer is kept for retry
+                    # (the in-memory param mutation is overwritten on the next refresh).
+                    if pending_options:
+                        applied = apply_pending_options(params, pending_options)
+                        _LOGGER.debug(
+                            "Button debug: applied %d/%d program options %s",
+                            len(applied),
+                            len(pending_options),
+                            applied,
+                        )
                     for name, value in self._command_parameters.items():
                         if name in params:
                             previous = getattr(params[name], "value", None)
@@ -234,6 +261,26 @@ class HonProgramCommandButton(HonBaseEntity, ButtonEntity):
                 _LOGGER.debug(
                     "Button debug: pending program consumed and removed, store=%s",
                     redact_store(store),
+                )
+            # (c) Clear the buffered options on a successful startProgram send (#35).
+            # Gated on the command name, NOT on pending_program: options are cleared even
+            # when only options changed and no program was re-selected. Clear ONLY the keys
+            # we actually SENT (the pre-send snapshot) whose current store value still equals
+            # what we sent, so an option the user (re)wrote AFTER the snapshot but before this
+            # clear survives for the next Start (PR #38 / CodeRabbit). Pop the appliance entry
+            # only once empty. On a failure the try aborts before here -> the whole buffer is
+            # kept and a retry re-sends it.
+            if self._command_name == "startProgram":
+                current = options_store.get(self._appliance_id)
+                if isinstance(current, dict):
+                    for opt_name, opt_value in pending_options.items():
+                        if current.get(opt_name) == opt_value:
+                            current.pop(opt_name, None)
+                    if not current:
+                        options_store.pop(self._appliance_id, None)
+                _LOGGER.debug(
+                    "Button debug: pending options cleared, store=%s",
+                    redact_store(options_store),
                 )
             _LOGGER.info("Button: command '%s' sent", self._command_name)
             await self._async_request_command_refresh()
