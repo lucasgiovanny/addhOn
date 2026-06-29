@@ -12,6 +12,7 @@
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Last commit](https://img.shields.io/github/last-commit/tis24dev/addhOn?logo=github)](https://github.com/tis24dev/addhOn/commits)
+[![💖 Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-pink?logo=github)](https://github.com/sponsors/tis24dev)
 
 </div>
 
@@ -85,7 +86,9 @@ controls where they have been mapped.
 
 - **AC Unit:** Haier AS35PBPHRA-PRE
 - **Washing Machine:** Haier HW80-B14959TU1IT
+- **Washing Machine:** Candy TCA286TM5-S
 - **Tumble Dryer:** Haier HD100-C367GU1-IT
+- **Tumble Dryer:** Haier HD90-A3959 INT
 - **Refrigerator:** Haier HDPW5620CNPK
 
 Other hOn-compatible Haier appliances should work; feel free to test and report.
