@@ -12,6 +12,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .base_entity import HonBaseEntity
 from .const import (
+    AC_ATTR_SWING_H,
+    AC_ATTR_SWING_V,
+    AC_SWING_H_PARAM,
+    AC_SWING_V_PARAM,
+    APPLIANCE_AC,
     APPLIANCE_FR,
     APPLIANCE_FRE,
     APPLIANCE_REF,
@@ -24,6 +29,8 @@ from .const import (
     DRY_LEVEL_LABELS_TD,
     DRY_LEVEL_LABELS_WM,
     DRY_LEVEL_SENTINELS,
+    FAN_DIR_H_LABELS,
+    FAN_DIR_V_LABELS,
     PROGRAM_PARAM_NAMES,
     PROGRAM_PENDING_OPTIONS,
     PROGRAM_PENDING_STORE,
@@ -32,6 +39,7 @@ from .const import (
 )
 from .debug_utils import redact_id, redact_store
 from .hon_commands import async_send_command
+from .ac_command import async_send_settings, param_allowed_values, settings_param
 from .program_options import (
     HonProgramOptionEntity,
     async_send_program,
@@ -118,6 +126,68 @@ _PROGRAM_OPTION_SELECTS: tuple[HonProgramOptionSelectDescription, ...] = (
     ),
 )
 
+@dataclass(frozen=True, kw_only=True)
+class HonAcDirectionSelectDescription:
+    """A manual AC fan-direction (louver position) select (#37).
+
+    ``param`` is the settings-command parameter to WRITE (windDirectionVertical /
+    windDirectionHorizontal); ``attr`` is the dotted READ path of the live value;
+    ``label_map`` is the SUPERSET raw-value -> option-key map (offered options are the
+    live per-model enum mapped through it, with the raw number as a forward-safe
+    fallback for an unmapped value). Vertical and horizontal carry distinct
+    translation_keys so their overlapping numbers never collide.
+    """
+
+    key: str
+    param: str
+    attr: str
+    translation_key: str
+    label_map: dict[str, str]
+    icon: str
+
+
+# Candidate AC fan-direction selects, capability-gated per device by
+# _supports_direction_select on the LIVE settings enum. The two axes are SYMMETRIC (see
+# FAN_DIR_*_LABELS): each exposes fixed louver positions plus exactly one swing value --
+# value 8 on the vertical axis, value 7 on the horizontal axis. The vertical 8=swing
+# coexists by design with the climate swing_mode (on/off) entity (both write the SAME
+# windDirectionVertical param).
+_AC_DIRECTION_SELECTS: tuple[HonAcDirectionSelectDescription, ...] = (
+    HonAcDirectionSelectDescription(
+        key="fan_direction_vertical",
+        param=AC_SWING_V_PARAM,
+        attr=AC_ATTR_SWING_V,
+        translation_key="fan_direction_vertical",
+        label_map=FAN_DIR_V_LABELS,
+        icon="mdi:arrow-up-down",
+    ),
+    HonAcDirectionSelectDescription(
+        key="fan_direction_horizontal",
+        param=AC_SWING_H_PARAM,
+        attr=AC_ATTR_SWING_H,
+        translation_key="fan_direction_horizontal",
+        label_map=FAN_DIR_H_LABELS,
+        icon="mdi:arrow-left-right",
+    ),
+)
+
+
+def _supports_direction_select(param) -> bool:
+    """True iff ``param`` is a real, adjustable position control.
+
+    A manual fan-direction control exists only when the settings param is a WRITABLE
+    enum with more than one option. The fixed-typology trap is excluded explicitly
+    (AS68PDAHRA horizontal: typology=fixed, enum=[0]) so a non-adjustable louver is
+    never surfaced; the >1 guard also drops a degenerate single-value enum. The enum
+    itself is always read live (param_allowed_values), never hard-coded.
+    """
+    if param is None:
+        return False
+    if getattr(param, "typology", "") == "fixed":
+        return False
+    return len(param_allowed_values(param)) > 1
+
+
 # "Safe" commands (they do not start a cycle) to read/write the program from.
 PROGRAM_SELECT_COMMANDS = ("settings", "setProgram", "setProgramme", "programSettings")
 # Commands to DRAW the program list from. We also include startProgram as a
@@ -169,6 +239,33 @@ async def async_setup_entry(
                     "needs startProgram(program enum) + stopProgram",
                     data.get("name"),
                     redact_id(appliance_id),
+                )
+            continue
+        if app_type == APPLIANCE_AC:
+            # Manual fan-direction position selects (#37), capability-gated on the
+            # live per-model settings enum (vertical and/or horizontal independently).
+            # AC falls through here today with no select; the climate swing_mode
+            # (on/off) entity is intentionally left untouched (coexistence by design).
+            created_dirs: list[str] = []
+            for desc in _AC_DIRECTION_SELECTS:
+                if not _supports_direction_select(settings_param(appliance, desc.param)):
+                    continue
+                entities.append(
+                    HonAcDirectionSelect(coordinator, appliance_id, desc, client)
+                )
+                created_dirs.append(desc.key)
+            if created_dirs:
+                _LOGGER.info(
+                    "Added %d AC fan-direction selects: id=%s -> %s",
+                    len(created_dirs),
+                    redact_id(appliance_id),
+                    created_dirs,
+                )
+            else:
+                _LOGGER.debug(
+                    "Select debug: no AC fan-direction selects for id=%s type=%s",
+                    redact_id(appliance_id),
+                    app_type,
                 )
             continue
         if app_type not in APPLIANCE_WASH_GROUP:
@@ -543,10 +640,13 @@ class HonRefProgramSelect(HonBaseEntity, SelectEntity):
     (capability-gated, never hard-coded). Unlike the washer select, selecting here sends
     IMMEDIATELY (no buffer/Start-button cycle): a program -> ``startProgram(program=X)``,
     ``off`` -> ``stopProgram``. ``current_option`` is derived from REAL device feedback:
-    first the live mode FLAGS (boost modes), then the cloud-persisted active-program field
-    ``programName``/``prStr``/``prCode`` (covers the iot_* presets, which set no flag) -
-    never optimistic state and never ``startProgram.program`` (the recovered default
-    category, which would otherwise pin a phantom mode forever)."""
+    first the live mode FLAGS (boost modes), then the cloud-persisted active-program
+    field ``programName``/``prStr``/``prCode`` - never optimistic state and never
+    ``startProgram.program`` (the recovered default category, which would otherwise pin
+    a phantom mode forever). An active iot_* preset (which sets no flag) is NOT recoverable
+    from the cloud shadow -- it leaves no program-identity field, and the official app only
+    tracks it client-side -- so it correctly falls back to ``off`` (see
+    ``_active_program_code``)."""
 
     _attr_icon = "mdi:snowflake"
 
@@ -615,8 +715,31 @@ class HonRefProgramSelect(HonBaseEntity, SelectEntity):
         return bool(HonProgramSelect._program_values(command, param_name))
 
     # Shadow attributes carrying the ACTIVE program identity (cloud-persisted: what the
-    # official app reads to show the running program, e.g. after an app reinstall). NOT
-    # startProgram.program, which is only the recovered default category.
+    # official app reads to show the running program, e.g. after an app reinstall),
+    # matched double-gated against the offered codes. NOT startProgram.program (only the
+    # recovered default category).
+    #
+    # Deliberately EXCLUDES the per-zone modeZ1/modeZ2: those are ENGINE-SYNTHETIC
+    # (client/engine/appliances/ref.py rewrites them from the boost flags by VALUE), so
+    # they only ever read holiday/auto_set/super_cool/super_freeze/"no_mode". Every offered
+    # value they could carry is already resolved by the FLAG path above, "no_mode" is not
+    # an offered code, and the engine clobbers any raw modeZ before the select sees it --
+    # so reading them here is strictly dead and cannot surface a program.
+    #
+    # iot_* DOWNLOAD PRESETS ARE NOT SHADOW-OBSERVABLE (proven, not merely dump-blocked):
+    # an active iot_* download preset sets no flag and leaves NO program-identity field in
+    # the raw cloud shadow (no prCode/prStr/prPhase/machMode/programName; activity={}),
+    # confirmed on BOTH observed REF models (HDPW5620CNPK, HCW58F18EWMP). The official hOn
+    # app does not recover it from the shadow either: it reads no shadow identity field and
+    # runs no setpoint reverse-match, and instead shows the running preset only as a
+    # CLIENT-LOCAL "Last used" label kept in React Native AsyncStorage (@quickSet, its own
+    # last send) -- a device-local memory we cannot and should not reconstruct from the
+    # cloud. Its only shadow footprint is the tempSel setpoint triple, which is
+    # user-settable (not identity-safe) and ambiguous (preset setpoints collide); we never
+    # guess from setpoints. So "off" is the PERMANENTLY-correct current_option for download
+    # presets; programName/prStr/prCode stay only as the forward-correct handler for any
+    # future REF model that DOES expose a real program-identity key. Evidence trail:
+    # apk/analysis/deep/ref-active-program-detection.md (+ refrigeration.md section 6).
     _REF_ACTIVE_PROGRAM_ATTRS = ("programName", "prStr", "prCode")
 
     @property
@@ -630,9 +753,10 @@ class HonRefProgramSelect(HonBaseEntity, SelectEntity):
                     redact_id(self._appliance_id), flag, code,
                 )
                 return code
-        # 2) Any other active program (e.g. the iot_* download presets, which set no
-        #    flag) from the cloud-persisted programName/prStr/prCode. Real device
-        #    feedback, NOT optimistic "remember what was clicked" state.
+        # 2) Any other active program surfaced via the cloud-persisted programName/prStr/
+        #    prCode. Real device feedback, NOT optimistic "remember what was clicked"
+        #    state. (An active iot_* preset is not observable here on the current engine --
+        #    see _REF_ACTIVE_PROGRAM_ATTRS -- so it falls through to off below.)
         matched = self._active_program_code()
         if matched is not None:
             return matched
@@ -645,9 +769,10 @@ class HonRefProgramSelect(HonBaseEntity, SelectEntity):
         programName/prStr ship as i18n keys (e.g. ``PROGRAMS.REF.IOT_EXTRA_COLD``), so we
         compare both the whole token and its last dotted segment, case-insensitively, and
         accept ONLY an exact match against an offered code (no fuzzy/substring match, to
-        never report the wrong program). This is what reflects the iot_* presets, which
-        set no mode flag. ``startProgram.program`` is deliberately NOT consulted (it is the
-        recovered default category, not the running program)."""
+        never report the wrong program). The idle sentinels ("No Program", "") are not
+        offered codes, so the double-gate rejects them. ``startProgram.program`` is
+        deliberately NOT consulted (it is the recovered default category, not the running
+        program)."""
         by_lower = {code.lower(): code for code in self._program_codes}
         for attr in self._REF_ACTIVE_PROGRAM_ATTRS:
             raw = self._get_attr(attr)
@@ -703,3 +828,113 @@ class HonRefProgramSelect(HonBaseEntity, SelectEntity):
                 translation_placeholders={"error": str(err)},
             ) from err
         await self._async_request_command_refresh()
+
+
+class HonAcDirectionSelect(HonBaseEntity, SelectEntity):
+    """Manual fan-direction (louver position) select for air conditioners (#37).
+
+    One entity per axis (vertical / horizontal). Options come from the device's LIVE
+    per-model settings enum (windDirectionVertical / windDirectionHorizontal), never
+    hard-coded, mapped to stable bilingual option keys. Selecting sends IMMEDIATELY
+    through ac_command.async_send_settings -- the SAME sanitizer-guarded path the
+    climate swing uses -- so a requested position survives the windDirection sanitizer
+    (it is applied AFTER the pre_send hook and therefore wins). current_option maps the
+    live reading to an offered key and returns None when the firmware reports a value
+    outside the offered enum (e.g. 0 when off, or a value the setter enum excludes): HA
+    shows unknown, never a false map, never a raise. Coexists by design with the climate
+    swing_mode (on/off) entity: both it and this vertical select write
+    windDirectionVertical (value 8 = swing).
+    """
+
+    def __init__(
+        self,
+        coordinator,
+        appliance_id: str,
+        description: HonAcDirectionSelectDescription,
+        client=None,
+    ) -> None:
+        super().__init__(coordinator, appliance_id, client)
+        self._desc = description
+        self._attr_translation_key = description.translation_key
+        self._attr_unique_id = f"{appliance_id}_{description.key}"
+        self._attr_icon = description.icon
+        label_map = description.label_map
+        param = settings_param(self._appliance, description.param)
+        # Offer the LIVE per-model enum values, mapped to stable option keys (raw number
+        # as a forward-safe fallback for an unmapped value); order follows the device
+        # enum. Each raw value is NORMALIZED to its canonical code (normalize_code:
+        # "5.0"/"5,0" -> "5") BEFORE it becomes a map key, so the stored key, the label
+        # lookup and the value we send share the SAME canonical form current_option()
+        # looks up with -- otherwise an enum advertised non-canonically (e.g. "13.0")
+        # would build a key the normalized read-back never matches and would surface as
+        # unknown. For the real per-model enums (clean small integers) this is a no-op.
+        # param_allowed_values([]/None) yields [] (gated-out params never reach here).
+        # Mirrors HonProgramOptionSelect / option_value_set, which already normalize.
+        self._raw_to_key: dict[str, str] = {}
+        for raw in param_allowed_values(param):
+            code = normalize_code(raw)
+            if code is None:
+                continue
+            self._raw_to_key[code] = label_map.get(code, code)
+        self._key_to_raw: dict[str, str] = {
+            key: raw for raw, key in self._raw_to_key.items()
+        }
+        self._attr_options = list(self._raw_to_key.values())
+        _LOGGER.debug(
+            "Select debug: init AC direction select '%s' id=%s param=%s options=%s",
+            redact_id(self._attr_unique_id, appliance_id),
+            redact_id(appliance_id),
+            description.param,
+            self._attr_options,
+        )
+
+    @property
+    def current_option(self) -> str | None:
+        # Map the LIVE windDirection value to an offered key. Out-of-enum reads (0 when
+        # off, or e.g. horizontal 2 outside the setter enum) -> None: never raise, never
+        # false-map.
+        raw = self._get_attr(self._desc.attr)
+        if raw is None:
+            return None
+        return self._raw_to_key.get(normalize_code(raw))
+
+    async def async_select_option(self, option: str) -> None:
+        raw = self._key_to_raw.get(option)
+        if raw is None:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_setpoint",
+                translation_placeholders={
+                    "value": option,
+                    "allowed": ", ".join(self._attr_options),
+                },
+            )
+        appliance = self._appliance
+        client = self._hon_client
+        if not appliance or not client:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="appliance_or_client_unavailable",
+            )
+        try:
+            _LOGGER.info(
+                "Select: AC %s -> %s=%s id=%s",
+                self._desc.key,
+                self._desc.param,
+                raw,
+                redact_id(self._appliance_id),
+            )
+            await async_send_settings(self.hass, client, appliance, {self._desc.param: raw})
+            await self._async_request_command_refresh()
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            _LOGGER.error(
+                "Select: AC %s set error %s=%s: %s",
+                self._desc.key, self._desc.param, raw, err, exc_info=True,
+            )
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_error",
+                translation_placeholders={"error": str(err)},
+            ) from err
