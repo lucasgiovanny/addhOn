@@ -25,6 +25,7 @@ from .const import (
     WM_ATTR_STATUS,
 )
 from .debug_utils import redact_id
+from .param_rollback import restore_params, snapshot_params
 from .program_options import (
     HonProgramOptionEntity,
     normalize_code,
@@ -252,6 +253,10 @@ class HonWashingMachinePauseSwitch(HonBaseEntity, SwitchEntity):
             redact_id(self._appliance_id),
             _command_names(appliance),
         )
+        # Rollback state: the pause param is mutated in memory before send; on a send
+        # failure restore it so the switch does not report a local pause/resume the
+        # cloud never accepted until the next poll. Populated inside _inner.
+        restore_pause: dict = {}
         try:
             def _do():
                 async def _inner():
@@ -267,8 +272,13 @@ class HonWashingMachinePauseSwitch(HonBaseEntity, SwitchEntity):
                         _param_snapshot(params),
                     )
                     if isinstance(params, dict) and "pause" in params:
-                        previous = getattr(params["pause"], "value", None)
-                        params["pause"].value = pause_value
+                        pause_param = params["pause"]
+                        # Snapshot only the pause param (shared helper, keyed dict form)
+                        # so a send failure restores it without re-firing rules.
+                        restore_pause["params"] = params
+                        restore_pause["snap"] = snapshot_params({"pause": pause_param})
+                        previous = getattr(pause_param, "value", None)
+                        pause_param.value = pause_value
                         _LOGGER.debug(
                             "Switch debug: pause parameter set to %s (previous=%s)",
                             pause_value,
@@ -280,6 +290,7 @@ class HonWashingMachinePauseSwitch(HonBaseEntity, SwitchEntity):
                             command_name,
                         )
                     await command.send()
+                    restore_pause.clear()  # sent: nothing to roll back
                     _LOGGER.debug("Switch debug: command '%s' send completed", command_name)
                 client.run_command_sync(_inner())
 
@@ -287,6 +298,7 @@ class HonWashingMachinePauseSwitch(HonBaseEntity, SwitchEntity):
             _LOGGER.info("Pause: %s sent", command_name)
             await self._async_request_command_refresh()
         except Exception as err:
+            restore_params(restore_pause.get("params"), restore_pause.get("snap", {}))
             _LOGGER.error("Pause %s: Error: %s", command_name, err, exc_info=True)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,

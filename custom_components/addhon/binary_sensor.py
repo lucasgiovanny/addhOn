@@ -21,7 +21,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .base_entity import HonAccountCoordinatorEntity, HonBaseEntity
+from .base_entity import HonAccountCoordinatorEntity, HonBaseEntity, coordinator_data_map
 from .const import (
     APPLIANCE_AC,
     APPLIANCE_DW,
@@ -321,7 +321,8 @@ async def async_setup_entry(
     entry_data = hass.data[DOMAIN][entry.entry_id]
     coordinator = entry_data["coordinator"]
     entities: list[BinarySensorEntity] = []
-    for appliance_id, data in coordinator.data.items():
+    data_map = coordinator_data_map(coordinator)
+    for appliance_id, data in data_map.items():
         app_type = data.get("type", "")
         attributes = data.get("attributes", {})
         attributes = attributes if isinstance(attributes, dict) else {}
