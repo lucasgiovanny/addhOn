@@ -396,8 +396,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # _async_register_services).
     _apply_debug_options(entry, reset_when_off=False)
 
-    # FIX: the key saved by the config_flow is "email", not "username"
-    email = entry.data.get("email")
+    # Current entries store "email"; tolerate and migrate older/corrupt entries that
+    # still carry the old "username" key so setup can recover without a reinstall.
+    email = entry.data.get("email") or entry.data.get("username")
     password = entry.data.get("password")
     # Persisted refresh token (added for 2FA): runtime refreshes instead of doing a
     # full login, so an account with email-OTP is not re-challenged on every restart.
@@ -419,6 +420,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "Remove and reconfigure the integration."
         )
         return False
+    if "email" not in entry.data and entry.data.get("username"):
+        # Drop the legacy "username" key in the same update so the migrated entry
+        # data carries only "email" (no stale key left for diagnostics/iteration).
+        migrated = {k: v for k, v in entry.data.items() if k != "username"}
+        migrated["email"] = email
+        hass.config_entries.async_update_entry(entry, data=migrated)
 
     hon_client = HonClient(email=email, password=password, refresh_token=refresh_token)
 

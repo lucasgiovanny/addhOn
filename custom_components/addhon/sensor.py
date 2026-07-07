@@ -1110,8 +1110,11 @@ class HonLastRefreshSensor(HonAccountCoordinatorEntity, SensorEntity):
 
     @staticmethod
     def _now():
-        # Lazy dt import: keeps the test stubs (which import this module but never
-        # drive a coordinator update) free of a homeassistant.util.dt stub.
+        # Lazy dt import: keeps test stubs that import this module (but never drive a
+        # coordinator update) free of a homeassistant.util.dt stub. now(UTC) returns a
+        # tz-aware UTC datetime (the TIMESTAMP device class requires aware values).
+        from datetime import UTC
+
         from homeassistant.util import dt as dt_util
 
-        return dt_util.utcnow()
+        return dt_util.now(UTC)
