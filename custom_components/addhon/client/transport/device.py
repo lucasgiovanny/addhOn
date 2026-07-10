@@ -1,3 +1,6 @@
+# Copyright (C) 2026 tis24dev
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 """Client device descriptor for the addhOn transport.
 
 Builds the "who am I" identity (app version, OS, model, mobileId) sent to the hOn
@@ -10,13 +13,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Fixed client identity sent to the cloud (single point to update). APP_VERSION
-# tracks the current hOn app version.
-APP_VERSION = "2.27.9"
-OS_VERSION = 34
-OS = "android"
-DEVICE_MODEL = "addhon"
-MOBILE_ID = "addhon"
+# Identity values live in values.py with their provenance (spec: HHT-sec3). Imported
+# here (not inlined) so there is one documented source; MOBILE_ID stays a module
+# attribute for `from .device import MOBILE_ID`.
+from .values import APP_VERSION, DEVICE_MODEL, MOBILE_ID, OS, OS_VERSION
 
 
 @dataclass(frozen=True)

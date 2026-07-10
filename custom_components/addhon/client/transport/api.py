@@ -1,3 +1,6 @@
+# Copyright (C) 2026 tis24dev
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 """Authenticated HTTP API client of the hOn cloud (addhOn transport).
 
 Implements the authenticated methods on top of `HonConnection` (which injects the
@@ -28,13 +31,11 @@ from typing import Any
 from . import device as _device
 from .connection import HonConnection
 from .parse import parse_appliance_list
+from .values import API_URL
 from ...debug_utils import redact_identity
 from ...error_codes import APPLIANCE_LIST_EMPTY
 
 _LOGGER = logging.getLogger(__name__)
-
-# Base URL of the hOn cloud.
-API_URL = "https://api-iot.he.services"
 
 
 def _command_timestamp() -> str:
