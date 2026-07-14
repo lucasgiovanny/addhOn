@@ -121,6 +121,121 @@ class ClassifyTest(unittest.TestCase):
         self.assertIs(ec.classify(RuntimeError("getaddrinfo failed")), ec.DNS_FAILURE)
         self.assertIs(ec.classify(RuntimeError("Connection refused")), ec.CONNECTION_REFUSED)
 
+    def test_real_decode_and_disconnect_types_are_not_unknown(self) -> None:
+        self.assertIs(
+            ec.classify(json.JSONDecodeError("Expecting value", "", 0)),
+            ec.DECODE_ERROR,
+        )
+        self.assertIs(
+            ec.classify(UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")),
+            ec.DECODE_ERROR,
+        )
+        self.assertIs(
+            ec.classify(ConnectionError("connection aborted")),
+            ec.CONNECTION_REFUSED,
+        )
+
+        class ServerDisconnectedError(Exception):
+            pass
+
+        class ClientPayloadError(Exception):
+            pass
+
+        self.assertIs(
+            ec.classify(ServerDisconnectedError("Server disconnected")),
+            ec.CONNECTION_REFUSED,
+        )
+        self.assertIs(
+            ec.classify(ClientPayloadError("Response payload is not completed")),
+            ec.DECODE_ERROR,
+        )
+
+    def test_auth_rejections_beat_broad_connection_types(self) -> None:
+        class AuthConnectionError(ConnectionError):
+            pass
+
+        class ClientConnectionError(Exception):
+            pass
+
+        class ServerDisconnectedError(Exception):
+            pass
+
+        cases = (
+            (AuthConnectionError("api_auth: status 401"), ec.AUTH_API_AUTH),
+            (ClientConnectionError("HTTP 401 unauthorized"), ec.INVALID_CREDENTIALS),
+            (ServerDisconnectedError("token rejected"), ec.INVALID_CREDENTIALS),
+        )
+        for err, expected in cases:
+            with self.subTest(error=type(err).__name__):
+                self.assertIs(ec.classify(err), expected)
+                self.assertTrue(hc._requires_reauth(err))
+
+    def test_connection_class_names_without_auth_are_refused(self) -> None:
+        # aiohttp-style connection classes with a plain outage message (no auth
+        # marker, no refused/reset/DNS/TLS keyword) must reach the class-name
+        # family fallback and classify as CONNECTION_REFUSED. Guards the family
+        # list in classify() so dropping a name there is caught by a test.
+        class ClientConnectionError(Exception):
+            pass
+
+        class ClientConnectorError(Exception):
+            pass
+
+        class ClientOSError(Exception):
+            pass
+
+        class ServerConnectionError(Exception):
+            pass
+
+        cases = (
+            ClientConnectionError("connection lost"),
+            ClientConnectorError("host unreachable"),
+            ClientOSError("socket failure"),
+            ServerConnectionError("peer gone"),
+        )
+        for err in cases:
+            with self.subTest(error=type(err).__name__):
+                self.assertIs(ec.classify(err), ec.CONNECTION_REFUSED)
+
+    def test_classify_and_requires_reauth_agree_on_auth_phrasings(self) -> None:
+        # Coherence guard against drift: classify()'s auth-rejection gate and
+        # hon_client._requires_reauth's keyword predicate are two independent
+        # lists. For an EXPLICIT rejection phrasing both must route to reauth; for
+        # a plain outage neither must. Bare endpoint names ("api_auth" alone) are
+        # out of scope here: the two predicates intentionally differ on those. If
+        # a new rejection phrase is added to one side only, this test goes red.
+        reauth_phrasings = (
+            "unauthorized",
+            "HTTP 401",
+            "HTTP 403",
+            "status 401",
+            "token rejected",
+            "invalid token",
+            "expired token",
+            "invalid credential",
+            "api_auth: status 401",
+        )
+        non_reauth_phrasings = (
+            "503 service unavailable",
+            "429 too many requests",
+            "connection reset by peer",
+        )
+        for phrase in reauth_phrasings:
+            err = RuntimeError(phrase)
+            with self.subTest(reauth=phrase):
+                self.assertTrue(ec.classify(err).requires_reauth)
+                self.assertTrue(hc._requires_reauth(err))
+        for phrase in non_reauth_phrasings:
+            err = RuntimeError(phrase)
+            with self.subTest(non_reauth=phrase):
+                self.assertFalse(ec.classify(err).requires_reauth)
+                self.assertFalse(hc._requires_reauth(err))
+
+    def test_server_status_beats_builtin_connection_type(self) -> None:
+        err = ConnectionError("503 server error")
+        self.assertIs(ec.classify(err), ec.SERVER_ERROR)
+        self.assertFalse(hc._requires_reauth(err))
+
     def test_aiohttp_connect_failure_is_not_tls(self) -> None:
         # aiohttp's ClientConnectorError __str__ ALWAYS carries "ssl:default" for any
         # HTTPS connect failure; that is a plain outage, NOT a TLS problem (refuter F1).

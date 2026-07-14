@@ -553,6 +553,51 @@ class AcClimateWritePathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(0, settings.send_calls)
 
+    async def test_set_hvac_mode_active_clears_self_clean(self) -> None:
+        entity, settings, _ = _climate(
+            {
+                "onOffStatus": Param("0"),
+                "machMode": Param("0"),
+                "selfCleaningStatus": Param("1"),
+                "selfCleaning56Status": Param("1"),
+            }
+        )
+        await entity.async_set_hvac_mode(HVACMode.COOL)
+        self.assertEqual("1", settings.sent["onOffStatus"])
+        self.assertEqual("1", settings.sent["machMode"])
+        self.assertEqual("0", settings.sent["selfCleaningStatus"])
+        self.assertEqual("0", settings.sent["selfCleaning56Status"])
+
+    async def test_turn_on_clears_self_clean(self) -> None:
+        entity, settings, _ = _climate(
+            {
+                "onOffStatus": Param("0"),
+                "machMode": Param("4"),
+                "selfCleaningStatus": Param("1"),
+            }
+        )
+        await entity.async_turn_on()
+        self.assertEqual("1", settings.sent["onOffStatus"])
+        self.assertEqual("0", settings.sent["selfCleaningStatus"])
+
+    async def test_set_temperature_does_not_clear_self_clean(self) -> None:
+        entity, settings, _ = _climate(
+            {"tempSel": Param("16"), "selfCleaningStatus": Param("1")}
+        )
+        await entity.async_set_temperature(temperature=22)
+        self.assertEqual("1", settings.sent["selfCleaningStatus"])
+
+    async def test_self_clean_switch_turn_on_still_sets_one(self) -> None:
+        settings = RecordingCommand({"selfCleaningStatus": Param("0")})
+        coordinator = FakeCoordinator(_ac({"settings": settings}))
+        desc = switch.HonAcSwitchDescription(
+            key="self_clean", param="selfCleaningStatus"
+        )
+        sw = switch.HonAcSwitch(coordinator, "ac-1", desc, FakeClient())
+        sw.hass = FakeHass()
+        await sw.async_turn_on()
+        self.assertEqual("1", settings.sent["selfCleaningStatus"])
+
 
 class AcClimateProgramWritePathTest(unittest.IsolatedAsyncioTestCase):
     """Program-based AC (AD71S2SM3FA(H)): power/mode via startProgram/stopProgram.
@@ -844,6 +889,53 @@ class AcSwitchWritePathTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HomeAssistantError) as ctx:
             await entity.async_turn_on()
         self.assertEqual("inner_sw", getattr(ctx.exception, "translation_key", None))
+
+
+class WithSelfCleanOffTest(unittest.TestCase):
+    def _ac_settings(self, params: dict):
+        return types.SimpleNamespace(commands={"settings": RecordingCommand(params)})
+
+    def test_injects_zero_for_exposed_flags(self) -> None:
+        appliance = self._ac_settings(
+            {
+                "onOffStatus": Param("0"),
+                "machMode": Param("0"),
+                "selfCleaningStatus": Param("1"),
+                "selfCleaning56Status": Param("1"),
+            }
+        )
+        out = ac_command.with_self_clean_off(
+            appliance, {"onOffStatus": "1", "machMode": "1"}
+        )
+        self.assertEqual(
+            {
+                "onOffStatus": "1",
+                "machMode": "1",
+                "selfCleaningStatus": "0",
+                "selfCleaning56Status": "0",
+            },
+            out,
+        )
+
+    def test_skips_flags_the_device_does_not_expose(self) -> None:
+        appliance = self._ac_settings(
+            {"onOffStatus": Param("0"), "machMode": Param("0")}
+        )
+        out = ac_command.with_self_clean_off(
+            appliance, {"onOffStatus": "1", "machMode": "1"}
+        )
+        self.assertEqual({"onOffStatus": "1", "machMode": "1"}, out)
+
+    def test_does_not_override_caller_supplied_value(self) -> None:
+        appliance = self._ac_settings({"selfCleaningStatus": Param("0")})
+        out = ac_command.with_self_clean_off(appliance, {"selfCleaningStatus": "1"})
+        self.assertEqual("1", out["selfCleaningStatus"])
+
+    def test_does_not_mutate_input(self) -> None:
+        appliance = self._ac_settings({"selfCleaningStatus": Param("1")})
+        params = {"onOffStatus": "1"}
+        ac_command.with_self_clean_off(appliance, params)
+        self.assertEqual({"onOffStatus": "1"}, params)
 
 
 class AcCommandUnitTest(unittest.IsolatedAsyncioTestCase):
