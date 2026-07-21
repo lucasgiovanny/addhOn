@@ -129,6 +129,34 @@ class HonParameterRange(HonParameter):
         index = round((value - self.min) / step)
         return abs(self.min + index * step - value) <= self._grid_eps(step)
 
+    def snap_to_grid(self, value: str | float) -> float:
+        """Nearest grid value for an IN-RANGE off-grid input.
+
+        Used to sync a device shadow value that is off-grid but within range (e.g. a measured
+        ``17.2`` for a step-1 setpoint in 5..20) INTO the command without tripping the setter's
+        off-grid ValueError. Snapping stays here, never in the setter -- the climate/number
+        entities rely on the setter's ValueError for rollback.
+
+        Raises ``ValueError`` if the value is OUT of ``[min, max]``: a value outside the range
+        signals stale/mismatched local metadata, and clamping it to a boundary and re-sending
+        would overwrite whatever (possibly user-set) value the command currently holds. The
+        caller (``sync_params_to_command``) instead skips it and keeps the command's value.
+        """
+        v = str_to_float(str(value))
+        if not self.min <= v <= self.max:
+            raise ValueError(f"Out of range: {v} not in [{self.min}, {self.max}]")
+        step = self.step
+        if step <= 0:
+            return v
+        # FLOOR the top index (not round): the last grid point must never exceed max, or
+        # the setter's min<=value<=max check would reject the snapped value and the caller
+        # would fall back to the default. The shared grid epsilon keeps an on-grid max from
+        # being dropped by float drift. The final min(max, ...) is a defensive clamp for the
+        # <= eps overshoot on an on-grid max; v is already guaranteed in range above.
+        max_index = max(0, int((self.max - self.min + self._grid_eps(step)) / step))
+        index = min(max_index, max(0, round((v - self.min) / step)))
+        return min(self.max, self.min + index * step)
+
     def _grid_eps(self, step: float) -> float:
         """Snap/enumeration tolerance for the min/step grid, capped to a fraction of step.
 
