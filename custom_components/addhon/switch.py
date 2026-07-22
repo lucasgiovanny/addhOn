@@ -85,11 +85,14 @@ _WC_SWITCHES: tuple[HonSettingsSwitchDescription, ...] = (
 
 
 # Heat pump water heater (HW) switches: 0/1 parameters of the settings command,
-# ground-truthed on a real HP250M7C-F9 (issue log dump: settings.onOffStatus,
+# ground-truthed on a real HP250M7C-F9 (full schema dump: settings.onOffStatus,
 # settings.boostStatus, settings.silentStatus, settings.lockStatus,
 # settings.sterilizationStatus). Capability-gated like the AC toggles.
+# key is "on_off", NOT "power": _remove_legacy_entities purges every SWITCH whose
+# unique_id ends in "_power" (the 2.3/2.4 refactor cleanup), which would delete
+# and re-create this entity on every setup.
 _HW_SWITCHES: tuple[HonSettingsSwitchDescription, ...] = (
-    HonSettingsSwitchDescription(key="power", param="onOffStatus", icon="mdi:power"),
+    HonSettingsSwitchDescription(key="on_off", param="onOffStatus", icon="mdi:power"),
     HonSettingsSwitchDescription(key="boost", param="boostStatus", icon="mdi:rocket-launch-outline"),
     HonSettingsSwitchDescription(key="silent_mode", param="silentStatus", icon="mdi:volume-off"),
     HonSettingsSwitchDescription(key="child_lock", param="lockStatus", icon="mdi:lock"),

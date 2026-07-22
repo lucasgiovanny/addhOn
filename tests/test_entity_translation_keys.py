@@ -218,10 +218,11 @@ def _collect_code_keys() -> dict[str, set[str]]:
         | {d.key for d in switch._PROGRAM_OPTION_SWITCHES}
         | {"pause", "debug_logging", "mqtt_realtime_debug"}
     )
-    # Program select (fixed key) + the REF program/mode select (#40) + the
-    # program-option selects (#35) + the AC fan-direction selects (#37).
+    # Program select (fixed key) + the REF program/mode select (#40) + the HW
+    # operating-mode select + the program-option selects (#35) + the AC
+    # fan-direction selects (#37).
     used["select"] = (
-        {"program", "ref_program"}
+        {"program", "ref_program", "hw_mode"}
         | {d.translation_key for d in select._PROGRAM_OPTION_SELECTS}
         | {d.translation_key for d in select._AC_DIRECTION_SELECTS}
     )

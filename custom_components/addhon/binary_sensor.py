@@ -65,6 +65,10 @@ class HonBinarySensorEntityDescription(BinarySensorEntityDescription):
 
     attr_key: str
     on_value: str = "1"
+    # When False the entity is registered DISABLED by default (advanced telemetry);
+    # our own field, not the upstream description flag, so the tables stay importable
+    # under the test stubs.
+    enabled_default: bool = True
 
 
 _DOOR_OPEN = HonBinarySensorEntityDescription(
@@ -300,8 +304,10 @@ _WATER_HEATER_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
 )
 
 # Heat pump water heater (HW): heating-source and protection statuses,
-# ground-truthed on a real HP250M7C-F9 (issue log dump). The writable toggles
+# ground-truthed on a real HP250M7C-F9 (full schema dump). The writable toggles
 # (power/boost/silent/child lock/anti-legionella) are switches, not binaries.
+# Only the two main heat sources register enabled; the rest is advanced
+# telemetry the average dashboard does not need.
 _HEAT_PUMP_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
     HonBinarySensorEntityDescription(
         key="compressor_running",
@@ -320,29 +326,34 @@ _HEAT_PUMP_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
         attr_key="auxElecHeatingStatus",
         icon="mdi:radiator",
         device_class=BinarySensorDeviceClass.RUNNING,
+        enabled_default=False,
     ),
     HonBinarySensorEntityDescription(
         key="boiler_heating",
         attr_key="boilerHeatingCurrentStatus",
         icon="mdi:water-boiler",
         device_class=BinarySensorDeviceClass.RUNNING,
+        enabled_default=False,
     ),
     HonBinarySensorEntityDescription(
         key="antifreeze",
         attr_key="antifreezingStatus",
         icon="mdi:snowflake-alert",
         device_class=BinarySensorDeviceClass.RUNNING,
+        enabled_default=False,
     ),
     HonBinarySensorEntityDescription(
         key="defrost",
         attr_key="autoDefrostStatus",
         icon="mdi:snowflake-melt",
         device_class=BinarySensorDeviceClass.RUNNING,
+        enabled_default=False,
     ),
     HonBinarySensorEntityDescription(
         key="off_peak_signal",
         attr_key="offpeakSignalCurrentStatus",
         icon="mdi:transmission-tower",
+        enabled_default=False,
     ),
 )
 
@@ -423,6 +434,7 @@ class HonBinarySensor(HonBaseEntity, BinarySensorEntity):
         self.entity_description = description
         self._attr_translation_key = description.translation_key or description.key
         self._attr_unique_id = f"{appliance_id}_{description.key}"
+        self._attr_entity_registry_enabled_default = description.enabled_default
 
     @property
     def is_on(self) -> bool | None:

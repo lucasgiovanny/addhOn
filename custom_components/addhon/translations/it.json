@@ -456,26 +456,17 @@
       "tank_volume": {
         "name": "Volume serbatoio"
       },
-      "compressor_energy_day": {
-        "name": "Energia compressore oggi"
-      },
       "compressor_energy_month": {
         "name": "Energia compressore questo mese"
       },
       "compressor_energy_year": {
         "name": "Energia compressore quest'anno"
       },
-      "heater_energy_day": {
-        "name": "Energia resistenza oggi"
-      },
       "heater_energy_month": {
         "name": "Energia resistenza questo mese"
       },
       "heater_energy_year": {
         "name": "Energia resistenza quest'anno"
-      },
-      "heat_output_day": {
-        "name": "Calore prodotto oggi"
       },
       "heat_output_month": {
         "name": "Calore prodotto questo mese"
@@ -721,14 +712,14 @@
       "mqtt_realtime_debug": {
         "name": "Debug MQTT realtime"
       },
-      "power": {
-        "name": "Accensione"
-      },
       "boost": {
         "name": "Boost"
       },
       "silent_mode": {
         "name": "Modalità silenziosa"
+      },
+      "on_off": {
+        "name": "Accensione"
       }
     },
     "number": {
@@ -860,6 +851,15 @@
           "position_5": "Posizione 5",
           "position_6": "Posizione 6",
           "swing": "Oscillazione"
+        }
+      },
+      "hw_mode": {
+        "name": "Modalità",
+        "state": {
+          "auto": "Auto",
+          "eco": "Eco",
+          "elec": "Elettrico",
+          "vac": "Vacanza"
         }
       }
     },

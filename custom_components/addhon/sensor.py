@@ -138,6 +138,11 @@ class HonSensorEntityDescription(SensorEntityDescription):
     # attr_fallbacks chain keeps looking (e.g. actualWeight=0 -> weight=3). Opt-in:
     # other sensors may legitimately report 0, so this never changes their behavior.
     zero_is_missing: bool = False
+    # When False the entity is registered DISABLED by default (advanced/diagnostic
+    # telemetry the average dashboard does not need); the user can enable it from the
+    # entity registry. Kept as our own field (not the upstream description flag) so the
+    # description tables stay importable under the test stubs.
+    enabled_default: bool = True
 
 
 # State + remaining time: identical for washer/washer-dryer/tumble dryer.
@@ -782,24 +787,69 @@ _WATER_HEATER: tuple[HonSensorEntityDescription, ...] = (
 )
 
 
-def _g_energy(key: str, attr: str) -> HonSensorEntityDescription:
-    """Capability-gated periodic energy counter (kWh, resets per day/month/year)."""
+def _hw_water_level(raw):
+    """remainingWaterLevel is a 0..12 gauge, not a percentage: the real HP250M7C-F9
+    reports 12 while the official app shows 100% (one-point calibration; 0 -> 0%)."""
+    if raw is None:
+        return None
+    try:
+        return min(100.0, round(float(str(raw).replace(",", ".")) * 100.0 / 12.0, 1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _hw_series(picker: Callable[[list[str]], str]) -> Callable[[object], object]:
+    """value_fn for the HW ';'-separated period series.
+
+    The HW energy counters are NOT scalars: Month attrs carry 12 calendar slots
+    (Jan..Dec of the current year) and Year attrs the last 5 years (oldest first),
+    verified on the real HP250M7C-F9 (July -> slot 7; the year total equals the
+    month sum). `picker` selects the current period's element."""
+
+    def _fn(raw):
+        if raw is None:
+            return None
+        parts = str(raw).split(";")
+        try:
+            return float(picker(parts).replace(",", "."))
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    return _fn
+
+
+def _g_hw_energy(key: str, attr: str, picker: Callable[[list[str]], str], *,
+                 enabled_default: bool = True) -> HonSensorEntityDescription:
+    """Capability-gated HW energy counter (kWh) read from a period series."""
     return HonSensorEntityDescription(
         key=key,
         attr_key=attr,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=_hw_series(picker),
         gated=True,
+        enabled_default=enabled_default,
     )
 
 
-# Heat pump water heater (HW): shares the WH temperature/volume set, plus the
-# HW-specific telemetry ground-truthed on a real HP250M7C-F9 (issue log dump):
-# remaining hot-water level, tank volume, and the per-period energy counters
-# split by source (Cp = compressor, Ec = electric backup heater) with the
-# accumulated heat output. Everything is capability-gated, so a model that does
-# not report a key simply creates no entity.
+def _hw_pick_month(parts: list[str]) -> str:
+    from datetime import date
+
+    return parts[date.today().month - 1]
+
+
+def _hw_pick_year(parts: list[str]) -> str:
+    return parts[-1]
+
+
+# Heat pump water heater (HW): shares the WH temperature set, plus the
+# HW-specific telemetry ground-truthed on a real HP250M7C-F9 (full schema dump):
+# hot-water gauge, tank volume, and the current-month/current-year energy split
+# by source (Cp = compressor, Ec = electric backup heater) with the accumulated
+# heat output. The 7-slot Day series is NOT exposed (its weekday origin is not
+# identifiable from one dump). Everything is capability-gated; the advanced
+# counters register disabled so the default device page stays small.
 _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
     HonSensorEntityDescription(
         key="hot_water_level",
@@ -807,6 +857,7 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
         icon="mdi:water-percent",
         native_unit_of_measurement="%",
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=_hw_water_level,
         gated=True,
     ),
     HonSensorEntityDescription(
@@ -815,16 +866,17 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
         icon="mdi:water-boiler",
         native_unit_of_measurement=UnitOfVolume.LITERS,
         gated=True,
+        enabled_default=False,
     ),
-    _g_energy("compressor_energy_day", "energyConsumptionDayCp"),
-    _g_energy("compressor_energy_month", "energyConsumptionMonthCp"),
-    _g_energy("compressor_energy_year", "energyConsumptionYearCp"),
-    _g_energy("heater_energy_day", "energyConsumptionDayEc"),
-    _g_energy("heater_energy_month", "energyConsumptionMonthEc"),
-    _g_energy("heater_energy_year", "energyConsumptionYearEc"),
-    _g_energy("heat_output_day", "accumulatedHeatDay"),
-    _g_energy("heat_output_month", "accumulatedHeatMonth"),
-    _g_energy("heat_output_year", "accumulatedHeatYear"),
+    _g_hw_energy("compressor_energy_month", "energyConsumptionMonthCp", _hw_pick_month),
+    _g_hw_energy("compressor_energy_year", "energyConsumptionYearCp", _hw_pick_year,
+                 enabled_default=False),
+    _g_hw_energy("heater_energy_month", "energyConsumptionMonthEc", _hw_pick_month),
+    _g_hw_energy("heater_energy_year", "energyConsumptionYearEc", _hw_pick_year,
+                 enabled_default=False),
+    _g_hw_energy("heat_output_month", "accumulatedHeatMonth", _hw_pick_month),
+    _g_hw_energy("heat_output_year", "accumulatedHeatYear", _hw_pick_year,
+                 enabled_default=False),
     _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
 )
 
@@ -979,6 +1031,7 @@ class HonSensor(HonBaseEntity, SensorEntity):
         self.entity_description = description
         self._attr_translation_key = description.translation_key or description.key
         self._attr_unique_id = f"{appliance_id}_{description.key}"
+        self._attr_entity_registry_enabled_default = description.enabled_default
 
     @property
     def native_value(self):

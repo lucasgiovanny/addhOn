@@ -22,6 +22,7 @@ from .const import (
     APPLIANCE_AC,
     APPLIANCE_FR,
     APPLIANCE_FRE,
+    APPLIANCE_HW,
     APPLIANCE_REF,
     APPLIANCE_TD,
     APPLIANCE_WASH_GROUP,
@@ -259,6 +260,20 @@ async def async_setup_entry(
                 _LOGGER.debug(
                     "Select debug: no REF program select for '%s' id=%s; "
                     "needs startProgram(program enum) + stopProgram",
+                    data.get("name"),
+                    redact_id(appliance_id),
+                )
+            continue
+        if app_type == APPLIANCE_HW:
+            # Heat pump water heater: one writable operating-mode select
+            # (auto/eco/elec/vac on the real HP250M7C-F9), sends immediately.
+            if HonHwModeSelect.supports_appliance(appliance):
+                entities.append(HonHwModeSelect(coordinator, appliance_id, client))
+                _LOGGER.info("Added HW mode select: id=%s", redact_id(appliance_id))
+            else:
+                _LOGGER.debug(
+                    "Select debug: no HW mode select for '%s' id=%s; "
+                    "needs startProgram(program enum)",
                     data.get("name"),
                     redact_id(appliance_id),
                 )
@@ -844,6 +859,106 @@ class HonRefProgramSelect(HonBaseEntity, SelectEntity):
             raise
         except Exception as err:
             _LOGGER.error("Select: REF program '%s' error: %s", option, err, exc_info=True)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_error",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        await self._async_request_command_refresh()
+
+
+class HonHwModeSelect(HonBaseEntity, SelectEntity):
+    """Writable operating-mode select for heat pump water heaters (HW).
+
+    HW modes (auto / eco / elec / vac on the real HP250M7C-F9) are ``startProgram``
+    PROGRAMS, exactly one always active (no stopProgram on the device, so no synthetic
+    "off" option). Options come from the device's LIVE ``startProgram.program`` enum
+    (capability-gated, never hard-coded). Selecting sends IMMEDIATELY via
+    ``async_send_program`` (the app's own flow: startProgram carries the mode plus the
+    current setpoint). Unlike the fridge, ``current_option`` DOES read the
+    ``startProgram.program`` cloud mirror: for HW the mode is a persistent state the
+    app itself writes via startProgram, so the recovered command category IS the
+    active mode (the shadow exposes no other identity field: machMode is fixed at 1
+    and programName stays "No Program" on the observed device)."""
+
+    _attr_icon = "mdi:water-boiler"
+
+    def __init__(self, coordinator, appliance_id: str, client=None) -> None:
+        super().__init__(coordinator, appliance_id, client)
+        self._attr_unique_id = f"{appliance_id}_hw_mode"
+        self._attr_translation_key = "hw_mode"
+        self._mode_codes: list[str] = []
+        resolved = HonRefProgramSelect._start_program_param(self._appliance)
+        if resolved is not None:
+            command, param_name = resolved
+            self._mode_codes = list(
+                HonProgramSelect._program_values(command, param_name).keys()
+            )
+        self._attr_options = list(self._mode_codes)
+        _LOGGER.debug(
+            "Select debug: initialized HW mode '%s' id=%s options=%s",
+            redact_id(self._attr_unique_id, appliance_id),
+            redact_id(appliance_id),
+            self._attr_options,
+        )
+
+    @classmethod
+    def supports_appliance(cls, appliance) -> bool:
+        """True if the device exposes startProgram with a populated program enum."""
+        resolved = HonRefProgramSelect._start_program_param(appliance)
+        if resolved is None:
+            _LOGGER.debug(
+                "Select debug: HW select skipped, startProgram has no program param. "
+                "commands=%s",
+                _command_names(appliance),
+            )
+            return False
+        command, param_name = resolved
+        return bool(HonProgramSelect._program_values(command, param_name))
+
+    @property
+    def current_option(self) -> str | None:
+        # The dotted settings mirror is the poll-refreshed cloud shadow; the live
+        # param value is the same category recovered at command load. Both are
+        # double-gated against the offered codes; an unknown value shows as unknown.
+        by_lower = {code.lower(): code for code in self._mode_codes}
+        raw = self._get_attr("startProgram.program")
+        if raw is None:
+            resolved = HonRefProgramSelect._start_program_param(self._appliance)
+            if resolved is not None:
+                command, param_name = resolved
+                params = getattr(command, "parameters", None) or {}
+                param = params.get(param_name) if isinstance(params, dict) else None
+                raw = getattr(param, "value", None)
+        if raw is None:
+            return None
+        token = str(raw).strip().lower()
+        return by_lower.get(token) or by_lower.get(token.rsplit(".", 1)[-1])
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in self._attr_options:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="program_not_found",
+                translation_placeholders={"program": option},
+            )
+        appliance = self._appliance
+        client = self._hon_client
+        if not appliance or not client:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="appliance_or_client_unavailable",
+            )
+        try:
+            _LOGGER.info(
+                "Select: HW mode '%s' -> startProgram id=%s",
+                option, redact_id(self._appliance_id),
+            )
+            await async_send_program(self.hass, client, appliance, option)
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            _LOGGER.error("Select: HW mode '%s' error: %s", option, err, exc_info=True)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="command_error",

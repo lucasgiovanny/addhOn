@@ -84,6 +84,10 @@ class HonNumberEntityDescription(NumberEntityDescription):
     fallback_min: float = 0.0
     fallback_max: float = 100.0
     fallback_step: float = 1.0
+    # When False the entity is registered DISABLED by default (advanced setpoints);
+    # our own field, not the upstream description flag, so the tables stay importable
+    # under the test stubs.
+    enabled_default: bool = True
 
 
 def _temp(key: str, param: str, translation_key=None) -> HonNumberEntityDescription:
@@ -136,12 +140,14 @@ _OVEN_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
 )
 
 # Heat pump water heater (HW): writable temperature setpoints from the settings
-# command of a real HP250M7C-F9 (issue log dump). tempSel is the main target;
-# hc/pv/sg are the per-mode targets (heater+compressor boost, photovoltaic
-# surplus, smart grid); sterilizationTempSel is the anti-legionella target.
-# Ranges are read live from the device schema; the fallback covers the typical
-# domestic hot water span.
-def _hw_temp(key: str, param: str) -> HonNumberEntityDescription:
+# command of a real HP250M7C-F9 (full schema dump: tempSel range[35,75,1], the
+# others range[55,75,1]). tempSel is the main target; hc/pv/sg are per-mode
+# targets (heater+compressor boost, photovoltaic surplus, smart grid) the
+# official app does not surface, so they register disabled by default;
+# sterilizationTempSel is the anti-legionella target. Ranges are read live from
+# the device schema; the fallback mirrors the dump.
+def _hw_temp(key: str, param: str, *, enabled_default: bool = True,
+             fallback_min: float = 35.0) -> HonNumberEntityDescription:
     return HonNumberEntityDescription(
         key=key,
         param=param,
@@ -149,18 +155,19 @@ def _hw_temp(key: str, param: str) -> HonNumberEntityDescription:
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         mode=NumberMode.BOX,
         icon="mdi:thermometer",
-        fallback_min=35.0,
+        fallback_min=fallback_min,
         fallback_max=75.0,
         fallback_step=1.0,
+        enabled_default=enabled_default,
     )
 
 
 _HEAT_PUMP_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
     _hw_temp("target_temp", "tempSel"),
-    _hw_temp("target_temp_hc", "hcTempSel"),
-    _hw_temp("target_temp_pv", "pvTempSel"),
-    _hw_temp("target_temp_sg", "sgTempSel"),
-    _hw_temp("sterilization_temp", "sterilizationTempSel"),
+    _hw_temp("target_temp_hc", "hcTempSel", enabled_default=False, fallback_min=55.0),
+    _hw_temp("target_temp_pv", "pvTempSel", enabled_default=False, fallback_min=55.0),
+    _hw_temp("target_temp_sg", "sgTempSel", enabled_default=False, fallback_min=55.0),
+    _hw_temp("sterilization_temp", "sterilizationTempSel", fallback_min=55.0),
 )
 
 NUMBERS: dict[str, tuple[HonNumberEntityDescription, ...]] = {
@@ -382,6 +389,7 @@ class HonNumber(HonBaseEntity, NumberEntity):
         self._enum_set = enum_set
         self._attr_translation_key = description.translation_key or description.key
         self._attr_unique_id = f"{appliance_id}_{description.key}"
+        self._attr_entity_registry_enabled_default = description.enabled_default
         # Range snapshot used as fallback; the live bounds are re-read from the
         # parameter on each access (the engine rules can change them at runtime). For an
         # enum the "range" is derived from the discrete set (min/max + a tiling step),
