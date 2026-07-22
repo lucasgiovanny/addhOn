@@ -449,6 +449,8 @@ class HonConnectivityBinarySensor(HonBinarySensor):
     be able to signal 'disconnected'. `on` = connected. Bypasses the availability gate
     of base_entity (which would mark it unavailable exactly when it is needed)."""
 
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
     @property
     def available(self) -> bool:
         # no connectivity gate: it is enough that the coordinator is ok and the appliance present
