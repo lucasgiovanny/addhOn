@@ -167,7 +167,8 @@ _HEAT_PUMP_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
     _hw_temp("target_temp_hc", "hcTempSel", enabled_default=False, fallback_min=55.0),
     _hw_temp("target_temp_pv", "pvTempSel", enabled_default=False, fallback_min=55.0),
     _hw_temp("target_temp_sg", "sgTempSel", enabled_default=False, fallback_min=55.0),
-    _hw_temp("sterilization_temp", "sterilizationTempSel", fallback_min=55.0),
+    _hw_temp("sterilization_temp", "sterilizationTempSel", enabled_default=False,
+             fallback_min=55.0),
 )
 
 NUMBERS: dict[str, tuple[HonNumberEntityDescription, ...]] = {

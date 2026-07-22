@@ -848,8 +848,10 @@ def _hw_pick_year(parts: list[str]) -> str:
 # hot-water gauge, tank volume, and the current-month/current-year energy split
 # by source (Cp = compressor, Ec = electric backup heater) with the accumulated
 # heat output. The 7-slot Day series is NOT exposed (its weekday origin is not
-# identifiable from one dump). Everything is capability-gated; the advanced
-# counters register disabled so the default device page stays small.
+# identifiable from one dump). Everything is capability-gated; the energy
+# counters and errors register disabled so the default device page stays small
+# (live-user feedback), enable them from the entity registry for the Energy
+# dashboard.
 _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
     HonSensorEntityDescription(
         key="hot_water_level",
@@ -868,16 +870,26 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
         gated=True,
         enabled_default=False,
     ),
-    _g_hw_energy("compressor_energy_month", "energyConsumptionMonthCp", _hw_pick_month),
+    _g_hw_energy("compressor_energy_month", "energyConsumptionMonthCp", _hw_pick_month,
+                 enabled_default=False),
     _g_hw_energy("compressor_energy_year", "energyConsumptionYearCp", _hw_pick_year,
                  enabled_default=False),
-    _g_hw_energy("heater_energy_month", "energyConsumptionMonthEc", _hw_pick_month),
+    _g_hw_energy("heater_energy_month", "energyConsumptionMonthEc", _hw_pick_month,
+                 enabled_default=False),
     _g_hw_energy("heater_energy_year", "energyConsumptionYearEc", _hw_pick_year,
                  enabled_default=False),
-    _g_hw_energy("heat_output_month", "accumulatedHeatMonth", _hw_pick_month),
+    _g_hw_energy("heat_output_month", "accumulatedHeatMonth", _hw_pick_month,
+                 enabled_default=False),
     _g_hw_energy("heat_output_year", "accumulatedHeatYear", _hw_pick_year,
                  enabled_default=False),
-    _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
+    HonSensorEntityDescription(
+        key="errors",
+        attr_key="errors",
+        icon="mdi:alert-circle-outline",
+        value_fn=_as_text,
+        gated=True,
+        enabled_default=False,
+    ),
 )
 
 # Robot vacuum (RVC): battery, state, time, power, areas, errors.
