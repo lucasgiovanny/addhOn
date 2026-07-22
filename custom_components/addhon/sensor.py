@@ -51,6 +51,7 @@ from .const import (
     APPLIANCE_FRE,
     APPLIANCE_HO,
     APPLIANCE_HOB,
+    APPLIANCE_HW,
     APPLIANCE_IH,
     APPLIANCE_KT,
     APPLIANCE_OV,
@@ -780,6 +781,53 @@ _WATER_HEATER: tuple[HonSensorEntityDescription, ...] = (
             translation_key="heater_phase", icon="mdi:water-boiler"),
 )
 
+
+def _g_energy(key: str, attr: str) -> HonSensorEntityDescription:
+    """Capability-gated periodic energy counter (kWh, resets per day/month/year)."""
+    return HonSensorEntityDescription(
+        key=key,
+        attr_key=attr,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        gated=True,
+    )
+
+
+# Heat pump water heater (HW): shares the WH temperature/volume set, plus the
+# HW-specific telemetry ground-truthed on a real HP250M7C-F9 (issue log dump):
+# remaining hot-water level, tank volume, and the per-period energy counters
+# split by source (Cp = compressor, Ec = electric backup heater) with the
+# accumulated heat output. Everything is capability-gated, so a model that does
+# not report a key simply creates no entity.
+_HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
+    HonSensorEntityDescription(
+        key="hot_water_level",
+        attr_key="remainingWaterLevel",
+        icon="mdi:water-percent",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+        gated=True,
+    ),
+    HonSensorEntityDescription(
+        key="tank_volume",
+        attr_key="productVolume",
+        icon="mdi:water-boiler",
+        native_unit_of_measurement=UnitOfVolume.LITERS,
+        gated=True,
+    ),
+    _g_energy("compressor_energy_day", "energyConsumptionDayCp"),
+    _g_energy("compressor_energy_month", "energyConsumptionMonthCp"),
+    _g_energy("compressor_energy_year", "energyConsumptionYearCp"),
+    _g_energy("heater_energy_day", "energyConsumptionDayEc"),
+    _g_energy("heater_energy_month", "energyConsumptionMonthEc"),
+    _g_energy("heater_energy_year", "energyConsumptionYearEc"),
+    _g_energy("heat_output_day", "accumulatedHeatDay"),
+    _g_energy("heat_output_month", "accumulatedHeatMonth"),
+    _g_energy("heat_output_year", "accumulatedHeatYear"),
+    _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
+)
+
 # Robot vacuum (RVC): battery, state, time, power, areas, errors.
 _VACUUM: tuple[HonSensorEntityDescription, ...] = (
     HonSensorEntityDescription(
@@ -831,6 +879,7 @@ SENSORS: dict[str, tuple[HonSensorEntityDescription, ...]] = {
     APPLIANCE_HO: _HOOD,
     APPLIANCE_KT: _COFFEE,
     APPLIANCE_WH: _WATER_HEATER,
+    APPLIANCE_HW: _HEAT_PUMP_WH,
     APPLIANCE_RVC: _VACUUM,
 }
 

@@ -78,7 +78,7 @@ card is in [`docs/debug-device.md`](docs/debug-device.md).
 Air conditioners (AC), washing machines (WM), tumble dryers (TD), washer-dryers
 (WD), refrigerators and freezers (REF/FR/FRE), ovens (OV), dishwashers (DW), wine
 coolers (WC), hobs (IH/HOB), hoods (HO), coffee machines/kettles (KT), water
-heaters (WH) and robot vacuums (RVC). Air conditioners and laundry appliances have
+heaters (WH), heat pump water heaters (HW) and robot vacuums (RVC). Air conditioners and laundry appliances have
 full control; the other types are exposed mainly as read-only sensors, with a few
 controls where they have been mapped.
 
@@ -93,6 +93,7 @@ controls where they have been mapped.
 - **Refrigerator:** Haier HDPW5620CNPK
 - **Refrigerator:** HCW58F18EWMP
 - **Oven:** HWO60SM5T5BH
+- **Heat pump water heater:** Haier HP250M7C-F9
 
 Other hOn-compatible Haier appliances should work; feel free to test and report.
 

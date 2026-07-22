@@ -23,6 +23,8 @@ _REGISTRY: dict[str, Type[ApplianceExtra]] = {
     "wc": wc.Appliance,
     "wd": wd.Appliance,
     "wh": wh.Appliance,
+    # HW (heat pump water heater) shares the WH logic: active = onOffStatus==1.
+    "hw": wh.Appliance,
     "wm": wm.Appliance,
 }
 

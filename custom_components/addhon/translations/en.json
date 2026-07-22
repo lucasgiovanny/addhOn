@@ -449,6 +449,39 @@
       },
       "last_refresh": {
         "name": "Last refresh"
+      },
+      "hot_water_level": {
+        "name": "Hot water level"
+      },
+      "tank_volume": {
+        "name": "Tank volume"
+      },
+      "compressor_energy_day": {
+        "name": "Compressor energy today"
+      },
+      "compressor_energy_month": {
+        "name": "Compressor energy this month"
+      },
+      "compressor_energy_year": {
+        "name": "Compressor energy this year"
+      },
+      "heater_energy_day": {
+        "name": "Electric heater energy today"
+      },
+      "heater_energy_month": {
+        "name": "Electric heater energy this month"
+      },
+      "heater_energy_year": {
+        "name": "Electric heater energy this year"
+      },
+      "heat_output_day": {
+        "name": "Heat output today"
+      },
+      "heat_output_month": {
+        "name": "Heat output this month"
+      },
+      "heat_output_year": {
+        "name": "Heat output this year"
       }
     },
     "binary_sensor": {
@@ -571,6 +604,27 @@
       },
       "update_ok": {
         "name": "Update OK"
+      },
+      "compressor_running": {
+        "name": "Compressor"
+      },
+      "electric_heater_running": {
+        "name": "Electric heater"
+      },
+      "aux_heater_running": {
+        "name": "Auxiliary heater"
+      },
+      "boiler_heating": {
+        "name": "Boiler heating"
+      },
+      "antifreeze": {
+        "name": "Antifreeze protection"
+      },
+      "defrost": {
+        "name": "Defrost"
+      },
+      "off_peak_signal": {
+        "name": "Off-peak signal"
       }
     },
     "switch": {
@@ -666,6 +720,15 @@
       },
       "mqtt_realtime_debug": {
         "name": "MQTT realtime debug"
+      },
+      "power": {
+        "name": "Power"
+      },
+      "boost": {
+        "name": "Boost"
+      },
+      "silent_mode": {
+        "name": "Silent mode"
       }
     },
     "number": {
@@ -695,6 +758,18 @@
       },
       "delay_time": {
         "name": "Delayed start"
+      },
+      "target_temp_hc": {
+        "name": "Target temperature (heater + compressor)"
+      },
+      "target_temp_pv": {
+        "name": "Target temperature (PV mode)"
+      },
+      "target_temp_sg": {
+        "name": "Target temperature (smart grid)"
+      },
+      "sterilization_temp": {
+        "name": "Anti-legionella temperature"
       }
     },
     "select": {

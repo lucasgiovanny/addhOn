@@ -18,6 +18,7 @@ from .ac_command import async_send_settings, settings_param
 from .base_entity import HonAccountEntity, HonBaseEntity
 from .const import (
     APPLIANCE_AC,
+    APPLIANCE_HW,
     APPLIANCE_TD,
     APPLIANCE_WASH_GROUP,
     APPLIANCE_WC,
@@ -83,11 +84,25 @@ _WC_SWITCHES: tuple[HonSettingsSwitchDescription, ...] = (
 )
 
 
+# Heat pump water heater (HW) switches: 0/1 parameters of the settings command,
+# ground-truthed on a real HP250M7C-F9 (issue log dump: settings.onOffStatus,
+# settings.boostStatus, settings.silentStatus, settings.lockStatus,
+# settings.sterilizationStatus). Capability-gated like the AC toggles.
+_HW_SWITCHES: tuple[HonSettingsSwitchDescription, ...] = (
+    HonSettingsSwitchDescription(key="power", param="onOffStatus", icon="mdi:power"),
+    HonSettingsSwitchDescription(key="boost", param="boostStatus", icon="mdi:rocket-launch-outline"),
+    HonSettingsSwitchDescription(key="silent_mode", param="silentStatus", icon="mdi:volume-off"),
+    HonSettingsSwitchDescription(key="child_lock", param="lockStatus", icon="mdi:lock"),
+    HonSettingsSwitchDescription(key="sterilization", param="sterilizationStatus", icon="mdi:bacteria-outline"),
+)
+
+
 # Per-type settings-command switch tables. Every appliance here shares HonSettingsSwitch:
 # each switch reads/writes a 0/1 parameter of the device's `settings` command, capability-gated.
 _SETTINGS_SWITCHES: dict[str, tuple[HonSettingsSwitchDescription, ...]] = {
     APPLIANCE_AC: _AC_SWITCHES,
     APPLIANCE_WC: _WC_SWITCHES,
+    APPLIANCE_HW: _HW_SWITCHES,
 }
 
 

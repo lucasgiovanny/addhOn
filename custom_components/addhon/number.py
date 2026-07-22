@@ -45,6 +45,7 @@ from .base_entity import HonBaseEntity
 from .const import (
     APPLIANCE_FR,
     APPLIANCE_FRE,
+    APPLIANCE_HW,
     APPLIANCE_OV,
     APPLIANCE_REF,
     APPLIANCE_TD,
@@ -134,12 +135,41 @@ _OVEN_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
     ),
 )
 
+# Heat pump water heater (HW): writable temperature setpoints from the settings
+# command of a real HP250M7C-F9 (issue log dump). tempSel is the main target;
+# hc/pv/sg are the per-mode targets (heater+compressor boost, photovoltaic
+# surplus, smart grid); sterilizationTempSel is the anti-legionella target.
+# Ranges are read live from the device schema; the fallback covers the typical
+# domestic hot water span.
+def _hw_temp(key: str, param: str) -> HonNumberEntityDescription:
+    return HonNumberEntityDescription(
+        key=key,
+        param=param,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        mode=NumberMode.BOX,
+        icon="mdi:thermometer",
+        fallback_min=35.0,
+        fallback_max=75.0,
+        fallback_step=1.0,
+    )
+
+
+_HEAT_PUMP_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
+    _hw_temp("target_temp", "tempSel"),
+    _hw_temp("target_temp_hc", "hcTempSel"),
+    _hw_temp("target_temp_pv", "pvTempSel"),
+    _hw_temp("target_temp_sg", "sgTempSel"),
+    _hw_temp("sterilization_temp", "sterilizationTempSel"),
+)
+
 NUMBERS: dict[str, tuple[HonNumberEntityDescription, ...]] = {
     APPLIANCE_REF: _COOLING_NUMBERS,
     APPLIANCE_FR: _COOLING_NUMBERS,
     APPLIANCE_FRE: _COOLING_NUMBERS,
     APPLIANCE_WC: _WINE_NUMBERS,
     APPLIANCE_OV: _OVEN_NUMBERS,
+    APPLIANCE_HW: _HEAT_PUMP_NUMBERS,
 }
 
 

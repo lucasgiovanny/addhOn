@@ -32,6 +32,7 @@ from .const import (
     APPLIANCE_FRE,
     APPLIANCE_HO,
     APPLIANCE_HOB,
+    APPLIANCE_HW,
     APPLIANCE_IH,
     APPLIANCE_OV,
     APPLIANCE_REF,
@@ -298,6 +299,53 @@ _WATER_HEATER_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
     ),
 )
 
+# Heat pump water heater (HW): heating-source and protection statuses,
+# ground-truthed on a real HP250M7C-F9 (issue log dump). The writable toggles
+# (power/boost/silent/child lock/anti-legionella) are switches, not binaries.
+_HEAT_PUMP_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
+    HonBinarySensorEntityDescription(
+        key="compressor_running",
+        attr_key="compressorHeatingCurrentStatus",
+        icon="mdi:heat-pump",
+        device_class=BinarySensorDeviceClass.RUNNING,
+    ),
+    HonBinarySensorEntityDescription(
+        key="electric_heater_running",
+        attr_key="electricHeatingCurrentStatus",
+        icon="mdi:radiator",
+        device_class=BinarySensorDeviceClass.RUNNING,
+    ),
+    HonBinarySensorEntityDescription(
+        key="aux_heater_running",
+        attr_key="auxElecHeatingStatus",
+        icon="mdi:radiator",
+        device_class=BinarySensorDeviceClass.RUNNING,
+    ),
+    HonBinarySensorEntityDescription(
+        key="boiler_heating",
+        attr_key="boilerHeatingCurrentStatus",
+        icon="mdi:water-boiler",
+        device_class=BinarySensorDeviceClass.RUNNING,
+    ),
+    HonBinarySensorEntityDescription(
+        key="antifreeze",
+        attr_key="antifreezingStatus",
+        icon="mdi:snowflake-alert",
+        device_class=BinarySensorDeviceClass.RUNNING,
+    ),
+    HonBinarySensorEntityDescription(
+        key="defrost",
+        attr_key="autoDefrostStatus",
+        icon="mdi:snowflake-melt",
+        device_class=BinarySensorDeviceClass.RUNNING,
+    ),
+    HonBinarySensorEntityDescription(
+        key="off_peak_signal",
+        attr_key="offpeakSignalCurrentStatus",
+        icon="mdi:transmission-tower",
+    ),
+)
+
 BINARY_SENSORS: dict[str, tuple[HonBinarySensorEntityDescription, ...]] = {
     APPLIANCE_WM: _WASH_BINARY,
     APPLIANCE_WD: _WASH_BINARY,
@@ -314,6 +362,7 @@ BINARY_SENSORS: dict[str, tuple[HonBinarySensorEntityDescription, ...]] = {
     APPLIANCE_HOB: _HOB_BINARY,
     APPLIANCE_HO: _HOOD_BINARY,
     APPLIANCE_WH: _WATER_HEATER_BINARY,
+    APPLIANCE_HW: _HEAT_PUMP_BINARY,
 }
 
 

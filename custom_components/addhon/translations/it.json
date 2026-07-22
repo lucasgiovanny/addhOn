@@ -449,6 +449,39 @@
       },
       "last_refresh": {
         "name": "Ultimo aggiornamento"
+      },
+      "hot_water_level": {
+        "name": "Livello acqua calda"
+      },
+      "tank_volume": {
+        "name": "Volume serbatoio"
+      },
+      "compressor_energy_day": {
+        "name": "Energia compressore oggi"
+      },
+      "compressor_energy_month": {
+        "name": "Energia compressore questo mese"
+      },
+      "compressor_energy_year": {
+        "name": "Energia compressore quest'anno"
+      },
+      "heater_energy_day": {
+        "name": "Energia resistenza oggi"
+      },
+      "heater_energy_month": {
+        "name": "Energia resistenza questo mese"
+      },
+      "heater_energy_year": {
+        "name": "Energia resistenza quest'anno"
+      },
+      "heat_output_day": {
+        "name": "Calore prodotto oggi"
+      },
+      "heat_output_month": {
+        "name": "Calore prodotto questo mese"
+      },
+      "heat_output_year": {
+        "name": "Calore prodotto quest'anno"
       }
     },
     "binary_sensor": {
@@ -571,6 +604,27 @@
       },
       "update_ok": {
         "name": "Aggiornamento OK"
+      },
+      "compressor_running": {
+        "name": "Compressore"
+      },
+      "electric_heater_running": {
+        "name": "Resistenza elettrica"
+      },
+      "aux_heater_running": {
+        "name": "Resistenza ausiliaria"
+      },
+      "boiler_heating": {
+        "name": "Riscaldamento caldaia"
+      },
+      "antifreeze": {
+        "name": "Protezione antigelo"
+      },
+      "defrost": {
+        "name": "Sbrinamento"
+      },
+      "off_peak_signal": {
+        "name": "Segnale fascia economica"
       }
     },
     "switch": {
@@ -666,6 +720,15 @@
       },
       "mqtt_realtime_debug": {
         "name": "Debug MQTT realtime"
+      },
+      "power": {
+        "name": "Accensione"
+      },
+      "boost": {
+        "name": "Boost"
+      },
+      "silent_mode": {
+        "name": "Modalità silenziosa"
       }
     },
     "number": {
@@ -695,6 +758,18 @@
       },
       "delay_time": {
         "name": "Partenza ritardata"
+      },
+      "target_temp_hc": {
+        "name": "Temperatura target (resistenza + compressore)"
+      },
+      "target_temp_pv": {
+        "name": "Temperatura target (modalità PV)"
+      },
+      "target_temp_sg": {
+        "name": "Temperatura target (smart grid)"
+      },
+      "sterilization_temp": {
+        "name": "Temperatura anti-legionella"
       }
     },
     "select": {

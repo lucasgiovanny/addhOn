@@ -38,6 +38,7 @@ APPLIANCE_HOB = "HOB"     # Hob (alias)
 APPLIANCE_HO  = "HO"      # Hood
 APPLIANCE_KT  = "KT"      # Coffee machine / kettle
 APPLIANCE_WH  = "WH"      # Water heater
+APPLIANCE_HW  = "HW"      # Heat pump water heater
 APPLIANCE_RVC = "RVC"     # Robot vacuum cleaner
 
 # Groups all washing machine/tumble dryer/washer-dryer appliances
