@@ -239,7 +239,7 @@ def _load_entity_block(lang: str) -> dict[str, set[str]]:
 class EntityTranslationKeyTest(unittest.TestCase):
     def test_code_keys_match_translations_exactly(self) -> None:
         used = _collect_code_keys()
-        for lang in ("en", "it"):
+        for lang in ("en", "it", "pt-BR", "pt"):
             block = _load_entity_block(lang)
             for platform, code_keys in used.items():
                 json_keys = block.get(platform, set())
@@ -276,7 +276,7 @@ def _code_translation_key_literals() -> set[str]:
 class CodeTranslationKeyLiteralsTest(unittest.TestCase):
     def test_every_literal_key_is_translated(self) -> None:
         used = _code_translation_key_literals()
-        for lang in ("en", "it"):
+        for lang in ("en", "it", "pt-BR", "pt"):
             data = json.loads((COMPONENT / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
             entity_keys = {k for plat in data.get("entity", {}).values() for k in plat}
             exc_keys = set(data.get("exceptions", {}))
@@ -292,7 +292,7 @@ class CodeTranslationKeyLiteralsTest(unittest.TestCase):
 
     def test_no_orphan_exception_keys(self) -> None:
         used = _code_translation_key_literals()
-        for lang in ("en", "it"):
+        for lang in ("en", "it", "pt-BR", "pt"):
             data = json.loads((COMPONENT / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
             exc_keys = set(data.get("exceptions", {}))
             orphan = exc_keys - used
@@ -329,7 +329,7 @@ class ExceptionPlaceholderTest(unittest.TestCase):
 
     def test_placeholders_match_message_tokens(self) -> None:
         sites = _exception_raise_sites()
-        for lang in ("en", "it"):
+        for lang in ("en", "it", "pt-BR", "pt"):
             data = json.loads((COMPONENT / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
             exc = data.get("exceptions", {})
             checked = 0
@@ -368,7 +368,7 @@ class PlaceholderQuotingTest(unittest.TestCase):
     _SINGLE_QUOTED = re.compile(r"'\{\w+\}'")
 
     def test_no_placeholder_inside_single_quotes(self) -> None:
-        for lang in ("en", "it"):
+        for lang in ("en", "it", "pt-BR", "pt"):
             data = json.loads((COMPONENT / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
             offenders = [
                 (path, value)
@@ -404,7 +404,7 @@ class SensorStateTranslationTest(unittest.TestCase):
     def test_enum_options_match_state_translations(self) -> None:
         by_tk = _collect_sensor_state_options()
         self.assertTrue(by_tk, "no ENUM sensor options were collected")
-        for lang in ("en", "it"):
+        for lang in ("en", "it", "pt-BR", "pt"):
             data = json.loads((COMPONENT / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
             sensor_block = data.get("entity", {}).get("sensor", {})
             for tk, options in by_tk.items():
@@ -465,7 +465,7 @@ class SelectStateTranslationTest(unittest.TestCase):
     def test_label_mapped_select_state_matches_translations(self) -> None:
         by_tk = _collect_select_state_keys()
         self.assertTrue(by_tk, "no label-mapped select options were collected")
-        for lang in ("en", "it"):
+        for lang in ("en", "it", "pt-BR", "pt"):
             data = json.loads((COMPONENT / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
             select_block = data.get("entity", {}).get("select", {})
             for tk, keys in by_tk.items():

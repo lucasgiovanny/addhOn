@@ -20,7 +20,7 @@ from pathlib import Path
 
 COMPONENT = Path(__file__).resolve().parents[1] / "custom_components" / "addhon"
 TRANSLATIONS = COMPONENT / "translations"
-LANGS = ("en", "it")
+LANGS = ("en", "it", "pt-BR", "pt")
 
 
 def _load(lang: str) -> dict:
