@@ -742,7 +742,7 @@
         "name": "Lower zone temperature"
       },
       "target_temp": {
-        "name": "Temperature"
+        "name": "Target temperature"
       },
       "target_temp_oven": {
         "name": "Oven temperature"

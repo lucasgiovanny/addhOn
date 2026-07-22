@@ -742,7 +742,7 @@
         "name": "Temperatura Zona Inferiore"
       },
       "target_temp": {
-        "name": "Temperatura"
+        "name": "Temperatura target"
       },
       "target_temp_oven": {
         "name": "Temperatura Forno"
