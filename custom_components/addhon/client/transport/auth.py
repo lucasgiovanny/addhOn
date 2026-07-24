@@ -25,6 +25,7 @@ from yarl import URL
 
 from ...debug_utils import redact_remoting_summary
 from ...error_codes import (
+    ACCOUNT_ACTION_REQUIRED,
     MFA_CODE_INVALID,
     MFA_REQUIRED,
     MFA_SEND_FAILED,
@@ -32,9 +33,11 @@ from ...error_codes import (
     MFA_TOKEN_AFTER_VERIFY_FAILED,
 )
 from ..auth_diagnostics import (
+    ACCOUNT_ACTION_VERDICTS,
     AuthDiagnosticTrace,
+    analyze_page,
     classify_endpoint,
-    summarize_html,
+    classify_token_page,
     summarize_json,
     summarize_links,
     summarize_response,
@@ -135,6 +138,17 @@ class MFATokenAfterVerifyFailed(NativeAuthError):
     error_code = MFA_TOKEN_AFTER_VERIFY_FAILED
 
 
+class AccountActionRequired(NativeAuthError):
+    """The password was accepted but the account is parked on a step only the USER can
+    clear (a set/change-password form, a consent wall) instead of the token hand-off.
+
+    Structurally detected on the token page (issue #67): retrying cannot fix it, so it
+    gets its own code and a message that says WHERE to go, rather than the mute
+    "token retrieval failed"."""
+
+    error_code = ACCOUNT_ACTION_REQUIRED
+
+
 class _NoAuthNeeded(Exception):
     """The authorize page was already the redirect with the tokens (login not needed)."""
 
@@ -231,9 +245,60 @@ class HonAuth:
             ),
         )
 
-    def _diagnostic_html(self, phase: str, text: Any) -> None:
-        if self._auth_trace.enabled:
-            self._auth_trace.html(phase, summarize_html(text))
+    def _diagnostic_page(
+        self, phase: str, url: Any, text: Any
+    ) -> tuple[Any, Any] | None:
+        """Emit the structure AND the named identity of a page (issue #67).
+
+        The skeleton is emitted only for a page the flow did not expect: on the known
+        stops it would be noise, on an unexpected landing page it is what identifies it
+        without a second round-trip to the reporter. Returns the summary pair so a
+        caller that later needs a verdict does not parse the same body twice."""
+        if not self._auth_trace.enabled:
+            return None
+        try:
+            shape, page = analyze_page(url, text)
+        except Exception:  # noqa: BLE001 - diagnostics are observational, never fatal
+            return None
+        self._auth_trace.html(phase, shape)
+        self._auth_trace.page(phase, page)
+        if shape.page_kind not in ("login", "progressive_login", "oauth_done", "mfa"):
+            self._auth_trace.skeleton(phase, shape)
+        return shape, page
+
+    def _page_verdict(
+        self,
+        phase: str,
+        url: Any,
+        text: Any,
+        summaries: tuple[Any, Any] | None = None,
+    ) -> str:
+        """Why a page is a dead end, as a controlled verdict. Runs with the diagnostics
+        OFF too: the actionable error must not depend on the opt-in checkbox. Reuses the
+        summaries the trace already built, when there are any."""
+        verdict = "unknown"
+        try:
+            shape, page = summaries if summaries else analyze_page(url, text)
+            verdict = classify_token_page(shape, page)
+        except Exception:  # noqa: BLE001 - a diagnostic must never replace the failure
+            verdict = "unknown"
+        self._auth_trace.verdict(phase, verdict)
+        return verdict
+
+    def _guard_account_action(
+        self,
+        phase: str,
+        url: Any,
+        text: Any,
+        summaries: tuple[Any, Any] | None = None,
+    ) -> None:
+        """Raise AccountActionRequired when a dead-end page is a step only the USER can
+        clear, instead of the mute "no href" the caller would otherwise raise."""
+        verdict = self._page_verdict(phase, url, text, summaries)
+        if verdict in ACCOUNT_ACTION_VERDICTS:
+            raise AccountActionRequired(
+                f"{phase}: account action required ({verdict})"
+            )
 
     def _diagnostic_links(
         self, phase: str, hrefs: list[str], selected_index: int = -1
@@ -259,7 +324,7 @@ class HonAuth:
         async with self._session.get(url, headers=self._ua()) as resp:
             text = await resp.text()
             self._diagnostic_response("introduce", resp, text, started)
-            self._diagnostic_html("introduce", text)
+            self._diagnostic_page("introduce", url, text)
             self._expires = datetime.now(timezone.utc)
             login_url = extract_login_url(text)
             if login_url is None:
@@ -323,7 +388,7 @@ class HonAuth:
         ) as resp:
             text = await resp.text()
             self._diagnostic_response("login_page", resp, text, started)
-            self._diagnostic_html("login_page", text)
+            self._diagnostic_page("login_page", login_url, text)
             match = _FWUID_RE.findall(text)
             if not match:
                 self._phase("login_page", status=resp.status, fwuid=False)
@@ -369,19 +434,27 @@ class HonAuth:
         started = self._diagnostic_request(
             "post_login", "GET", "post_login"
         )
-        async with self._session.get(absolutize(url), headers=self._ua()) as resp:
+        post_login_url = absolutize(url)
+        async with self._session.get(post_login_url, headers=self._ua()) as resp:
             if resp.status != 200:
                 self._diagnostic_response("post_login", resp, b"", started)
                 self._phase("get_token", status=resp.status)
                 raise NativeAuthError(f"get_token: status {resp.status}")
             text = await resp.text()
             self._diagnostic_response("post_login", resp, text, started)
-            self._diagnostic_html("post_login", text)
+            post_login_summaries = self._diagnostic_page(
+                "post_login", post_login_url, text
+            )
             href = _HREF_RE.findall(text)
             self._diagnostic_links(
                 "post_login", href, selected_index=0 if href else -1
             )
         if not href:
+            # A post-login page with no next hop may BE the account step (a consent form
+            # has no navigation href at all), so name it before failing (issue #67).
+            self._guard_account_action(
+                "post_login", post_login_url, text, post_login_summaries
+            )
             self._phase("get_token", status=resp.status, href=False)
             raise NativeAuthError("get_token: no href")
         if "ProgressiveLogin" in href[0]:
@@ -399,11 +472,13 @@ class HonAuth:
                 self._diagnostic_response(
                     "progressive_page", resp, prog_text, started
                 )
-                self._diagnostic_html("progressive_page", prog_text)
                 # resp.url is the final (post-redirect) URL; fall back to the requested
                 # href (absolutized, so the MfaContext host derivation is correct) if the
                 # response object does not expose it (e.g. test doubles).
                 prog_url = str(getattr(resp, "url", "") or absolutize(href[0]))
+                prog_summaries = self._diagnostic_page(
+                    "progressive_page", prog_url, prog_text
+                )
             # 2FA: when email OTP is enabled this page IS the verification step (no
             # usable redirect href -- the first one is a CSS asset). Detect it and
             # pause the login with the context to resume; otherwise behave exactly as
@@ -422,6 +497,9 @@ class HonAuth:
                 selected_index=0 if href else -1,
             )
             if not href:  # like the guard after the first findall: no IndexError
+                self._guard_account_action(
+                    "progressive_page", prog_url, prog_text, prog_summaries
+                )
                 raise NativeAuthError("progressive: no href")
         token_url = absolutize(href[0])
         self._phase("get_token", status=200, href=True)
@@ -438,11 +516,26 @@ class HonAuth:
             self._diagnostic_response(
                 "token_response", resp, token_text, started
             )
-            self._diagnostic_html("token_response", token_text)
+            token_summaries = self._diagnostic_page(
+                "token_response", token_url, token_text
+            )
             self._diagnostic_tokens("token_response", token_text)
             tokens = parse_token_fragment(token_text)
         if not tokens.complete:
-            raise NativeAuthError("token page: incomplete tokens")
+            # The page that should carry the OAuth hand-off did not. Say WHAT it carried
+            # instead: a set/change-password form or a consent wall is an account step
+            # only the user can clear, and retrying it forever (ADDHON-130) told them
+            # nothing (issue #67). Never let the classification break the login: a
+            # diagnostic failure must still raise the original token error.
+            verdict = self._page_verdict(
+                "token_response", token_url, token_text, token_summaries
+            )
+            self._phase("get_token", tokens_complete=False, page=verdict)
+            if verdict in ACCOUNT_ACTION_VERDICTS:
+                raise AccountActionRequired(
+                    f"token page: account action required ({verdict})"
+                )
+            raise NativeAuthError(f"token page: incomplete tokens ({verdict})")
         self.access_token = tokens.access_token
         self.refresh_token = tokens.refresh_token
         self.id_token = tokens.id_token
@@ -608,7 +701,7 @@ class HonAuth:
         async with self._session.get(url, headers=self._ua()) as resp:
             text = await resp.text()
             self._diagnostic_response("resume_token", resp, text, started)
-            self._diagnostic_html("resume_token", text)
+            self._diagnostic_page("resume_token", url, text)
         self._expires = datetime.now(timezone.utc)
         # Extract the done-URL FIRST and parse only it (mirrors the live-validated probe).
         # Parsing the whole page first would let a stray `*_token=...&` substring elsewhere

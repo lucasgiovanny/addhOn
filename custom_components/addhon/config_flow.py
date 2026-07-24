@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 import voluptuous as vol
@@ -47,6 +48,16 @@ def _error_base_and_code(exc: BaseException, fallback_base: str) -> tuple[str, s
             return code.slug, code.label
         return fallback_base, code.label
     return fallback_base, ""
+
+
+def _discard_diagnostics(client: Any) -> None:
+    """Drop a client's buffered auth trace before closing it.
+
+    Duck-typed: the config-flow tests pass doubles, and a client without the opt-in
+    diagnostics simply has nothing to discard."""
+    discard = getattr(client, "discard_auth_diagnostics", None)
+    if callable(discard):
+        discard()
 
 
 def _redact_email(email: str | None) -> str | None:
@@ -364,30 +375,120 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._mfa_data = data
         self._mfa_reauth_entry = reauth_entry
 
-    async def _async_close_mfa_client(self) -> None:
-        """Tear down the held 2FA client. Idempotent (clears the ref first), so it is
-        safe to call from both the success path and the flow-removal hook."""
+    def _detach_mfa_client(self) -> Any:
+        """Take the held 2FA client off the flow and return it, or None.
+
+        Runs on the caller's thread and clears the state FIRST, so a teardown handed to
+        another thread can never be scheduled twice for the same client. The cached form
+        data goes with it: ``_mfa_data`` holds the plaintext password and
+        ``_mfa_reauth_entry`` the reauth target, so stale credentials are not left
+        reachable on the flow object after success, abort, or removal."""
         client = self._mfa_client
         self._mfa_client = None
         self._mfa_context = None
-        # Drop the cached form data too: _mfa_data holds the plaintext password and
-        # _mfa_reauth_entry the reauth target, so stale credentials/state are not left
-        # reachable on the flow object after success, abort, or async_remove.
         self._mfa_data = None
         self._mfa_reauth_entry = None
-        if client is not None:
-            try:
-                discard = getattr(client, "discard_auth_diagnostics", None)
-                if callable(discard):
-                    discard()
-                await client.async_close()
-            except Exception as err:  # noqa: BLE001 - cleanup must not mask the flow
-                _LOGGER.warning("Error closing HonClient after 2FA: %s", err)
+        return client
 
-    async def async_remove(self) -> None:
+    async def _async_close_client(self, client: Any) -> None:
+        """Close a detached client on the event loop (``async_close`` does the blocking
+        part on the executor, so this never stalls the loop)."""
+        try:
+            _discard_diagnostics(client)
+            await client.async_close()
+        except Exception as err:  # noqa: BLE001 - cleanup must not mask the flow
+            _LOGGER.warning("Error closing HonClient after 2FA: %s", err)
+
+    @staticmethod
+    def _close_client_sync(client: Any) -> None:
+        """Blocking twin of :meth:`_async_close_client`. Waits on the client's dedicated
+        loop and joins its thread, so it belongs on an executor or a thread of its own,
+        never on the event-loop thread."""
+        try:
+            _discard_diagnostics(client)
+            client.close_sync()
+        except Exception as err:  # noqa: BLE001 - cleanup must not mask the removal
+            _LOGGER.warning("Error closing HonClient after 2FA: %s", err)
+
+    async def _async_close_mfa_client(self) -> None:
+        """Tear down the held 2FA client. Idempotent (detaches first), so it is safe to
+        call from both the success path and the flow-removal hook."""
+        client = self._detach_mfa_client()
+        if client is not None:
+            await self._async_close_client(client)
+
+    def async_remove(self) -> None:
         """Called by HA when the flow is removed/aborted/abandoned: close the held 2FA
-        client so an unfinished verification does not leak its loop/thread/session."""
-        await self._async_close_mfa_client()
+        client so an unfinished verification does not leak its loop/thread/session.
+
+        SYNC on purpose. ``data_entry_flow`` calls ``flow.async_remove()`` WITHOUT
+        awaiting it, so the previous coroutine version was never executed: Home
+        Assistant only logged "coroutine 'ConfigFlow.async_remove' was never awaited"
+        and the client kept its loop, thread and aiohttp session alive.
+
+        The teardown itself BLOCKS (it waits on the client's dedicated loop and joins its
+        thread), so it must never run on the event-loop thread. The strategies below are
+        tried in order and the first one that accepts the work wins; the last one brings
+        its own thread, so an HA that refuses both of its schedulers can neither be
+        stalled by the teardown nor leak the client."""
+        client = self._detach_mfa_client()
+        if client is None:
+            return
+        for schedule in (
+            self._teardown_on_event_loop,
+            self._teardown_in_executor,
+            self._teardown_in_own_thread,
+        ):
+            if schedule(client):
+                return
+        _LOGGER.warning(
+            "Could not schedule the 2FA client teardown; giving up on this client"
+        )
+
+    def _teardown_on_event_loop(self, client: Any) -> bool:
+        """Preferred: the async teardown as a task on Home Assistant's loop."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return False
+        coro = self._async_close_client(client)
+        try:
+            hass.async_create_task(coro)
+        except Exception as err:  # noqa: BLE001 - the next strategy takes over
+            # Closing the coroutine matters: an un-awaited one would reproduce the very
+            # warning this method exists to remove.
+            coro.close()
+            _LOGGER.debug("2FA teardown: async_create_task refused it (%s)", err)
+            return False
+        return True
+
+    def _teardown_in_executor(self, client: Any) -> bool:
+        """Fallback: the blocking teardown on Home Assistant's executor."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return False
+        try:
+            hass.async_add_executor_job(self._close_client_sync, client)
+        except Exception as err:  # noqa: BLE001 - the next strategy takes over
+            _LOGGER.debug("2FA teardown: the executor refused it (%s)", err)
+            return False
+        return True
+
+    def _teardown_in_own_thread(self, client: Any) -> bool:
+        """Last resort: our own thread, so no Home Assistant scheduler is needed at all.
+
+        Daemon on purpose: if Home Assistant is going down, a teardown must not hold the
+        process up (the client's own loop thread is a daemon for the same reason)."""
+        try:
+            threading.Thread(
+                target=self._close_client_sync,
+                args=(client,),
+                name="addhon_2fa_teardown",
+                daemon=True,
+            ).start()
+        except Exception as err:  # noqa: BLE001 - nothing left to try
+            _LOGGER.debug("2FA teardown: could not start a thread for it (%s)", err)
+            return False
+        return True
 
     async def async_step_2fa(
         self, user_input: dict[str, Any] | None = None
