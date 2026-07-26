@@ -804,5 +804,85 @@ class GvigrouxImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("x-1_mean_water_consumption", uids)
 
 
+class HeatPumpEnergyCountersTest(unittest.IsolatedAsyncioTestCase):
+    """HW period counters, against the real HP250M7C-F9 diagnostics dump.
+
+    Captured 2026-07-26 08:00 (device clock), so July == slot index 6 and the Year
+    series' last element is the year to date.
+    """
+
+    # Verbatim from the dump.
+    DUMP = {
+        "date": "2026-07-26",
+        "weekDay": 7,
+        "energyConsumptionMonthCp": "0;0;0;0;0;0;11;0;0;0;0;0",
+        "energyConsumptionMonthEc": "0;0;0;0;0;0;8;0;0;0;0;0",
+        "accumulatedHeatMonth": "0;0;0;0;0;0;125;0;0;0;0;0",
+        "energyConsumptionYearCp": "0;0;0;0;11",
+        "energyConsumptionYearEc": "0;0;0;0;8",
+        "accumulatedHeatYear": "0;0;0;0;125",
+    }
+
+    async def _values(self, attributes: dict) -> dict:
+        added = await _build_sensors("HW", attributes)
+        return {e.entity_description.key: e.native_value for e in added}
+
+    async def test_month_slot_indexed_by_device_clock(self) -> None:
+        values = await self._values(dict(self.DUMP))
+        self.assertEqual(values["compressor_energy_month"], 11.0)
+        self.assertEqual(values["heater_energy_month"], 8.0)
+        self.assertEqual(values["heat_output_month"], 125.0)
+
+    async def test_month_slot_follows_the_device_not_the_host(self) -> None:
+        # Same series, device clock rewound to March -> slot 2, which is empty. If the
+        # picker used the HOST date this would still report July's 11.
+        march = dict(self.DUMP, date="2026-03-15")
+        self.assertEqual((await self._values(march))["compressor_energy_month"], 0.0)
+
+    async def test_month_falls_back_when_device_clock_absent(self) -> None:
+        # No `date` attribute: still resolves a slot rather than going unknown.
+        no_date = {k: v for k, v in self.DUMP.items() if k != "date"}
+        self.assertIsNotNone((await self._values(no_date))["compressor_energy_month"])
+
+    async def test_year_is_the_month_sum_and_matches_the_dump_invariant(self) -> None:
+        # The whole point of reading the Month series for the yearly counters: the sum
+        # must reproduce the Year series' last element the device itself reports.
+        values = await self._values(dict(self.DUMP))
+        self.assertEqual(values["compressor_energy_year"], 11.0)
+        self.assertEqual(values["heater_energy_year"], 8.0)
+        self.assertEqual(values["heat_output_year"], 125.0)
+
+    async def test_year_survives_a_window_that_never_slides(self) -> None:
+        # A device that does not slide its 5-year window on 1 January would freeze a
+        # parts[-1] reading on the old year. Reading the Month series is immune, so a
+        # stale (or missing) Year series must not affect the result.
+        stale = {k: v for k, v in self.DUMP.items() if not k.endswith(("YearCp", "YearEc"))}
+        stale["accumulatedHeatYear"] = "0;0;0;0;0"
+        values = await self._values(stale)
+        self.assertEqual(values["compressor_energy_year"], 11.0)
+        self.assertEqual(values["heat_output_year"], 125.0)
+
+    async def test_heat_output_is_not_offered_as_an_energy_source(self) -> None:
+        # Electricity keeps the ENERGY device class (Energy dashboard selectable);
+        # thermal output must NOT, or adding it there inflates consumption ~6x.
+        from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+
+        added = {e.entity_description.key: e.entity_description
+                 for e in await _build_sensors("HW", dict(self.DUMP))}
+        for key in ("compressor_energy_month", "compressor_energy_year",
+                    "heater_energy_month", "heater_energy_year"):
+            self.assertEqual(added[key].device_class, SensorDeviceClass.ENERGY, key)
+        for key in ("heat_output_month", "heat_output_year"):
+            self.assertIsNone(added[key].device_class, key)
+            # Still recorded as long-term statistics.
+            self.assertEqual(added[key].state_class, SensorStateClass.TOTAL_INCREASING, key)
+
+    async def test_malformed_series_reports_unknown(self) -> None:
+        broken = dict(self.DUMP, energyConsumptionMonthCp="not;a;series")
+        values = await self._values(broken)
+        self.assertIsNone(values["compressor_energy_month"])
+        self.assertIsNone(values["compressor_energy_year"])
+
+
 if __name__ == "__main__":
     unittest.main()

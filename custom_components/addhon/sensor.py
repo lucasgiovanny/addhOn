@@ -143,6 +143,12 @@ class HonSensorEntityDescription(SensorEntityDescription):
     # entity registry. Kept as our own field (not the upstream description flag) so the
     # description tables stay importable under the test stubs.
     enabled_default: bool = True
+    # When True the value_fn is called as value_fn(raw, get_attr) instead of
+    # value_fn(raw), where get_attr is the entity's attribute reader. For sensors whose
+    # own value cannot be interpreted without ANOTHER attribute -- the HW period series
+    # need the device's own clock to pick the current slot. Keeps them as ordinary
+    # description rows instead of one custom entity class per counter.
+    value_fn_needs_attrs: bool = False
 
 
 # State + remaining time: identical for washer/washer-dryer/tumble dryer.
@@ -798,60 +804,114 @@ def _hw_water_level(raw):
         return None
 
 
-def _hw_series(picker: Callable[[list[str]], str]) -> Callable[[object], object]:
+def _hw_series(
+    picker: Callable[[list[str], Callable[[str], object]], float],
+) -> Callable[[object, Callable[[str], object]], object]:
     """value_fn for the HW ';'-separated period series.
 
-    The HW energy counters are NOT scalars: Month attrs carry 12 calendar slots
-    (Jan..Dec of the current year) and Year attrs the last 5 years (oldest first),
-    verified on the real HP250M7C-F9 (July -> slot 7; the year total equals the
-    month sum). `picker` selects the current period's element."""
+    The HW energy counters are NOT scalars: the Month attrs carry 12 calendar slots
+    (Jan..Dec of the current year), verified on the real HP250M7C-F9 (July -> slot 7).
+    `picker` reduces the parsed slots to the value this sensor reports, and receives
+    the entity's attribute reader so it can consult the device's own clock."""
 
-    def _fn(raw):
+    def _fn(raw, get_attr):
         if raw is None:
             return None
         parts = str(raw).split(";")
         try:
-            return float(picker(parts).replace(",", "."))
+            return picker(parts, get_attr)
         except (TypeError, ValueError, IndexError):
             return None
 
     return _fn
 
 
-def _g_hw_energy(key: str, attr: str, picker: Callable[[list[str]], str], *,
-                 enabled_default: bool = True) -> HonSensorEntityDescription:
+def _g_hw_energy(key: str, attr: str,
+                 picker: Callable[[list[str], Callable[[str], object]], float], *,
+                 enabled_default: bool = True,
+                 device_class: SensorDeviceClass | None = SensorDeviceClass.ENERGY,
+                 icon: str | None = None) -> HonSensorEntityDescription:
     """Capability-gated HW energy counter (kWh) read from a period series."""
     return HonSensorEntityDescription(
         key=key,
         attr_key=attr,
+        icon=icon,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
+        device_class=device_class,
         state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=_hw_series(picker),
+        value_fn_needs_attrs=True,
         gated=True,
         enabled_default=enabled_default,
     )
 
 
-def _hw_pick_month(parts: list[str]) -> str:
-    from datetime import date
-
-    return parts[date.today().month - 1]
+def _hw_slot(part: str) -> float:
+    return float(str(part).replace(",", "."))
 
 
-def _hw_pick_year(parts: list[str]) -> str:
-    return parts[-1]
+def _hw_device_month(get_attr: Callable[[str], object]) -> int:
+    """Current month (1..12) from the DEVICE's own clock.
+
+    The slots roll over in the appliance's timezone, not the Home Assistant host's,
+    so the index must come from the device: the HP250M7C-F9 reports `date`
+    ('2026-07-26') next to the series. Falls back to HA's CONFIGURED timezone rather
+    than the bare process date, which on a UTC host would shift the rollover by hours.
+    """
+    raw = get_attr("date")
+    if raw is not None:
+        try:
+            month = int(str(raw).split("-")[1])
+        except (IndexError, ValueError):
+            month = 0
+        if 1 <= month <= 12:
+            return month
+    # Lazy dt import, like HonLastRefreshSensor._now: keeps test stubs that import
+    # this module free of a homeassistant.util.dt stub.
+    try:
+        from homeassistant.util import dt as dt_util
+
+        return dt_util.now().month
+    except Exception:  # noqa: BLE001 - stubbed/absent dt helper, fall back to the host
+        from datetime import date
+
+        return date.today().month
+
+
+def _hw_pick_month(parts: list[str], get_attr: Callable[[str], object]) -> float:
+    """This month's slot, indexed by the device clock (July -> index 6)."""
+    return _hw_slot(parts[_hw_device_month(get_attr) - 1])
+
+
+def _hw_sum_year(parts: list[str], get_attr: Callable[[str], object]) -> float:
+    """Year to date = the SUM of the 12 month slots.
+
+    Deliberately NOT the Year series' last element: that assumes the 5-year window
+    SLIDES on 1 January, which no dump has ever observed (every capture so far is
+    mid-year), so a device that does not slide would silently freeze the sensor on the
+    old year. The month sum needs no such assumption, and the invariant is
+    ground-truthed: on the HP250M7C-F9 dump the 12 month slots sum to exactly the Year
+    series' last element for all three counters (Cp 11, Ec 8, heat 125).
+    """
+    return sum(_hw_slot(part) for part in parts)
 
 
 # Heat pump water heater (HW): shares the WH temperature set, plus the
 # HW-specific telemetry ground-truthed on a real HP250M7C-F9 (full schema dump):
-# hot-water gauge, tank volume, and the current-month/current-year energy split
+# hot-water gauge, tank volume, and the current-month/year-to-date energy split
 # by source (Cp = compressor, Ec = electric backup heater) with the accumulated
-# heat output. The 7-slot Day series is NOT exposed (its weekday origin is not
-# identifiable from one dump). Everything is capability-gated; the energy
-# counters and errors register disabled so the default device page stays small
-# (live-user feedback), enable them from the entity registry for the Energy
-# dashboard.
+# heat output. BOTH periods read the Month series -- the Year series is never read
+# (see _hw_sum_year). The 7-slot Day series stays unexposed: the device does report
+# `weekDay` (7 == Sunday on the 2026-07-26 dump, so the index is weekDay - 1), but
+# the counters are whole kWh and this device burns ~0.5 kWh/day, so a daily slot
+# only ever reads 0 or 1 -- Home Assistant derives better statistics from the month
+# counter on its own. Everything is capability-gated; the energy counters and errors
+# register disabled so the default device page stays small (live-user feedback),
+# enable them from the entity registry for the Energy dashboard.
+#
+# RESOLUTION CAVEAT: the counters are integer kWh device-side, so the monthly total
+# is sound but the hour-by-hour attribution in the Energy dashboard is a staircase
+# (a 1 kWh step every day or two). Nothing here can improve that.
 _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
     HonSensorEntityDescription(
         key="hot_water_level",
@@ -872,16 +932,24 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
     ),
     _g_hw_energy("compressor_energy_month", "energyConsumptionMonthCp", _hw_pick_month,
                  enabled_default=False),
-    _g_hw_energy("compressor_energy_year", "energyConsumptionYearCp", _hw_pick_year,
+    _g_hw_energy("compressor_energy_year", "energyConsumptionMonthCp", _hw_sum_year,
                  enabled_default=False),
     _g_hw_energy("heater_energy_month", "energyConsumptionMonthEc", _hw_pick_month,
                  enabled_default=False),
-    _g_hw_energy("heater_energy_year", "energyConsumptionYearEc", _hw_pick_year,
+    _g_hw_energy("heater_energy_year", "energyConsumptionMonthEc", _hw_sum_year,
                  enabled_default=False),
+    # Heat OUTPUT (thermal), not electricity consumed, and its unit is UNVERIFIED: on
+    # the HP250M7C-F9 dump 125 against 11+8 kWh in implies a COP of 6.6, which is not
+    # physical for a heat pump water heater (3-4 is the real range), so either the
+    # counter is not kWh or the integer-truncated inputs understate consumption. No
+    # ENERGY device class until that is settled: it would both assert a unit the
+    # numbers contradict and offer the value as a consumption source in the Energy
+    # dashboard, where adding it inflates the total several-fold. The state class is
+    # kept, so long-term statistics still record it.
     _g_hw_energy("heat_output_month", "accumulatedHeatMonth", _hw_pick_month,
-                 enabled_default=False),
-    _g_hw_energy("heat_output_year", "accumulatedHeatYear", _hw_pick_year,
-                 enabled_default=False),
+                 enabled_default=False, device_class=None, icon="mdi:heat-wave"),
+    _g_hw_energy("heat_output_year", "accumulatedHeatMonth", _hw_sum_year,
+                 enabled_default=False, device_class=None, icon="mdi:heat-wave"),
     HonSensorEntityDescription(
         key="errors",
         attr_key="errors",
@@ -1055,6 +1123,8 @@ class HonSensor(HonBaseEntity, SensorEntity):
             raw = self._get_attr(fallback)
         value_fn = self.entity_description.value_fn
         if value_fn is not None:
+            if self.entity_description.value_fn_needs_attrs:
+                return value_fn(raw, self._get_attr)
             return value_fn(raw)
         if raw is None:
             return None
