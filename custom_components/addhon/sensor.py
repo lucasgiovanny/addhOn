@@ -46,6 +46,7 @@ from .base_entity import (
 )
 from .const import (
     APPLIANCE_AC,
+    APPLIANCE_AP,
     APPLIANCE_DW,
     APPLIANCE_FR,
     APPLIANCE_FRE,
@@ -63,6 +64,7 @@ from .const import (
     APPLIANCE_WM,
     AC_ATTR_CH2O,
     CONF_ENABLE_DEBUG,
+    CONF_ENABLE_EXPERIMENTAL,
     CONF_ENABLE_MQTT_DEBUG,
     AC_ATTR_CO2,
     AC_ATTR_COMPRESSOR_FREQ,
@@ -98,6 +100,13 @@ from .const import (
     WM_ATTR_TOTAL_WASH,
     WM_ATTR_TOTAL_WATER,
     WM_STATE_MAP,
+)
+from .air_purifier import (
+    AP_AIR_QUALITY_LABELS,
+    air_quality_label,
+    environment_available,
+    filter_remaining,
+    normalize_error,
 )
 from .debug_utils import redact_id
 
@@ -137,6 +146,18 @@ class HonSensorEntityDescription(SensorEntityDescription):
     # attr_fallbacks chain keeps looking (e.g. actualWeight=0 -> weight=3). Opt-in:
     # other sensors may legitimately report 0, so this never changes their behavior.
     zero_is_missing: bool = False
+    # When True the entity is unavailable unless the appliance confirms it is
+    # powered on. Declared per description rather than as a key list inside
+    # `available`, so which readings are live telemetry stays visible in the table
+    # itself. Defaults off: no existing entity changes behavior.
+    requires_power: bool = False
+    # When True the sensor exists only while the experimental option is on: its
+    # meaning is inferred from incomplete evidence.
+    experimental: bool = False
+    # When True the entity hides instead of reporting a value it cannot interpret
+    # (value_fn returned None). For an experimental mapping that covers a single
+    # confirmed raw value, an unconfirmed reading is not knowledge.
+    unavailable_when_unmapped: bool = False
 
 
 # State + remaining time: identical for washer/washer-dryer/tumble dryer.
@@ -813,8 +834,136 @@ _VACUUM: tuple[HonSensorEntityDescription, ...] = (
     _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
 )
 
+# --- Air purifier (AP) -------------------------------------------------------
+# Capability-gated like Tier 2, but AP is a WRITABLE type (see fan/light/switch/
+# select). This table is the read-only half.
+#
+# `requires_power=True` marks the live-telemetry readings: at power-off the device
+# publishes zero sentinels for temperature/humidity/PM and retains stale VOC /
+# air-quality / wind values, so those entities hide instead of presenting a
+# sentinel as a measurement. Filter, work-time, error and raw diagnostic readings
+# stay available while off.
+#
+# VOC, air quality, wind speed, CO and pollen are small LEVEL indexes in the
+# official app, not concentrations and not a 0-500 AQI, so they stay bare integers
+# (class-less AND unit-less), matching the AC air-quality convention above.
+_AIR_PURIFIER: tuple[HonSensorEntityDescription, ...] = (
+    HonSensorEntityDescription(
+        key="temp_indoor",
+        attr_key="temp",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        gated=True,
+        requires_power=True,
+    ),
+    HonSensorEntityDescription(
+        key="humidity_indoor",
+        attr_key=AC_ATTR_HUMIDITY_INDOOR,
+        native_unit_of_measurement="%",
+        device_class=SensorDeviceClass.HUMIDITY,
+        state_class=SensorStateClass.MEASUREMENT,
+        gated=True,
+        requires_power=True,
+    ),
+    HonSensorEntityDescription(
+        key="pm25",
+        attr_key=AC_ATTR_PM25,
+        native_unit_of_measurement="µg/m³",
+        device_class=SensorDeviceClass.PM25,
+        state_class=SensorStateClass.MEASUREMENT,
+        gated=True,
+        requires_power=True,
+    ),
+    HonSensorEntityDescription(
+        key="pm10",
+        attr_key="pm10ValueIndoor",
+        native_unit_of_measurement="µg/m³",
+        device_class=SensorDeviceClass.PM10,
+        state_class=SensorStateClass.MEASUREMENT,
+        gated=True,
+        requires_power=True,
+    ),
+    HonSensorEntityDescription(
+        key="voc", attr_key="vocValueIndoor", icon="mdi:molecule",
+        gated=True, requires_power=True,
+    ),
+    HonSensorEntityDescription(
+        key="air_quality", attr_key="airQuality", icon="mdi:air-filter",
+        gated=True, requires_power=True,
+    ),
+    HonSensorEntityDescription(
+        key="fan_speed", attr_key="windSpeed", icon="mdi:fan",
+        gated=True, requires_power=True,
+    ),
+    # Raw filter values are CONSUMED percentages; the entities report what is
+    # left. `%` + measurement + no device class on purpose: a BATTERY class here
+    # would let Home Assistant treat a dirty filter as a low battery.
+    HonSensorEntityDescription(
+        key="filter_life",
+        attr_key="mainFilterStatus",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:air-filter",
+        value_fn=filter_remaining,
+        gated=True,
+    ),
+    HonSensorEntityDescription(
+        key="filter_cleaning",
+        attr_key="preFilterStatus",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:air-filter",
+        value_fn=filter_remaining,
+        gated=True,
+    ),
+    # Minute counter that only grows; it may flush accumulated minutes at
+    # power-off, which TOTAL_INCREASING already tolerates.
+    HonSensorEntityDescription(
+        key="total_work_time",
+        attr_key="totalWorkTime",
+        icon="mdi:timer-outline",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        gated=True,
+    ),
+    HonSensorEntityDescription(
+        key="errors",
+        attr_key="errors",
+        icon="mdi:alert-circle-outline",
+        value_fn=normalize_error,
+        gated=True,
+    ),
+    HonSensorEntityDescription(
+        key="co", attr_key="coLevel", icon="mdi:molecule", gated=True,
+    ),
+    # Read-only diagnostic state. The observed devices declare no allergen mode,
+    # so this drives no control (see air_purifier.AP_WRITABLE_MODES).
+    HonSensorEntityDescription(
+        key="pollen_level", attr_key="pollenLevel", icon="mdi:flower", gated=True,
+    ),
+    # EXPERIMENTAL. The named label for the same ordinal the `air_quality` sensor
+    # reports raw. Only one value of the scale has been observed together with its
+    # label, so every other reading leaves the entity unavailable instead of
+    # publishing a guess next to the raw number that is already correct.
+    HonSensorEntityDescription(
+        key="air_quality_label",
+        attr_key="airQuality",
+        icon="mdi:air-filter",
+        device_class=SensorDeviceClass.ENUM,
+        options=sorted(set(AP_AIR_QUALITY_LABELS.values())),
+        value_fn=air_quality_label,
+        gated=True,
+        requires_power=True,
+        experimental=True,
+        unavailable_when_unmapped=True,
+    ),
+)
+
 SENSORS: dict[str, tuple[HonSensorEntityDescription, ...]] = {
     APPLIANCE_AC: _AC,
+    APPLIANCE_AP: _AIR_PURIFIER,
     APPLIANCE_WM: _WASHER,
     APPLIANCE_WD: _WASHER_DRYER,
     APPLIANCE_TD: _DRYER,
@@ -843,6 +992,7 @@ async def async_setup_entry(
     coordinator = entry_data["coordinator"]
     entities: list[SensorEntity] = []
     data_map = coordinator_data_map(coordinator)
+    experimental = bool(entry.options.get(CONF_ENABLE_EXPERIMENTAL, False))
     for appliance_id, data in data_map.items():
         app_type = data.get("type", "")
         attributes = data.get("attributes", {})
@@ -850,6 +1000,9 @@ async def async_setup_entry(
         descriptions = SENSORS.get(app_type, ())
         created: list[str] = []
         for description in descriptions:
+            # Inferred from incomplete evidence: absent unless explicitly enabled.
+            if description.experimental and not experimental:
+                continue
             # Capability-gating (Tier 2 only): skip the sensors whose attribute
             # is not exposed by the device. The historic types (gated=False) stay
             # always created, as before.
@@ -859,7 +1012,10 @@ async def async_setup_entry(
                 and not any(k in attributes for k in description.attr_fallbacks)
             ):
                 continue
-            entities.append(HonSensor(coordinator, appliance_id, description))
+            entity_class = (
+                HonAirPurifierSensor if app_type == APPLIANCE_AP else HonSensor
+            )
+            entities.append(entity_class(coordinator, appliance_id, description))
             created.append(description.key)
         # Derived sensors combine MULTIPLE attributes, so they cannot be a
         # description-table row (those read a single attr_key). Mean water per
@@ -948,6 +1104,31 @@ class HonSensor(HonBaseEntity, SensorEntity):
             return float(raw)
         except (ValueError, TypeError):
             return None
+
+
+class HonAirPurifierSensor(HonSensor):
+    """AP sensor whose availability can depend on the purifier being powered and
+    on whether the reading could be interpreted at all.
+
+    Only descriptions flagged `requires_power` / `unavailable_when_unmapped` are
+    gated; the others behave exactly like a plain HonSensor. The base availability
+    rules always apply first, so this narrows availability and never widens it.
+    """
+
+    @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        if self.entity_description.requires_power and not environment_available(
+            self._attributes
+        ):
+            return False
+        if (
+            self.entity_description.unavailable_when_unmapped
+            and self.native_value is None
+        ):
+            return False
+        return True
 
 
 class HonMeanWaterConsumption(HonBaseEntity, SensorEntity):

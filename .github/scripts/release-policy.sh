@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 
-RELEASE_TAG_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+(-beta)?$'
+# A beta suffix may carry a sequence number (-beta, -beta1, -beta2, ...) so more
+# than one prerelease can be cut for the same version. The bare `-beta` form stays
+# valid, so every already-published tag still matches.
+BETA_SUFFIX_REGEX='-beta[0-9]*'
+RELEASE_TAG_REGEX="^v[0-9]+\.[0-9]+\.[0-9]+(${BETA_SUFFIX_REGEX})?$"
 # Unprotected trigger tag that starts a release. It deliberately does NOT match
 # the protected v*.*.* ruleset, so it can be created/deleted freely; the real
 # vX.Y.Z tag is created once on the squash commit by post-merge-release.
-PR_TAG_REGEX='^pr-v[0-9]+\.[0-9]+\.[0-9]+(-beta)?$'
+PR_TAG_REGEX="^pr-v[0-9]+\.[0-9]+\.[0-9]+(${BETA_SUFFIX_REGEX})?$"
+
+# The human spelling of the two regexes above, in ONE place. It used to be written
+# out at each point of use, including inside release-intake.yml, and widening the
+# regex to accept -betaN left that copy describing the old rule. A test builds
+# concrete tags out of these strings and feeds them to the predicates, so the prose
+# cannot drift from what is actually accepted.
+RELEASE_TAG_FORMATS='vX.Y.Z, vX.Y.Z-beta or vX.Y.Z-betaN'
+PR_TAG_FORMATS='pr-vX.Y.Z, pr-vX.Y.Z-beta or pr-vX.Y.Z-betaN'
 
 die() {
   echo "::error::$*" >&2
@@ -23,12 +35,15 @@ validate_release_tag() {
   local tag="${1:-}"
 
   if ! is_release_tag "${tag}"; then
-    die "Invalid release tag '${tag}'. Allowed formats are vX.Y.Z and vX.Y.Z-beta."
+    die "Invalid release tag '${tag}'. Allowed formats are ${RELEASE_TAG_FORMATS}."
   fi
 }
 
+# Drives --prerelease on the published release. A REGEX, not a `*-beta` suffix
+# glob: with the glob a numbered beta (v1.2.3-beta1) reads as a stable release and
+# gets published as the latest one.
 is_beta_tag() {
-  [[ "${1:-}" == *-beta ]]
+  [[ "${1:-}" =~ ${BETA_SUFFIX_REGEX}$ ]]
 }
 
 is_pr_tag() {
@@ -40,7 +55,7 @@ release_tag_from_pr_tag() {
   local pr_tag="${1:-}"
 
   if ! is_pr_tag "${pr_tag}"; then
-    die "Invalid trigger tag '${pr_tag}'. Expected pr-vX.Y.Z or pr-vX.Y.Z-beta."
+    die "Invalid trigger tag '${pr_tag}'. Expected ${PR_TAG_FORMATS}."
   fi
   printf '%s\n' "${pr_tag#pr-}"
 }

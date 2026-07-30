@@ -69,14 +69,16 @@
   "options": {
     "step": {
       "init": {
-        "title": "Opzioni di debug",
+        "title": "Opzioni",
         "data": {
           "enable_debug": "Abilita log di debug",
-          "enable_mqtt_debug": "Abilita debug MQTT realtime"
+          "enable_mqtt_debug": "Abilita debug MQTT realtime",
+          "enable_experimental": "Abilita entità sperimentali"
         },
         "data_description": {
           "enable_debug": "Porta il livello di log dell'integrazione a DEBUG (accesso, rilevamento dispositivi, polling, comandi). Disattiva per tornare al livello configurato in Home Assistant. Il rumore MQTT realtime resta silenziato a meno che non attivi il suo toggle.",
-          "enable_mqtt_debug": "Rende molto verboso il canale MQTT realtime. Di norma tienilo disattivato; copre solo il logger MQTT di questa integrazione, non le librerie AWS IoT sottostanti (per quelle usa la configurazione logger di Home Assistant)."
+          "enable_mqtt_debug": "Rende molto verboso il canale MQTT realtime. Di norma tienilo disattivato; copre solo il logger MQTT di questa integrazione, non le librerie AWS IoT sottostanti (per quelle usa la configurazione logger di Home Assistant).",
+          "enable_experimental": "Aggiunge entità il cui significato si basa su indizi incompleti: possono essere sbagliate, cambiare nome o sparire. Restano non disponibili per ogni lettura non confermata. Cambiare questa opzione ricarica l'integrazione."
         }
       }
     }
@@ -253,10 +255,10 @@
         "name": "COV"
       },
       "co": {
-        "name": "Monossido di carbonio"
+        "name": "Monossido di Carbonio"
       },
       "air_quality": {
-        "name": "Qualità dell'aria"
+        "name": "Qualità dell'Aria"
       },
       "water_hardness": {
         "name": "Durezza dell'acqua"
@@ -438,6 +440,24 @@
           "holding": "Mantenimento"
         }
       },
+      "filter_life": {
+        "name": "Durata Filtro"
+      },
+      "filter_cleaning": {
+        "name": "Durata Prefiltro"
+      },
+      "total_work_time": {
+        "name": "Tempo di Funzionamento Totale"
+      },
+      "pollen_level": {
+        "name": "Livello Polline"
+      },
+      "air_quality_label": {
+        "name": "Giudizio Qualità Aria (sperimentale)",
+        "state": {
+          "good": "Buona"
+        }
+      },
       "debug_status": {
         "name": "Stato debug",
         "state": {
@@ -578,6 +598,15 @@
       "indicator_light": {
         "name": "Spia"
       },
+      "eco_active": {
+        "name": "Eco Attivo"
+      },
+      "problem": {
+        "name": "Guasto"
+      },
+      "co_alarm": {
+        "name": "Indicazione Monossido di Carbonio (sperimentale, non è un rilevatore certificato)"
+      },
       "update_ok": {
         "name": "Aggiornamento OK"
       }
@@ -615,6 +644,9 @@
       },
       "child_lock": {
         "name": "Blocco Bambini"
+      },
+      "touch_tone": {
+        "name": "Suono Tasti"
       },
       "human_sensing": {
         "name": "Sensore Presenza"
@@ -704,11 +736,27 @@
       },
       "delay_time": {
         "name": "Partenza ritardata"
+      },
+      "aroma_time_on": {
+        "name": "Durata Aroma Attivo (sperimentale)"
+      },
+      "aroma_time_off": {
+        "name": "Durata Aroma Spento (sperimentale)"
       }
     },
     "select": {
       "program": {
         "name": "Programma"
+      },
+      "aroma": {
+        "name": "Aroma",
+        "state": {
+          "off": "Spento",
+          "soft": "Leggero",
+          "mid": "Medio",
+          "h_biotics": "H-Biotics",
+          "custom": "Personalizzato"
+        }
       },
       "ref_program": {
         "name": "Programma",
@@ -810,14 +858,30 @@
       "reset_debug": {
         "name": "Reset debug"
       }
+    },
+    "fan": {
+      "purifier": {
+        "name": "Purificatore"
+      }
+    },
+    "light": {
+      "panel_light": {
+        "name": "Luce Pannello"
+      }
     }
   },
   "exceptions": {
+    "aroma_custom_not_active": {
+      "message": "Le durate dell'aroma si possono cambiare solo mentre la modalità aroma personalizzata è in corso."
+    },
     "appliance_or_client_unavailable": {
       "message": "L'apparecchio o il client non è disponibile."
     },
     "command_error": {
       "message": "Comando non riuscito: {error}"
+    },
+    "command_rejected": {
+      "message": "Il servizio hOn non ha accettato il comando."
     },
     "invalid_setpoint": {
       "message": "Il valore {value} non è ammesso (ammessi: {allowed})."
@@ -827,6 +891,9 @@
     },
     "program_not_supported": {
       "message": "Programma \"{program}\" non supportato da questo apparecchio."
+    },
+    "purifier_not_running": {
+      "message": "Il purificatore deve risultare in funzione per cambiare questa impostazione."
     },
     "refresh_after_command_failed": {
       "message": "Aggiornamento dopo il comando non riuscito."
@@ -839,6 +906,9 @@
     },
     "swing_position_not_allowed": {
       "message": "Posizione oscillazione {position} non ammessa (ammesse: {allowed})."
+    },
+    "speed_not_supported": {
+      "message": "Questo purificatore funziona a modalità discrete e non ha una velocità della ventola. Imposta una modalità preimpostata invece di una percentuale."
     }
   }
 }

@@ -101,6 +101,68 @@ class AuthDiagnosticClientTest(unittest.TestCase):
         )
         self.assertTrue(client._auth_trace.enabled)
 
+    def test_constructor_owns_dedicated_command_dispatcher(self) -> None:
+        first = HonClient(email="first@x", password="p")
+        second = HonClient(email="second@x", password="p")
+
+        self.assertIsNot(first._command_dispatcher, second._command_dispatcher)
+
+    def test_dispatch_patch_sync_delegates_once_to_dedicated_loop(self) -> None:
+        client = HonClient(email="e@x", password="p")
+        appliance = object()
+        patch = object()
+        dispatch_calls: list[tuple[object, object]] = []
+        loop_calls: list[object] = []
+
+        class Dispatcher:
+            async def dispatch(
+                self,
+                observed_appliance: object,
+                observed_patch: object,
+            ) -> bool:
+                dispatch_calls.append((observed_appliance, observed_patch))
+                return True
+
+        client._command_dispatcher = Dispatcher()  # type: ignore[assignment]
+
+        def run_on_hon_loop(coro: object) -> bool:
+            loop_calls.append(coro)
+            return asyncio.run(coro)  # type: ignore[arg-type]
+
+        client._run_on_hon_loop = run_on_hon_loop  # type: ignore[assignment]
+
+        self.assertTrue(client.dispatch_patch_sync(appliance, patch))
+        self.assertEqual([(appliance, patch)], dispatch_calls)
+        self.assertEqual(1, len(loop_calls))
+
+    def test_the_dedicated_loop_hands_back_the_same_object(self) -> None:
+        """Drives the REAL _run_on_hon_loop, on a real background loop.
+
+        Every other test in this suite replaces it, so nothing observed what it
+        actually returns. The command adapter decides acceptance with
+        `accepted is not True`, an IDENTITY check, and a hop that returned an equal
+        value instead of the same one would make every successful purifier write
+        raise "the service did not accept the command". That happened: a stray edit
+        turned the return into `1 if _v is True else _v`, the whole suite stayed
+        green, and only a probe against the real hop caught it. Truthiness is not
+        enough here, so this asserts identity.
+        """
+        client = HonClient(email="e@x", password="p")
+        client._start_hon_loop()
+        try:
+            for value in (True, False, None, 7, "ok"):
+                async def _answer(result: object = value) -> object:
+                    return result
+
+                self.assertIs(value, client._run_on_hon_loop(_answer()))
+        finally:
+            loop = client._hon_loop
+            if loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
+            thread = client._hon_thread
+            if thread is not None:
+                thread.join(timeout=5)
+
 
 class _FallbackAppliance:
     """No update() attribute -> _do_update takes the load_* fallback path directly.

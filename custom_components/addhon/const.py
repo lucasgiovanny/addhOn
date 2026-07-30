@@ -6,7 +6,7 @@
 DOMAIN = "addhon"
 
 # Supported platforms
-PLATFORMS = ["climate", "sensor", "binary_sensor", "switch", "select", "button", "number"]
+PLATFORMS = ["climate", "sensor", "binary_sensor", "switch", "select", "button", "number", "fan", "light"]
 
 # Update interval in seconds
 # NOTE: the initial setup + first fetch takes ~22s on a slow cloud.
@@ -18,6 +18,7 @@ APPLIANCE_AC = "AC"       # Air conditioner
 APPLIANCE_WM = "WM"       # Washing Machine
 APPLIANCE_TD = "TD"       # Tumble Dryer
 APPLIANCE_WD = "WD"       # Washer-dryer
+APPLIANCE_AP = "AP"       # Air purifier
 
 # --- Tier 2: read-only types --------------------------------------------------
 # Additional types exposed as read-only sensors. The parameters come from the
@@ -52,6 +53,20 @@ PROGRAM_PARAM_NAMES = ("program", "prCode")
 # chosen by the select but not yet started; the "Start program" button applies it
 # to startProgram. The single shared source of truth between select.py and button.py.
 PROGRAM_PENDING_STORE = "pending_programs"
+
+# Key of the volatile store (kept on the coordinator) holding the last ACTIVE
+# air-purifier mode observed or selected per appliance. Shape: {appliance_id: raw}.
+# Only the modes writable from both purifier states are ever stored, so the
+# off-state sentinel (machMode=0) and the undeclared allergen mode (3) can never
+# become the value a later "turn on" replays. Volatile on purpose: after a reload
+# the fan falls back to the deterministic Auto default.
+AP_LAST_MODE_STORE = "ap_last_modes"
+
+# Key of the volatile store holding the last NON-OFF panel-light level observed or
+# selected per appliance. Shape: {appliance_id: ha_brightness}. Lets a bare
+# "turn on" restore the brightness the user last had, instead of always jumping to
+# full. Volatile like the mode store: after a reload the light defaults to 100%.
+AP_LAST_LIGHT_STORE = "ap_last_light_levels"
 
 # Key of the volatile store (kept on the coordinator) that holds the writable
 # program OPTIONS (spin/temp/dry level/extra rinses/delayed start/...) chosen on the
@@ -117,6 +132,14 @@ SERVICE_REFRESH = "refresh"
 # logger to DEBUG (silenced to WARNING when off). The two toggles are independent.
 CONF_ENABLE_DEBUG = "enable_debug"
 CONF_ENABLE_MQTT_DEBUG = "enable_mqtt_debug"
+# Third toggle of the same screen and NOT a debug one: it creates the entities
+# whose meaning is inferred from incomplete evidence (a single observed raw value,
+# a mapping never reproduced on hardware), so they stay absent on a default
+# installation. Unlike the debug toggles it changes WHICH entities exist rather
+# than a log level, so it is the only option that reloads the entry (see
+# _async_options_updated in __init__). Entity unique IDs never encode the support
+# level, so an experimental entity can be promoted without changing identity.
+CONF_ENABLE_EXPERIMENTAL = "enable_experimental"
 # Temporary config-flow field. It enables one bounded sign-in trace and is stripped
 # before credentials are validated or persisted.
 CONF_AUTH_DIAGNOSTICS = "auth_diagnostics"

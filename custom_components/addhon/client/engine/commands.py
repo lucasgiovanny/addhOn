@@ -17,6 +17,7 @@ false "sent".
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
@@ -31,6 +32,18 @@ from .rules import HonRuleSet
 import logging
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _CanonicalExactPayload(dict[str, str | float]):
+    __slots__ = ("command",)
+
+    def __init__(
+        self,
+        command: HonCommand,
+        params: Mapping[str, str | float],
+    ) -> None:
+        super().__init__(params)
+        self.command = command
 
 
 class HonCommand:
@@ -188,12 +201,23 @@ class HonCommand:
                 params[key] = parameter.value
         return await self.send_parameters(params)
 
-    async def send_parameters(self, params: dict[str, str | float]) -> bool:
-        ancillary_params = self.parameter_groups.get("ancillaryParameters", {})
+    async def _send_parameters(
+        self,
+        params: dict[str, str | float],
+        *,
+        sync_shadow: bool,
+    ) -> bool:
+        if not (
+            isinstance(params, _CanonicalExactPayload)
+            and params.command is self
+        ):
+            params = self.canonical_exact_payload(params)
+        ancillary_params = dict(
+            self.parameter_groups.get("ancillaryParameters", {})
+        )
         ancillary_params.pop("programRules", None)
-        if "prStr" in params:
-            params["prStr"] = self._category_name.upper()
-        self.appliance.sync_command_to_params(self.name)
+        if sync_shadow:
+            self.appliance.sync_command_to_params(self.name)
         result = await self.api.send_command(
             self._appliance,
             self._name,
@@ -205,6 +229,21 @@ class HonCommand:
             _LOGGER.error("Command rejected by cloud: %s", self._name)
             raise ApiError("Can't send command")
         return result
+
+    async def send_parameters(self, params: dict[str, str | float]) -> bool:
+        return await self._send_parameters(params, sync_shadow=True)
+
+    def canonical_exact_payload(
+        self,
+        params: Mapping[str, str | float],
+    ) -> dict[str, str | float]:
+        payload = _CanonicalExactPayload(self, params)
+        if "prStr" in payload:
+            payload["prStr"] = self._category_name.upper()
+        return payload
+
+    async def send_exact(self, params: dict[str, str | float]) -> bool:
+        return await self._send_parameters(params, sync_shadow=False)
 
     @property
     def categories(self) -> dict[str, "HonCommand"]:
