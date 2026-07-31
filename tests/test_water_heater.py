@@ -100,6 +100,34 @@ def _install_homeassistant_stubs() -> None:
         ),
     )
 
+    # binary_sensor, for the heat-source drift guard below (it imports the HW table).
+    import dataclasses
+
+    binary_mod = _mod("homeassistant.components.binary_sensor")
+
+    @dataclasses.dataclass(frozen=True, kw_only=True)
+    class BinarySensorEntityDescription:
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: object | None = None
+
+    binary_mod.BinarySensorEntityDescription = getattr(
+        binary_mod, "BinarySensorEntityDescription", BinarySensorEntityDescription
+    )
+    binary_mod.BinarySensorEntity = getattr(binary_mod, "BinarySensorEntity", type("BinarySensorEntity", (), {}))
+    binary_mod.BinarySensorDeviceClass = getattr(
+        binary_mod,
+        "BinarySensorDeviceClass",
+        type("BinarySensorDeviceClass", (), {
+            "DOOR": "door", "PROBLEM": "problem", "RUNNING": "running",
+            "OCCUPANCY": "occupancy", "LIGHT": "light", "CONNECTIVITY": "connectivity",
+            "HEAT": "heat",
+        }),
+    )
+    components.binary_sensor = binary_mod
+
     const = _mod("homeassistant.const")
     const.UnitOfTemperature = getattr(
         const, "UnitOfTemperature", type("UnitOfTemperature", (), {"CELSIUS": "C"})
@@ -387,11 +415,77 @@ class ReadStateTest(unittest.TestCase):
         added, _ = _one(commands=_hw_commands("elec"), attributes=attributes)
         self.assertEqual(added[0].current_operation, "elec")
 
+    def test_heating_attributes_report_the_running_sources(self) -> None:
+        added, _ = _one(attributes=_attrs(
+            compressorHeatingCurrentStatus="1",
+            electricHeatingCurrentStatus="0",
+        ))
+        self.assertEqual(
+            added[0].extra_state_attributes,
+            {"heating": True, "heat_sources": ["compressor"]},
+        )
+
+    def test_heating_is_false_when_every_source_is_idle(self) -> None:
+        added, _ = _one(attributes=_attrs(
+            compressorHeatingCurrentStatus="0",
+            electricHeatingCurrentStatus="0",
+        ))
+        self.assertEqual(
+            added[0].extra_state_attributes,
+            {"heating": False, "heat_sources": []},
+        )
+
+    def test_both_sources_are_listed(self) -> None:
+        added, _ = _one(attributes=_attrs(
+            compressorHeatingCurrentStatus="1",
+            electricHeatingCurrentStatus="1",
+            auxElecHeatingStatus="1",
+        ))
+        self.assertEqual(
+            added[0].extra_state_attributes["heat_sources"],
+            ["compressor", "electric_heater", "aux_electric_heater"],
+        )
+
+    def test_no_heating_key_when_the_device_reports_no_source(self) -> None:
+        # A confident "not heating" on a device that never reports it would be a lie.
+        added, _ = _one()
+        self.assertIsNone(added[0].extra_state_attributes)
+
+    def test_unreported_sources_are_omitted_not_false(self) -> None:
+        added, _ = _one(attributes=_attrs(compressorHeatingCurrentStatus="0"))
+        attrs = added[0].extra_state_attributes
+        self.assertEqual(attrs, {"heating": False, "heat_sources": []})
+
     def test_away_mode_reads_the_vac_program(self) -> None:
         added, _ = _one(attributes=_attrs(**{"startProgram.program": "vac"}))
         self.assertIs(added[0].is_away_mode_on, True)
         added, _ = _one()
         self.assertIs(added[0].is_away_mode_on, False)
+
+
+class HeatSourceDriftTest(unittest.TestCase):
+    """The heat-source attribute names must stay identical to the ones the HW binary
+    sensors read. Those are reality-checked against the real HP250M7C-F9 dump; a rename
+    on that side would otherwise leave `heating` silently stuck reporting nothing."""
+
+    def test_names_come_from_the_hw_binary_sensor_table(self) -> None:
+        from custom_components.addhon import binary_sensor, water_heater
+
+        known = {desc.attr_key for desc in binary_sensor._HEAT_PUMP_BINARY}
+        used = {attr for _name, attr in water_heater.HW_HEAT_SOURCES}
+        self.assertEqual(
+            used - known,
+            set(),
+            "heat-source attributes absent from _HEAT_PUMP_BINARY (unverified against "
+            "the real device schema)",
+        )
+
+    def test_protection_statuses_are_not_treated_as_heating(self) -> None:
+        from custom_components.addhon import water_heater
+
+        used = {attr for _name, attr in water_heater.HW_HEAT_SOURCES}
+        self.assertNotIn("antifreezingStatus", used)
+        self.assertNotIn("autoDefrostStatus", used)
 
 
 class WriteTest(unittest.TestCase):

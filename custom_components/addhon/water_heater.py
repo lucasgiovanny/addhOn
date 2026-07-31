@@ -80,6 +80,18 @@ HW_ON_OFF_PARAM = "onOffStatus"
 # reads).
 HW_CURRENT_TEMP_ATTR = "temp"
 
+# The heat sources the appliance reports as currently running, ground-truthed on the real
+# HP250M7C-F9 (the same attributes the compressor / electric-heater binary sensors read).
+# Mapped to stable machine names so the exposed attribute is language-neutral and
+# templatable. Protection statuses (antifreeze, defrost) are deliberately NOT here: they
+# are not heating the water.
+HW_HEAT_SOURCES: tuple[tuple[str, str], ...] = (
+    ("compressor", "compressorHeatingCurrentStatus"),
+    ("electric_heater", "electricHeatingCurrentStatus"),
+    ("aux_electric_heater", "auxElecHeatingStatus"),
+    ("boiler", "boilerHeatingCurrentStatus"),
+)
+
 # The holiday/vacation program. On the device it is an ordinary startProgram mode, but
 # HA models "away" as its own orthogonal toggle, so it is exposed BOTH ways: as an
 # operation-mode option and as the away switch. Both read and write the same program, so
@@ -257,6 +269,37 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
     @property
     def target_temperature(self) -> float | None:
         return self._float_attr(HW_TEMP_PARAM)
+
+    # --- what the appliance is DOING right now -----------------------------------
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """`heating` plus the heat sources currently running.
+
+        The water_heater domain has NO equivalent of climate's hvac_action: the entity
+        state is the SELECTED MODE, not what the appliance is doing. So this is exposed
+        as attributes rather than folded into current_operation -- a synthetic "heating"
+        state would overwrite the mode AND put a value in the state machine that is not a
+        member of operation_list, leaving HA's mode picker with nothing selected.
+
+        Capability-gated per source: a status the device does not report is omitted
+        instead of being reported False, and a device that reports none of them gets no
+        `heating` key at all rather than a confident "not heating". Attribute changes are
+        recorded, so `heating` gets real history even though it is not its own entity --
+        the per-source binary sensors remain the graphable/automatable handles.
+        """
+        running: list[str] = []
+        reported = False
+        for name, attr in HW_HEAT_SOURCES:
+            raw = self._get_attr(attr)
+            if raw is None:
+                continue
+            reported = True
+            if str(raw).strip() == "1":
+                running.append(name)
+        if not reported:
+            return None
+        return {"heating": bool(running), "heat_sources": running}
 
     def _float_attr(self, key: str) -> float | None:
         """Shadow attribute as a float, or None when absent/non-numeric (never a guess)."""

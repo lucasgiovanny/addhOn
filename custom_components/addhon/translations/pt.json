@@ -865,6 +865,14 @@
     },
     "water_heater": {
       "water_heater": {
+        "state_attributes": {
+          "heating": {
+            "name": "A aquecer"
+          },
+          "heat_sources": {
+            "name": "Fontes de calor"
+          }
+        },
         "state": {
           "off": "Desligado",
           "on": "Ligado",

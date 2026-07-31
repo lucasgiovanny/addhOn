@@ -90,6 +90,12 @@ stay alongside it — they write the same parameters and cover what the `water_h
 domain has no slot for (boost, silent mode, child lock, sterilization, per-mode
 setpoints).
 
+The entity also carries a `heating` attribute (plus `heat_sources`, listing which of
+compressor / electric heater / auxiliary heater / boiler is running). The
+`water_heater` domain has no equivalent of climate's `hvac_action`, so this cannot be
+part of the state; for graphs and automations use the per-source `binary_sensor`
+entities.
+
 ### Tested on real hardware
 
 - **AC Unit:** Haier AS35PBPHRA-PRE

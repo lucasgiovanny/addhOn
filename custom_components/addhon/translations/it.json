@@ -865,6 +865,14 @@
     },
     "water_heater": {
       "water_heater": {
+        "state_attributes": {
+          "heating": {
+            "name": "Riscaldamento in corso"
+          },
+          "heat_sources": {
+            "name": "Sorgenti di calore"
+          }
+        },
         "state": {
           "off": "Spento",
           "on": "Acceso",
