@@ -475,6 +475,31 @@ class ReadStateTest(unittest.TestCase):
         ))
         self.assertEqual(added[0].extra_state_attributes["heat_source"], "multiple")
 
+    def test_hot_water_level_is_the_calibrated_percentage(self) -> None:
+        # remainingWaterLevel is a 0..12 gauge, not a percentage: 12 == full.
+        added, _ = _one(attributes=_attrs(remainingWaterLevel="12"))
+        self.assertEqual(added[0].extra_state_attributes["hot_water_level"], 100.0)
+        added, _ = _one(attributes=_attrs(remainingWaterLevel="6"))
+        self.assertEqual(added[0].extra_state_attributes["hot_water_level"], 50.0)
+
+    def test_hot_water_level_shares_the_sensor_calibration(self) -> None:
+        # One helper, so the attribute and the hot_water_level sensor cannot drift.
+        from custom_components.addhon.hw_values import hw_water_level
+
+        added, _ = _one(attributes=_attrs(remainingWaterLevel="10"))
+        self.assertEqual(
+            added[0].extra_state_attributes["hot_water_level"], hw_water_level("10")
+        )
+
+    def test_hot_water_level_alone_still_produces_attributes(self) -> None:
+        # Independently gated: no heat-source telemetry must not suppress the level.
+        added, _ = _one(attributes=_attrs(remainingWaterLevel="3"))
+        self.assertEqual(added[0].extra_state_attributes, {"hot_water_level": 25.0})
+
+    def test_non_numeric_water_level_is_omitted(self) -> None:
+        added, _ = _one(attributes=_attrs(remainingWaterLevel="--"))
+        self.assertIsNone(added[0].extra_state_attributes)
+
     def test_no_attributes_when_the_device_reports_no_source(self) -> None:
         # A confident "not heating" on a device that never reports it would be a lie.
         added, _ = _one()

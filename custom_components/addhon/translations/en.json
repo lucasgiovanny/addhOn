@@ -884,6 +884,9 @@
               "boiler": "Boiler",
               "multiple": "Multiple sources"
             }
+          },
+          "hot_water_level": {
+            "name": "Hot water level"
           }
         },
         "state": {

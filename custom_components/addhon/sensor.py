@@ -101,6 +101,7 @@ from .const import (
     WM_STATE_MAP,
 )
 from .debug_utils import redact_id
+from .hw_values import HW_WATER_LEVEL_ATTR, hw_water_level
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -793,17 +794,6 @@ _WATER_HEATER: tuple[HonSensorEntityDescription, ...] = (
 )
 
 
-def _hw_water_level(raw):
-    """remainingWaterLevel is a 0..12 gauge, not a percentage: the real HP250M7C-F9
-    reports 12 while the official app shows 100% (one-point calibration; 0 -> 0%)."""
-    if raw is None:
-        return None
-    try:
-        return min(100.0, round(float(str(raw).replace(",", ".")) * 100.0 / 12.0, 1))
-    except (TypeError, ValueError):
-        return None
-
-
 def _hw_series(
     picker: Callable[[list[str], Callable[[str], object]], float],
 ) -> Callable[[object, Callable[[str], object]], object]:
@@ -915,11 +905,13 @@ def _hw_sum_year(parts: list[str], get_attr: Callable[[str], object]) -> float:
 _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
     HonSensorEntityDescription(
         key="hot_water_level",
-        attr_key="remainingWaterLevel",
+        attr_key=HW_WATER_LEVEL_ATTR,
         icon="mdi:water-percent",
         native_unit_of_measurement="%",
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=_hw_water_level,
+        # Shared with the water_heater entity's `hot_water_level` attribute, so the two
+        # can never report different numbers for the same gauge reading.
+        value_fn=hw_water_level,
         gated=True,
     ),
     HonSensorEntityDescription(

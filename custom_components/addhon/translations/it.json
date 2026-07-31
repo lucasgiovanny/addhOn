@@ -884,6 +884,9 @@
               "boiler": "Caldaia",
               "multiple": "Più sorgenti"
             }
+          },
+          "hot_water_level": {
+            "name": "Livello acqua calda"
           }
         },
         "state": {

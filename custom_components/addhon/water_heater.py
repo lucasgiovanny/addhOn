@@ -54,6 +54,7 @@ from .base_entity import HonBaseEntity, coordinator_data_map
 from .const import APPLIANCE_HW, APPLIANCE_WH, DOMAIN
 from .debug_utils import command_names, redact_id
 from .hon_commands import async_send_command, find_settings_param, param_range
+from .hw_values import HW_WATER_LEVEL_ATTR, hw_water_level
 from .program_options import (
     async_send_program,
     startprogram_program_codes,
@@ -316,7 +317,7 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
 
     @property
     def extra_state_attributes(self) -> dict | None:
-        """`action` (off / idle / heating) and `heat_source`, both translated enums.
+        """`action` (off / idle / heating), `heat_source` and `hot_water_level`.
 
         The water_heater domain has NO equivalent of climate's hvac_action: the entity
         state is the SELECTED MODE, not what the appliance is doing. So this is exposed
@@ -324,17 +325,25 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         state would overwrite the mode AND put a value in the state machine that is not a
         member of operation_list, leaving HA's mode picker with nothing selected.
 
-        Both values are SCALAR machine keys with `state_attributes` translations, so the
-        frontend renders them as proper localized labels ("Heating", "Compressor") in a
-        tile card's state content. A list would not: HA translates scalar attribute values
-        only, and building a joined label in code would ship untranslated English.
+        `action` and `heat_source` are SCALAR machine keys with `state_attributes`
+        translations, so the frontend renders them as proper localized labels ("Heating",
+        "Compressor") in a tile card's state content. A list would not: HA translates
+        scalar attribute values only, and building a joined label in code would ship
+        untranslated English.
 
-        Capability-gated: a status the device does not report is ignored, and a device
-        that reports none of them gets no attributes at all rather than a confident
-        "not heating". Attribute changes are recorded, so `action` gets real history even
-        though it is not its own entity -- the per-source binary sensors remain the
-        graphable handles, and the only place the exact combination is visible.
+        `hot_water_level` is the same 0..100 percentage the `hot_water_level` sensor
+        reports, from the SAME calibration helper (hw_values), so the two can never
+        disagree. It is a plain number: attributes carry no unit, so the card shows the
+        figure without a `%` -- the sensor entity is the one to use where the unit matters.
+
+        Every key is independently capability-gated: a reading the device does not report
+        is omitted rather than guessed, and a device that reports none of them gets no
+        attributes at all rather than a confident "not heating".  Attribute changes are
+        recorded, so `action` gets real history even though it is not its own entity --
+        the per-source binary sensors remain the graphable handles, and the only place the
+        exact combination of running sources is visible.
         """
+        attrs: dict = {}
         running: list[str] = []
         reported = False
         for name, attr in HW_HEAT_SOURCES:
@@ -344,19 +353,21 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
             reported = True
             if str(raw).strip() == "1":
                 running.append(name)
-        if not reported:
-            return None
-        if self._on_off_command is not None and self._is_off:
-            action = STATE_OFF
-        else:
-            action = "heating" if running else "idle"
-        if not running:
-            source = HW_SOURCE_NONE
-        elif len(running) == 1:
-            source = running[0]
-        else:
-            source = HW_SOURCE_MULTIPLE
-        return {"action": action, "heat_source": source}
+        if reported:
+            if self._on_off_command is not None and self._is_off:
+                attrs["action"] = STATE_OFF
+            else:
+                attrs["action"] = "heating" if running else "idle"
+            if not running:
+                attrs["heat_source"] = HW_SOURCE_NONE
+            elif len(running) == 1:
+                attrs["heat_source"] = running[0]
+            else:
+                attrs["heat_source"] = HW_SOURCE_MULTIPLE
+        level = hw_water_level(self._get_attr(HW_WATER_LEVEL_ATTR))
+        if level is not None:
+            attrs["hot_water_level"] = level
+        return attrs or None
 
     def _float_attr(self, key: str) -> float | None:
         """Shadow attribute as a float, or None when absent/non-numeric (never a guess)."""

@@ -96,12 +96,14 @@ those names: the device's `auto` is `heat_pump`, `elec` is `electric`, `eco` is 
 standard. Holiday (`vac`) has no standard equivalent, so it keeps the device code and is
 additionally exposed as the away-mode toggle.
 
-The entity also carries an `action` attribute (`off` / `idle` / `heating`) and a
-`heat_source` one (compressor, electric heater, auxiliary heater, boiler, or `multiple`).
-The `water_heater` domain has no equivalent of climate's `hvac_action`, so this cannot be
-part of the state; both are translated, so a tile card's *state content* renders them as
-proper labels. For graphs, automations and the exact combination of running sources, use
-the per-source `binary_sensor` entities.
+The entity also carries an `action` attribute (`off` / `idle` / `heating`), a
+`heat_source` one (compressor, electric heater, auxiliary heater, boiler, or `multiple`)
+and `hot_water_level` (the same 0-100 % the sensor reports). The `water_heater` domain
+has no equivalent of climate's `hvac_action`, so this cannot be part of the state;
+`action` and `heat_source` are translated, so a tile card's *state content* renders them
+as proper labels. `hot_water_level` is a plain number there — attributes carry no unit,
+so use the sensor entity where the `%` matters. For graphs, automations and the exact
+combination of running sources, use the per-source `binary_sensor` entities.
 
 ### Tested on real hardware
 
