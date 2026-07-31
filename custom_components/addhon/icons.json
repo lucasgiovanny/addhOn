@@ -1,0 +1,30 @@
+{
+  "entity": {
+    "water_heater": {
+      "water_heater": {
+        "default": "mdi:water-boiler",
+        "state": {
+          "off": "mdi:water-boiler-off",
+          "on": "mdi:water-boiler",
+          "auto": "mdi:water-boiler-auto",
+          "eco": "mdi:leaf",
+          "elec": "mdi:lightning-bolt",
+          "vac": "mdi:beach"
+        },
+        "state_attributes": {
+          "operation_mode": {
+            "default": "mdi:water-boiler",
+            "state": {
+              "off": "mdi:water-boiler-off",
+              "on": "mdi:water-boiler",
+              "auto": "mdi:water-boiler-auto",
+              "eco": "mdi:leaf",
+              "elec": "mdi:lightning-bolt",
+              "vac": "mdi:beach"
+            }
+          }
+        }
+      }
+    }
+  }
+}

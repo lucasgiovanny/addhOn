@@ -133,11 +133,13 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
     """Haier hOn water heater: target temperature, operating mode, power and away."""
 
     # The device's main entity: it takes the device name (has_entity_name + name None).
-    # The translation_key is still honoured for the STATE (operation mode) labels.
+    # The translation_key is still honoured for the STATE (operation mode) labels AND
+    # for the per-state icons in icons.json. Deliberately NO _attr_icon: an entity that
+    # provides its own icon overrides the icon translations, which would pin one static
+    # boiler icon instead of letting it follow the running mode.
     _attr_name = None
     _attr_translation_key = "water_heater"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
-    _attr_icon = "mdi:water-boiler"
 
     def __init__(self, coordinator, appliance_id: str, client=None) -> None:
         super().__init__(coordinator, appliance_id, client)
