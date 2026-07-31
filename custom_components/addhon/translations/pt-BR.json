@@ -863,6 +863,18 @@
         }
       }
     },
+    "water_heater": {
+      "water_heater": {
+        "state": {
+          "off": "Desligado",
+          "on": "Ligado",
+          "auto": "Auto",
+          "eco": "Eco",
+          "elec": "Elétrico",
+          "vac": "Férias"
+        }
+      }
+    },
     "button": {
       "start_program": {
         "name": "Iniciar programa"

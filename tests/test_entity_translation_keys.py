@@ -15,6 +15,7 @@ or description.key, plus the fixed-key entities), and asserts it matches the JSO
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json
 import re
 import sys
@@ -160,6 +161,21 @@ def _install_stubs() -> None:
     _mod("homeassistant.components.select").SelectEntity = type("SelectEntity", (), {})
     _mod("homeassistant.components.button").ButtonEntity = type("ButtonEntity", (), {})
 
+    # water_heater platform
+    wh_mod = _mod("homeassistant.components.water_heater")
+    wh_mod.WaterHeaterEntity = getattr(wh_mod, "WaterHeaterEntity", type("WaterHeaterEntity", (), {}))
+    wh_mod.WaterHeaterEntityFeature = getattr(
+        wh_mod,
+        "WaterHeaterEntityFeature",
+        enum.IntFlag(
+            "WaterHeaterEntityFeature",
+            {"TARGET_TEMPERATURE": 1, "OPERATION_MODE": 2, "AWAY_MODE": 4, "ON_OFF": 8},
+        ),
+    )
+    const.ATTR_TEMPERATURE = getattr(const, "ATTR_TEMPERATURE", "temperature")
+    const.STATE_OFF = getattr(const, "STATE_OFF", "off")
+    const.STATE_ON = getattr(const, "STATE_ON", "on")
+
     ha.config_entries = ce
     ha.core = core
     ha.exceptions = exc
@@ -174,6 +190,7 @@ def _install_stubs() -> None:
     components.sensor = sensor_mod
     components.binary_sensor = binary_mod
     components.number = number_mod
+    components.water_heater = wh_mod
 
 
 _install_stubs()
@@ -184,7 +201,14 @@ def _tk(description) -> str:
 
 
 def _collect_code_keys() -> dict[str, set[str]]:
-    from custom_components.addhon import binary_sensor, number, select, sensor, switch
+    from custom_components.addhon import (
+        binary_sensor,
+        number,
+        select,
+        sensor,
+        switch,
+        water_heater,
+    )
 
     used: dict[str, set[str]] = {}
 
@@ -227,6 +251,9 @@ def _collect_code_keys() -> dict[str, set[str]]:
         | {d.translation_key for d in select._AC_DIRECTION_SELECTS}
     )
     used["button"] = {"start_program", "stop_program", "force_refresh", "reset_debug"}
+    # Water heater (HW/WH): one fixed-key entity. Its `name` comes from the device
+    # (_attr_name = None), so the JSON block carries only the operation-mode states.
+    used["water_heater"] = {water_heater.HonWaterHeater._attr_translation_key}
     return used
 
 

@@ -863,6 +863,18 @@
         }
       }
     },
+    "water_heater": {
+      "water_heater": {
+        "state": {
+          "off": "Spento",
+          "on": "Acceso",
+          "auto": "Auto",
+          "eco": "Eco",
+          "elec": "Elettrico",
+          "vac": "Vacanza"
+        }
+      }
+    },
     "button": {
       "start_program": {
         "name": "Avvia programma"

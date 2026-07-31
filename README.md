@@ -82,6 +82,14 @@ heaters (WH), heat pump water heaters (HW) and robot vacuums (RVC). Air conditio
 full control; the other types are exposed mainly as read-only sensors, with a few
 controls where they have been mapped.
 
+Heat pump water heaters also get a native **`water_heater` entity** (target
+temperature, operating mode, power and holiday/away mode in a single card). It is
+capability-gated on the device's live schema, so a plain water heater that exposes a
+writable setpoint gets one too. The individual `number` / `select` / `switch` controls
+stay alongside it — they write the same parameters and cover what the `water_heater`
+domain has no slot for (boost, silent mode, child lock, sterilization, per-mode
+setpoints).
+
 ### Tested on real hardware
 
 - **AC Unit:** Haier AS35PBPHRA-PRE

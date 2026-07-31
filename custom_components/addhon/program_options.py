@@ -137,6 +137,46 @@ async def async_send_program(hass, client, appliance, program_code: str) -> None
     await hass.async_add_executor_job(_do)
 
 
+def startprogram_program_param(appliance):
+    """(param object, param name) of the ``startProgram`` program/prCode parameter, or None.
+
+    Resolved ONLY on ``startProgram`` (never the broader command walk the washer select
+    uses), so a caller that gates on this always sends to the very command it read the
+    option list from. Shared by the water_heater platform; select.py keeps its own
+    equivalent static method for its (fridge/washer) option-source semantics.
+    """
+    command = startprogram_command(appliance)
+    params = getattr(command, "parameters", None) if command is not None else None
+    if not isinstance(params, dict):
+        return None
+    for name in PROGRAM_PARAM_NAMES:
+        param = params.get(name)
+        if param is not None:
+            return param, name
+    return None
+
+
+def startprogram_program_codes(appliance) -> list[str]:
+    """The program codes the device's ``startProgram`` enum offers, or [].
+
+    Accepts every shape the runtime schema uses for the program parameter (a dict of
+    code -> label, or a plain list of codes) across the ``values``/``value_list``/
+    ``options`` attribute names, mirroring select.py's ``_program_values``. The codes are
+    always read LIVE from the device; nothing here is hard-coded per model.
+    """
+    resolved = startprogram_program_param(appliance)
+    if resolved is None:
+        return []
+    param, _name = resolved
+    for attr in ("values", "value_list", "options"):
+        raw = getattr(param, attr, None)
+        if isinstance(raw, dict):
+            return [str(code) for code in raw]
+        if isinstance(raw, (list, tuple)):
+            return [str(code) for code in raw]
+    return []
+
+
 def startprogram_option_param(appliance, name: str):
     """Resolve option parameter ``name`` across the ``startProgram`` program categories.
 
