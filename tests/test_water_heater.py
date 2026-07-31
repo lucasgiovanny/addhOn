@@ -392,13 +392,37 @@ class ReadStateTest(unittest.TestCase):
         added, _ = _one(attributes=_attrs(temp="--"))
         self.assertIsNone(added[0].current_temperature)
 
-    def test_operation_list_is_off_plus_live_programs(self) -> None:
+    def test_operation_list_uses_ha_standard_names(self) -> None:
+        # The frontend's mode picker resolves its icons from a HARDCODED map of the
+        # standard states, so the device codes are reported under those names.
         added, _ = _one()
-        self.assertEqual(added[0]._attr_operation_list, ["off", "auto", "eco", "elec", "vac"])
+        self.assertEqual(
+            added[0]._attr_operation_list,
+            ["off", "heat_pump", "eco", "electric", "vac"],
+        )
 
     def test_current_operation_from_shadow(self) -> None:
         added, _ = _one()
         self.assertEqual(added[0].current_operation, "eco")
+
+    def test_current_operation_is_mapped_to_the_standard_name(self) -> None:
+        added, _ = _one(attributes=_attrs(**{"startProgram.program": "auto"}))
+        self.assertEqual(added[0].current_operation, "heat_pump")
+
+    def test_ambiguous_mapping_falls_back_to_raw_device_codes(self) -> None:
+        # Two device codes claiming the same standard state must never collapse: the
+        # round-trip would then start the wrong program.
+        commands = _hw_commands()
+        commands["startProgram"] = RecordingCommand(
+            {
+                "program": ProgramParam(["elec", "electric", "eco"], "eco"),
+                "tempSel": RangeParam(55, 35, 75, 1),
+            }
+        )
+        added, _ = _one(commands=commands)
+        self.assertEqual(
+            added[0]._attr_operation_list, ["off", "elec", "electric", "eco"]
+        )
 
     def test_current_operation_off_wins_over_program(self) -> None:
         added, _ = _one(attributes=_attrs(onOffStatus="0"))
@@ -413,48 +437,48 @@ class ReadStateTest(unittest.TestCase):
         attributes = _attrs()
         attributes.pop("startProgram.program")
         added, _ = _one(commands=_hw_commands("elec"), attributes=attributes)
-        self.assertEqual(added[0].current_operation, "elec")
+        self.assertEqual(added[0].current_operation, "electric")
 
-    def test_heating_attributes_report_the_running_sources(self) -> None:
+    def test_action_and_source_when_the_compressor_runs(self) -> None:
         added, _ = _one(attributes=_attrs(
             compressorHeatingCurrentStatus="1",
             electricHeatingCurrentStatus="0",
         ))
         self.assertEqual(
             added[0].extra_state_attributes,
-            {"heating": True, "heat_sources": ["compressor"]},
+            {"action": "heating", "heat_source": "compressor"},
         )
 
-    def test_heating_is_false_when_every_source_is_idle(self) -> None:
+    def test_action_is_idle_when_on_but_no_source_runs(self) -> None:
         added, _ = _one(attributes=_attrs(
             compressorHeatingCurrentStatus="0",
             electricHeatingCurrentStatus="0",
         ))
         self.assertEqual(
             added[0].extra_state_attributes,
-            {"heating": False, "heat_sources": []},
+            {"action": "idle", "heat_source": "none"},
         )
 
-    def test_both_sources_are_listed(self) -> None:
+    def test_action_is_off_when_the_device_is_powered_off(self) -> None:
+        added, _ = _one(attributes=_attrs(
+            onOffStatus="0",
+            compressorHeatingCurrentStatus="0",
+        ))
+        self.assertEqual(added[0].extra_state_attributes["action"], "off")
+
+    def test_several_sources_collapse_to_multiple(self) -> None:
+        # A scalar, not a list: HA only translates scalar attribute values, and the
+        # per-source detail lives in the binary sensors.
         added, _ = _one(attributes=_attrs(
             compressorHeatingCurrentStatus="1",
             electricHeatingCurrentStatus="1",
-            auxElecHeatingStatus="1",
         ))
-        self.assertEqual(
-            added[0].extra_state_attributes["heat_sources"],
-            ["compressor", "electric_heater", "aux_electric_heater"],
-        )
+        self.assertEqual(added[0].extra_state_attributes["heat_source"], "multiple")
 
-    def test_no_heating_key_when_the_device_reports_no_source(self) -> None:
+    def test_no_attributes_when_the_device_reports_no_source(self) -> None:
         # A confident "not heating" on a device that never reports it would be a lie.
         added, _ = _one()
         self.assertIsNone(added[0].extra_state_attributes)
-
-    def test_unreported_sources_are_omitted_not_false(self) -> None:
-        added, _ = _one(attributes=_attrs(compressorHeatingCurrentStatus="0"))
-        attrs = added[0].extra_state_attributes
-        self.assertEqual(attrs, {"heating": False, "heat_sources": []})
 
     def test_away_mode_reads_the_vac_program(self) -> None:
         added, _ = _one(attributes=_attrs(**{"startProgram.program": "vac"}))
@@ -501,15 +525,16 @@ class WriteTest(unittest.TestCase):
 
     def test_set_operation_mode_sends_the_program(self) -> None:
         added, commands = _one(client=FakeClient())
-        asyncio.run(added[0].async_set_operation_mode("elec"))
+        asyncio.run(added[0].async_set_operation_mode("electric"))
         self.assertEqual(commands["startProgram"].send_calls, 1)
+        # The HA standard name is translated BACK to the device's own code.
         self.assertEqual(commands["startProgram"].parameters["program"].value, "elec")
         # Device already on: no power command needed.
         self.assertEqual(commands["settings"].send_calls, 0)
 
     def test_set_operation_mode_powers_on_first_when_off(self) -> None:
         added, commands = _one(attributes=_attrs(onOffStatus="0"), client=FakeClient())
-        asyncio.run(added[0].async_set_operation_mode("auto"))
+        asyncio.run(added[0].async_set_operation_mode("heat_pump"))
         self.assertEqual(commands["settings"].send_calls, 1)
         self.assertEqual(commands["settings"].parameters["onOffStatus"].value, 1)
         self.assertEqual(commands["startProgram"].parameters["program"].value, "auto")

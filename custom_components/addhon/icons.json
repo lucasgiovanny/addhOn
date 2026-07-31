@@ -6,9 +6,9 @@
         "state": {
           "off": "mdi:water-boiler-off",
           "on": "mdi:water-boiler",
-          "auto": "mdi:water-boiler-auto",
+          "heat_pump": "mdi:heat-pump",
           "eco": "mdi:leaf",
-          "elec": "mdi:lightning-bolt",
+          "electric": "mdi:lightning-bolt",
           "vac": "mdi:beach"
         },
         "state_attributes": {
@@ -17,10 +17,29 @@
             "state": {
               "off": "mdi:water-boiler-off",
               "on": "mdi:water-boiler",
-              "auto": "mdi:water-boiler-auto",
+              "heat_pump": "mdi:heat-pump",
               "eco": "mdi:leaf",
-              "elec": "mdi:lightning-bolt",
+              "electric": "mdi:lightning-bolt",
               "vac": "mdi:beach"
+            }
+          },
+          "action": {
+            "default": "mdi:water-boiler",
+            "state": {
+              "off": "mdi:power-off",
+              "idle": "mdi:sleep",
+              "heating": "mdi:fire"
+            }
+          },
+          "heat_source": {
+            "default": "mdi:heat-wave",
+            "state": {
+              "none": "mdi:sleep",
+              "compressor": "mdi:heat-pump",
+              "electric_heater": "mdi:lightning-bolt",
+              "aux_electric_heater": "mdi:radiator",
+              "boiler": "mdi:water-boiler",
+              "multiple": "mdi:heat-wave"
             }
           }
         }

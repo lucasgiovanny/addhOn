@@ -866,19 +866,32 @@
     "water_heater": {
       "water_heater": {
         "state_attributes": {
-          "heating": {
-            "name": "Aquecendo"
+          "action": {
+            "name": "Ação",
+            "state": {
+              "off": "Desligado",
+              "idle": "Ocioso",
+              "heating": "Aquecendo"
+            }
           },
-          "heat_sources": {
-            "name": "Fontes de calor"
+          "heat_source": {
+            "name": "Fonte de calor",
+            "state": {
+              "none": "Nenhuma",
+              "compressor": "Compressor",
+              "electric_heater": "Resistência elétrica",
+              "aux_electric_heater": "Resistência auxiliar",
+              "boiler": "Caldeira",
+              "multiple": "Várias fontes"
+            }
           }
         },
         "state": {
           "off": "Desligado",
           "on": "Ligado",
-          "auto": "Auto",
+          "heat_pump": "Auto",
           "eco": "Eco",
-          "elec": "Elétrico",
+          "electric": "Elétrico",
           "vac": "Férias"
         }
       }

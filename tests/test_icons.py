@@ -29,9 +29,13 @@ def _icons() -> dict:
     return json.loads(ICONS.read_text(encoding="utf-8"))
 
 
-def _translated_states(platform: str, key: str) -> set[str]:
+def _translated(platform: str, key: str) -> dict:
     data = json.loads((COMPONENT / "translations" / "en.json").read_text(encoding="utf-8"))
-    return set(data["entity"][platform][key].get("state", {}))
+    return data["entity"][platform][key]
+
+
+def _translated_states(platform: str, key: str) -> set[str]:
+    return set(_translated(platform, key).get("state", {}))
 
 
 class IconsStructureTest(unittest.TestCase):
@@ -86,6 +90,19 @@ class WaterHeaterIconsTest(unittest.TestCase):
         self.assertEqual(
             block["state_attributes"]["operation_mode"]["state"], block["state"]
         )
+
+    def test_attribute_icons_match_the_translated_attribute_values(self) -> None:
+        # `action` and `heat_source` are scalar enums rendered in a tile card's state
+        # content: every value that has a label must have an icon, and vice versa.
+        translated = _translated("water_heater", "water_heater")["state_attributes"]
+        for attr, block in self._block()["state_attributes"].items():
+            if attr == "operation_mode":  # mirrors the entity state, checked above
+                continue
+            self.assertEqual(
+                set(block["state"]),
+                set(translated[attr]["state"]),
+                f"icon/label mismatch for the '{attr}' attribute",
+            )
 
     def test_entity_declares_no_static_icon(self) -> None:
         # A static _attr_icon on the entity would override the icon translations and

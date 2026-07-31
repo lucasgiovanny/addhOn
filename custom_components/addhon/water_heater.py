@@ -82,15 +82,40 @@ HW_CURRENT_TEMP_ATTR = "temp"
 
 # The heat sources the appliance reports as currently running, ground-truthed on the real
 # HP250M7C-F9 (the same attributes the compressor / electric-heater binary sensors read).
-# Mapped to stable machine names so the exposed attribute is language-neutral and
-# templatable. Protection statuses (antifreeze, defrost) are deliberately NOT here: they
-# are not heating the water.
+# Mapped to stable machine names so the exposed attribute is language-neutral. Protection
+# statuses (antifreeze, defrost) are deliberately NOT here: they are not heating the water.
 HW_HEAT_SOURCES: tuple[tuple[str, str], ...] = (
     ("compressor", "compressorHeatingCurrentStatus"),
     ("electric_heater", "electricHeatingCurrentStatus"),
     ("aux_electric_heater", "auxElecHeatingStatus"),
     ("boiler", "boilerHeatingCurrentStatus"),
 )
+
+# Reported when more than one source runs at once (the classic compressor + resistance
+# boost). A SCALAR value, not a list: Home Assistant only translates scalar attribute
+# values, and this integration keeps every user-facing string in translations/ -- joining
+# labels in code would ship untranslated English. Per-source detail stays available as the
+# individual binary sensors, which is the better handle for automations anyway.
+HW_SOURCE_MULTIPLE = "multiple"
+HW_SOURCE_NONE = "none"
+
+# Device program code -> Home Assistant's STANDARD water_heater operation state.
+#
+# Load-bearing for the UI, not cosmetics: the frontend's mode picker (tile feature and
+# more-info) resolves its icons from a HARDCODED map of the standard states -- it does NOT
+# read icons.json -- so a model-specific code renders as an anonymous dot. `eco` is
+# already standard; `auto` is the mode where the heat pump leads (with the resistance as
+# backup) and `elec` is resistance-only.
+#
+# `vac` has NO standard equivalent: HA models holiday as the orthogonal away toggle, so it
+# stays as the raw device code and is additionally exposed through away_mode. Any code not
+# listed here passes through unchanged, so another model's modes still work.
+HW_MODE_TO_HA: dict[str, str] = {
+    "auto": "heat_pump",
+    "eco": "eco",
+    "elec": "electric",
+    "electric": "electric",
+}
 
 # The holiday/vacation program. On the device it is an ordinary startProgram mode, but
 # HA models "away" as its own orthogonal toggle, so it is exposed BOTH ways: as an
@@ -180,6 +205,21 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
             (code for code in self._mode_codes if code.lower() == HW_AWAY_CODE), None
         )
         self._normal_codes = [code for code in self._mode_codes if code != self._away_code]
+        # Device code <-> HA operation state, resolved once. An ambiguous mapping (two
+        # device codes claiming the same standard state, or one colliding with the
+        # synthetic on/off options) falls back to the RAW codes for every mode: device
+        # codes are unique by construction, so the round-trip can never mis-address a
+        # program. Correctness first, icons second.
+        mapped = {code: HW_MODE_TO_HA.get(code.lower(), code) for code in self._mode_codes}
+        names = list(mapped.values())
+        if len(set(names)) != len(names) or STATE_OFF in names or STATE_ON in names:
+            _LOGGER.debug(
+                "WaterHeater debug: ambiguous mode mapping %s, using raw device codes",
+                mapped,
+            )
+            mapped = {code: code for code in self._mode_codes}
+        self._code_to_ha = mapped
+        self._ha_to_code = {ha: code for code, ha in mapped.items()}
 
         features = WaterHeaterEntityFeature(0)
         if self._temp_param is not None:
@@ -195,7 +235,9 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
             # "off" is a synthetic option backed by onOffStatus: the device has no
             # stopProgram, one program is always active (see select.py's HW note).
             has_power = self._on_off_command is not None
-            options = ([STATE_OFF] if has_power else []) + self._mode_codes
+            options = ([STATE_OFF] if has_power else []) + [
+                self._code_to_ha[code] for code in self._mode_codes
+            ]
         elif self._on_off_command is not None:
             # No program enum: the only operating states the device knows are on/off.
             options = [STATE_OFF, STATE_ON]
@@ -274,7 +316,7 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
 
     @property
     def extra_state_attributes(self) -> dict | None:
-        """`heating` plus the heat sources currently running.
+        """`action` (off / idle / heating) and `heat_source`, both translated enums.
 
         The water_heater domain has NO equivalent of climate's hvac_action: the entity
         state is the SELECTED MODE, not what the appliance is doing. So this is exposed
@@ -282,11 +324,16 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         state would overwrite the mode AND put a value in the state machine that is not a
         member of operation_list, leaving HA's mode picker with nothing selected.
 
-        Capability-gated per source: a status the device does not report is omitted
-        instead of being reported False, and a device that reports none of them gets no
-        `heating` key at all rather than a confident "not heating". Attribute changes are
-        recorded, so `heating` gets real history even though it is not its own entity --
-        the per-source binary sensors remain the graphable/automatable handles.
+        Both values are SCALAR machine keys with `state_attributes` translations, so the
+        frontend renders them as proper localized labels ("Heating", "Compressor") in a
+        tile card's state content. A list would not: HA translates scalar attribute values
+        only, and building a joined label in code would ship untranslated English.
+
+        Capability-gated: a status the device does not report is ignored, and a device
+        that reports none of them gets no attributes at all rather than a confident
+        "not heating". Attribute changes are recorded, so `action` gets real history even
+        though it is not its own entity -- the per-source binary sensors remain the
+        graphable handles, and the only place the exact combination is visible.
         """
         running: list[str] = []
         reported = False
@@ -299,7 +346,17 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
                 running.append(name)
         if not reported:
             return None
-        return {"heating": bool(running), "heat_sources": running}
+        if self._on_off_command is not None and self._is_off:
+            action = STATE_OFF
+        else:
+            action = "heating" if running else "idle"
+        if not running:
+            source = HW_SOURCE_NONE
+        elif len(running) == 1:
+            source = running[0]
+        else:
+            source = HW_SOURCE_MULTIPLE
+        return {"action": action, "heat_source": source}
 
     def _float_attr(self, key: str) -> float | None:
         """Shadow attribute as a float, or None when absent/non-numeric (never a guess)."""
@@ -387,7 +444,10 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         if self._on_off_command is not None and self._is_off:
             return STATE_OFF
         if self._mode_codes:
-            return self._live_mode
+            # Reported under HA's standard name so the frontend's built-in mode icons
+            # apply; _live_mode stays in device codes for the send path.
+            mode = self._live_mode
+            return self._code_to_ha.get(mode, mode) if mode is not None else None
         # No program enum: on/off is the whole operating state (see __init__).
         if self._on_off_command is not None:
             return STATE_ON
@@ -408,17 +468,23 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         if operation_mode == STATE_ON:
             await self.async_turn_on()
             return
+        # Back to the DEVICE's own program code: the option the user picked is HA's
+        # standard name (see HW_MODE_TO_HA), which startProgram would not accept.
+        await self._async_apply_mode(self._ha_to_code.get(operation_mode, operation_mode))
+
+    async def _async_apply_mode(self, code: str) -> None:
+        """Start the device program `code` (a raw device code, not an HA state)."""
         # Selecting a program on a powered-off device would leave it off (startProgram
         # does not imply power on), so power it back up first -- one extra command, only
         # when the device actually reports itself off.
         if self._on_off_command is not None and self._is_off:
             _LOGGER.debug(
                 "WaterHeater debug: powering on before program '%s' id=%s",
-                operation_mode,
+                code,
                 redact_id(self._appliance_id),
             )
             await self._async_write_power("1")
-        await self._async_send_mode(operation_mode)
+        await self._async_send_mode(code)
         await self._async_request_command_refresh()
 
     async def _async_send_mode(self, code: str) -> None:
@@ -467,7 +533,8 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         current = self._live_mode
         if current is not None and current != self._away_code:
             self._coordinator_store(HW_LAST_MODE_STORE)[self._appliance_id] = current
-        await self.async_set_operation_mode(self._away_code)
+        # Device codes throughout: away never round-trips through the HA names.
+        await self._async_apply_mode(self._away_code)
 
     async def async_turn_away_mode_off(self) -> None:
         if not self._normal_codes:
@@ -480,7 +547,7 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
             stored,
             redact_id(self._appliance_id),
         )
-        await self.async_set_operation_mode(target)
+        await self._async_apply_mode(target)
 
     # --- shared sender -----------------------------------------------------------
 

@@ -866,19 +866,32 @@
     "water_heater": {
       "water_heater": {
         "state_attributes": {
-          "heating": {
-            "name": "Heating"
+          "action": {
+            "name": "Action",
+            "state": {
+              "off": "Off",
+              "idle": "Idle",
+              "heating": "Heating"
+            }
           },
-          "heat_sources": {
-            "name": "Heat sources"
+          "heat_source": {
+            "name": "Heat source",
+            "state": {
+              "none": "None",
+              "compressor": "Compressor",
+              "electric_heater": "Electric heater",
+              "aux_electric_heater": "Auxiliary heater",
+              "boiler": "Boiler",
+              "multiple": "Multiple sources"
+            }
           }
         },
         "state": {
           "off": "Off",
           "on": "On",
-          "auto": "Auto",
+          "heat_pump": "Auto",
           "eco": "Eco",
-          "elec": "Electric",
+          "electric": "Electric",
           "vac": "Holiday"
         }
       }
