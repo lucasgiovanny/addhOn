@@ -44,6 +44,7 @@ from .logging_utils import (
     silence_mqtt_noise,
 )
 from .debug_utils import redact_id, redact_mac
+from . import program_labels
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -358,6 +359,10 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
       '_total_energy', '_current_energy', '_current_water', '_loading_percentage'.
       Removed ONLY on devices of type TD (cross-checked with the coordinator),
       never on WM/WD/AC.
+    - The air purifier panel LIGHT (unique_id '<id>_panel_light'), replaced by a
+      select with the same unique_id in a different domain. Scoped to the light
+      domain for that reason: removing by unique_id alone would delete the
+      replacement along with the entity it replaces.
 
     Without this cleanup there would be orphan 'unavailable' entities with the '?' badge.
     """
@@ -388,6 +393,13 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
             registry.async_remove(reg_entry.entity_id)
             removed += 1
             _LOGGER.info("Removed legacy power switch: id=%s", redact_id(reg_entry.unique_id))
+        elif domain == "light" and unique_id.endswith("_panel_light"):
+            registry.async_remove(reg_entry.entity_id)
+            removed += 1
+            _LOGGER.info(
+                "Removed legacy purifier panel light: id=%s",
+                redact_id(reg_entry.unique_id),
+            )
         elif unique_id in td_orphans:
             registry.async_remove(reg_entry.entity_id)
             removed += 1
@@ -547,6 +559,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             len(coordinator.data) if isinstance(coordinator.data, dict) else 0,
         )
         coordinator.hon_client = hon_client
+
+        # Program-label catalog (#71). The appliance schema names a program with its
+        # i18n KEY (`PROGRAMS.WM_WD.HQD_AUTOCLEAN` -> slug `hqd_autoclean`), so readable
+        # names only exist in the catalog the hOn app downloads. Fetched ONCE here and
+        # parked on the coordinator, so no entity ever does I/O for a label. Best-effort
+        # by construction: async_load absorbs every failure and returns an empty catalog,
+        # in which case the entities keep showing the raw code.
+        setattr(
+            coordinator,
+            program_labels.COORDINATOR_ATTR,
+            await program_labels.async_load(hass),
+        )
 
         # Realtime: wire MQTT pushes to the coordinator (#4). Without this the push
         # channel was inert and entities only refreshed on the 60s poll. The push

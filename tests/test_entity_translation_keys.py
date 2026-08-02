@@ -199,7 +199,7 @@ def _tk(description) -> str:
 
 def _collect_code_keys() -> dict[str, set[str]]:
     from custom_components.addhon import (
-        binary_sensor, fan, light, number, select, sensor, switch,
+        binary_sensor, fan, number, select, sensor, switch,
     )
 
     used: dict[str, set[str]] = {}
@@ -242,14 +242,18 @@ def _collect_code_keys() -> dict[str, set[str]]:
     # Program select (fixed key) + the REF program/mode select (#40) + the
     # program-option selects (#35) + the AC fan-direction selects (#37).
     used["select"] = (
-        {"program", "ref_program", select.HonAirPurifierAromaSelect._attr_translation_key}
+        {
+            "program",
+            "ref_program",
+            select.HonAirPurifierAromaSelect._attr_translation_key,
+            select.HonAirPurifierPanelLightSelect._attr_translation_key,
+        }
         | {d.translation_key for d in select._PROGRAM_OPTION_SELECTS}
         | {d.translation_key for d in select._AC_DIRECTION_SELECTS}
     )
     used["button"] = {"start_program", "stop_program", "force_refresh", "reset_debug"}
     # Air purifier fan: a single fixed-key entity, not a description table.
     used["fan"] = {fan.HonAirPurifierFan._attr_translation_key}
-    used["light"] = {light.HonAirPurifierLight._attr_translation_key}
     return used
 
 
@@ -479,11 +483,22 @@ def _collect_select_state_keys() -> dict[str, set[str]]:
     # The AP aroma select is one fixed-key entity rather than a description table,
     # so its option set is registered explicitly; without this its `state` block
     # would never be parity-checked.
-    from custom_components.addhon.air_purifier import AP_AROMA_TO_OPTION
+    from custom_components.addhon.air_purifier import (
+        AP_AROMA_TO_OPTION,
+        AP_LIGHT_TO_OPTION,
+    )
 
     by_tk.setdefault(
         select.HonAirPurifierAromaSelect._attr_translation_key, set()
     ).update(AP_AROMA_TO_OPTION.values())
+    # The AP panel-light select is the same shape as the aroma one and was the only
+    # fixed-key option block left unchecked. Its keys happen to match today, so this
+    # closes a gap rather than fixing a live defect -- but the raw-vs-option encoding of
+    # AP_LIGHT_TO_OPTION is itself under review, and an edit there is exactly what would
+    # otherwise reach the UI as untranslated raw keys.
+    by_tk.setdefault(
+        select.HonAirPurifierPanelLightSelect._attr_translation_key, set()
+    ).update(AP_LIGHT_TO_OPTION.values())
     return by_tk
 
 
