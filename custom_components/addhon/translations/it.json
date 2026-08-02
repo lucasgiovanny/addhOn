@@ -450,6 +450,25 @@
       "last_refresh": {
         "name": "Ultimo aggiornamento"
       },
+      "heating_status": {
+        "name": "Stato riscaldamento",
+        "state": {
+          "off": "Spento",
+          "idle": "Inattivo",
+          "heating": "In riscaldamento"
+        }
+      },
+      "heat_source": {
+        "name": "Sorgente di calore",
+        "state": {
+          "none": "Nessuna",
+          "compressor": "Compressore",
+          "electric_heater": "Resistenza elettrica",
+          "aux_electric_heater": "Resistenza ausiliaria",
+          "boiler": "Caldaia",
+          "multiple": "Più sorgenti"
+        }
+      },
       "hot_water_level": {
         "name": "Livello acqua calda"
       },

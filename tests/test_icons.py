@@ -73,6 +73,28 @@ class IconsStructureTest(unittest.TestCase):
                     self.assertIn("state", attr_block, f"{platform}.{key}.{attr}")
 
 
+class SensorIconsTest(unittest.TestCase):
+    """A sensor block in icons.json exists to give an ENUM sensor per-state icons.
+
+    Only the JSON-vs-JSON half lives here: this module deliberately imports nothing from
+    the component (see the module docstring), so it stays runnable on its own. The
+    cross-checks against the sensor descriptions themselves -- that the state keys match
+    the declared ENUM `options`, and that none of these sensors carries a static icon that
+    would override the whole block -- live in test_entity_translation_keys.py, which
+    already runs the platform tables under stubs.
+    """
+
+    def test_state_icons_match_the_translated_states(self) -> None:
+        blocks = _icons()["entity"].get("sensor", {})
+        self.assertTrue(blocks, "no entity.sensor icon block to check")
+        for tk, block in blocks.items():
+            self.assertEqual(
+                set(block["state"]),
+                _translated_states("sensor", tk),
+                f"icon/label mismatch for the '{tk}' sensor",
+            )
+
+
 class WaterHeaterIconsTest(unittest.TestCase):
     """The boiler's operating modes are model-specific (auto/eco/elec/vac on the
     HP250M7C-F9) rather than HA's standard water_heater states, so the frontend has no

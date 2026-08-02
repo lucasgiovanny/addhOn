@@ -96,14 +96,25 @@ those names: the device's `auto` is `heat_pump`, `elec` is `electric`, `eco` is 
 standard. Holiday (`vac`) has no standard equivalent, so it keeps the device code and is
 additionally exposed as the away-mode toggle.
 
-The entity also carries an `action` attribute (`off` / `idle` / `heating`), a
-`heat_source` one (compressor, electric heater, auxiliary heater, boiler, or `multiple`)
-and `hot_water_level` (the same 0-100 % the sensor reports). The `water_heater` domain
-has no equivalent of climate's `hvac_action`, so this cannot be part of the state;
-`action` and `heat_source` are translated, so a tile card's *state content* renders them
-as proper labels. `hot_water_level` is a plain number there — attributes carry no unit,
-so use the sensor entity where the `%` matters. For graphs, automations and the exact
-combination of running sources, use the per-source `binary_sensor` entities.
+What the appliance is *doing* is exposed two ways, from one shared derivation, because
+neither surface alone covers both uses:
+
+- **As entities** — `sensor.<device>_heating_status` (`off` / `idle` / `heating`) and
+  `sensor.<device>_heat_source` (compressor, electric heater, auxiliary heater, boiler,
+  or `multiple`). These are the graphable handles: they get their own history timeline
+  and can sit next to the water heater in a `history-graph` card. Use these for
+  dashboards and automations.
+- **As attributes on the `water_heater` entity** — the same two readings plus
+  `hot_water_level` (the same 0-100 % the sensor reports). A tile card's *state content*
+  can only show attributes of the entity it is bound to, which is what these are for.
+  `hot_water_level` is a plain number there — attributes carry no unit, so use the sensor
+  entity where the `%` matters.
+
+The `water_heater` domain has no equivalent of climate's `hvac_action`, so this can
+never be part of the entity state. It also cannot appear in the water heater's own
+history: the more-info chart is single-entity by construction and plots only the current
+and target temperature — hence the sensors. The exact combination of simultaneously
+running sources stays visible in the per-source `binary_sensor` entities.
 
 ### Tested on real hardware
 

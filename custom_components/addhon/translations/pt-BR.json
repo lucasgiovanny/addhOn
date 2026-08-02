@@ -450,6 +450,25 @@
       "last_refresh": {
         "name": "Última atualização"
       },
+      "heating_status": {
+        "name": "Status de aquecimento",
+        "state": {
+          "off": "Desligado",
+          "idle": "Ocioso",
+          "heating": "Aquecendo"
+        }
+      },
+      "heat_source": {
+        "name": "Fonte de calor",
+        "state": {
+          "none": "Nenhuma",
+          "compressor": "Compressor",
+          "electric_heater": "Resistência elétrica",
+          "aux_electric_heater": "Resistência auxiliar",
+          "boiler": "Caldeira",
+          "multiple": "Várias fontes"
+        }
+      },
       "hot_water_level": {
         "name": "Nível de água quente"
       },

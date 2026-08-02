@@ -1,5 +1,26 @@
 {
   "entity": {
+    "sensor": {
+      "heating_status": {
+        "default": "mdi:water-boiler",
+        "state": {
+          "off": "mdi:power-off",
+          "idle": "mdi:sleep",
+          "heating": "mdi:fire"
+        }
+      },
+      "heat_source": {
+        "default": "mdi:heat-wave",
+        "state": {
+          "none": "mdi:sleep",
+          "compressor": "mdi:heat-pump",
+          "electric_heater": "mdi:lightning-bolt",
+          "aux_electric_heater": "mdi:radiator",
+          "boiler": "mdi:water-boiler",
+          "multiple": "mdi:heat-wave"
+        }
+      }
+    },
     "water_heater": {
       "water_heater": {
         "default": "mdi:water-boiler",

@@ -515,13 +515,18 @@ class ReadStateTest(unittest.TestCase):
 class HeatSourceDriftTest(unittest.TestCase):
     """The heat-source attribute names must stay identical to the ones the HW binary
     sensors read. Those are reality-checked against the real HP250M7C-F9 dump; a rename
-    on that side would otherwise leave `heating` silently stuck reporting nothing."""
+    on that side would otherwise leave `heating` silently stuck reporting nothing.
+
+    The table lives in hw_values (HA-free), which is what lets the water_heater
+    attributes and the heating_status / heat_source sensors share one derivation.
+    """
 
     def test_names_come_from_the_hw_binary_sensor_table(self) -> None:
-        from custom_components.addhon import binary_sensor, water_heater
+        from custom_components.addhon import binary_sensor
+        from custom_components.addhon.hw_values import HW_HEAT_SOURCES
 
         known = {desc.attr_key for desc in binary_sensor._HEAT_PUMP_BINARY}
-        used = {attr for _name, attr in water_heater.HW_HEAT_SOURCES}
+        used = {attr for _name, attr in HW_HEAT_SOURCES}
         self.assertEqual(
             used - known,
             set(),
@@ -530,11 +535,20 @@ class HeatSourceDriftTest(unittest.TestCase):
         )
 
     def test_protection_statuses_are_not_treated_as_heating(self) -> None:
-        from custom_components.addhon import water_heater
+        from custom_components.addhon.hw_values import HW_HEAT_SOURCES
 
-        used = {attr for _name, attr in water_heater.HW_HEAT_SOURCES}
+        used = {attr for _name, attr in HW_HEAT_SOURCES}
         self.assertNotIn("antifreezingStatus", used)
         self.assertNotIn("autoDefrostStatus", used)
+
+    def test_the_entity_and_the_sensors_read_the_same_power_flag(self) -> None:
+        # water_heater resolves onOffStatus as a writable COMMAND parameter while the
+        # sensors only ever read the shadow; both must name the same key or a powered-off
+        # appliance would read `off` on one surface and `idle` on the other.
+        from custom_components.addhon import water_heater
+        from custom_components.addhon.hw_values import HW_POWER_ATTR
+
+        self.assertEqual(water_heater.HW_ON_OFF_PARAM, HW_POWER_ATTR)
 
 
 class WriteTest(unittest.TestCase):

@@ -101,7 +101,15 @@ from .const import (
     WM_STATE_MAP,
 )
 from .debug_utils import redact_id
-from .hw_values import HW_WATER_LEVEL_ATTR, hw_water_level
+from .hw_values import (
+    HW_ACTIONS,
+    HW_HEAT_SOURCES,
+    HW_SOURCES,
+    HW_WATER_LEVEL_ATTR,
+    hw_action,
+    hw_heat_source,
+    hw_water_level,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -836,6 +844,45 @@ def _g_hw_energy(key: str, attr: str,
     )
 
 
+def _hw_heating_status(_raw, get_attr: Callable[[str], object]) -> str | None:
+    """off / idle / heating, derived from ALL the heat-source flags at once."""
+    return hw_action(get_attr)
+
+
+def _hw_heat_source(_raw, get_attr: Callable[[str], object]) -> str | None:
+    """Which source is running (or `multiple` / `none`)."""
+    return hw_heat_source(get_attr)
+
+
+def _g_hw_derived(key: str, options: tuple[str, ...],
+                  value_fn: Callable[[object, Callable[[str], object]], object],
+                  ) -> HonSensorEntityDescription:
+    """ENUM sensor derived from the whole heat-source group rather than one attribute.
+
+    `attr_key` + `attr_fallbacks` cover the group so the standard capability gate creates
+    the sensor when the device reports ANY heat-source flag -- the same condition under
+    which the water_heater entity publishes its `action` attribute. The raw value they
+    resolve is ignored: value_fn reads every flag itself through get_attr.
+
+    Deliberately NO icon: an entity that carries one writes a static `icon` into its
+    state, and that WINS over the icon translations (entity.py picks
+    `(entry and entry.icon) or self.icon` and only leaves the slot empty for the frontend
+    to resolve when both are None). These sensors want the per-state icons in icons.json
+    -- a flame while heating, the running source's own symbol -- which is the whole point
+    of having them as entities.
+    """
+    return HonSensorEntityDescription(
+        key=key,
+        attr_key=HW_HEAT_SOURCES[0][1],
+        attr_fallbacks=tuple(attr for _, attr in HW_HEAT_SOURCES[1:]),
+        device_class=SensorDeviceClass.ENUM,
+        options=sorted(options),
+        value_fn=value_fn,
+        value_fn_needs_attrs=True,
+        gated=True,
+    )
+
+
 def _hw_slot(part: str) -> float:
     return float(str(part).replace(",", "."))
 
@@ -903,6 +950,17 @@ def _hw_sum_year(parts: list[str], get_attr: Callable[[str], object]) -> float:
 # is sound but the hour-by-hour attribution in the Energy dashboard is a staircase
 # (a 1 kWh step every day or two). Nothing here can improve that.
 _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
+    # What the appliance is DOING, as entities rather than only as water_heater
+    # attributes. The attributes are recorded but no native card plots one, and the
+    # more-info history chart is single-entity by construction (the frontend subscribes
+    # with [this.entityId]) -- so a `water_heater` more-info can only ever draw its two
+    # temperature lines. As ENUM sensors these get their own history timeline, land on
+    # the device page, and can be dropped next to the water heater in a history-graph
+    # card. Same hw_values helpers the entity calls, so they cannot report different
+    # things for the same poll. Enabled by default: this is the reading users ask for
+    # first ("was it heating, and on which source?").
+    _g_hw_derived("heating_status", HW_ACTIONS, _hw_heating_status),
+    _g_hw_derived("heat_source", HW_SOURCES, _hw_heat_source),
     HonSensorEntityDescription(
         key="hot_water_level",
         attr_key=HW_WATER_LEVEL_ATTR,

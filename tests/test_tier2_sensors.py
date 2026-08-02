@@ -884,5 +884,100 @@ class HeatPumpEnergyCountersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(values["compressor_energy_year"])
 
 
+class HeatPumpHeatingStatusSensorsTest(unittest.IsolatedAsyncioTestCase):
+    """`heating_status` / `heat_source`: what the appliance is DOING, as entities.
+
+    They exist because the water_heater more-info history chart is single-entity by
+    construction and plots only the two temperature lines -- an attribute, however
+    faithfully recorded, can never appear there. As sensors these get their own history.
+    """
+
+    SOURCES = {
+        "compressorHeatingCurrentStatus": "0",
+        "electricHeatingCurrentStatus": "0",
+    }
+
+    async def _values(self, **overrides) -> dict:
+        added = await _build_sensors("HW", dict(self.SOURCES, **overrides))
+        return {e.entity_description.key: e.native_value for e in added}
+
+    async def test_heating_when_a_source_runs(self) -> None:
+        values = await self._values(compressorHeatingCurrentStatus="1")
+        self.assertEqual(values["heating_status"], "heating")
+        self.assertEqual(values["heat_source"], "compressor")
+
+    async def test_idle_when_on_but_no_source_runs(self) -> None:
+        values = await self._values()
+        self.assertEqual(values["heating_status"], "idle")
+        self.assertEqual(values["heat_source"], "none")
+
+    async def test_off_wins_over_the_source_flags(self) -> None:
+        # A stale source flag on a powered-off appliance must not read as heating.
+        values = await self._values(onOffStatus="0", compressorHeatingCurrentStatus="1")
+        self.assertEqual(values["heating_status"], "off")
+
+    async def test_several_sources_collapse_to_multiple(self) -> None:
+        values = await self._values(
+            compressorHeatingCurrentStatus="1", electricHeatingCurrentStatus="1"
+        )
+        self.assertEqual(values["heat_source"], "multiple")
+
+    async def test_created_from_any_single_source_flag(self) -> None:
+        # Gated on the GROUP, not on the compressor alone: a model that reports only the
+        # boiler still gets both sensors.
+        added = await _build_sensors("HW", {"boilerHeatingCurrentStatus": "1"})
+        values = {e.entity_description.key: e.native_value for e in added}
+        self.assertEqual(values["heating_status"], "heating")
+        self.assertEqual(values["heat_source"], "boiler")
+
+    async def test_absent_without_heat_source_telemetry(self) -> None:
+        # No confident "not heating" on a device that never reports it.
+        keys = {e.entity_description.key
+                for e in await _build_sensors("HW", {"tempSel": "55"})}
+        self.assertNotIn("heating_status", keys)
+        self.assertNotIn("heat_source", keys)
+
+    async def test_every_reachable_value_is_a_declared_enum_option(self) -> None:
+        # An ENUM sensor reporting a state outside `options` is a hard error in HA.
+        from custom_components.addhon.hw_values import HW_HEAT_SOURCES
+
+        added = {e.entity_description.key: e for e in await _build_sensors(
+            "HW", dict(self.SOURCES))}
+        for key in ("heating_status", "heat_source"):
+            self.assertIsNotNone(added[key].entity_description.options, key)
+        options = {k: set(added[k].entity_description.options)
+                   for k in ("heating_status", "heat_source")}
+        self.assertEqual(options["heating_status"], {"off", "idle", "heating"})
+        self.assertEqual(
+            options["heat_source"],
+            {"none", "multiple", *(name for name, _ in HW_HEAT_SOURCES)},
+        )
+        # And the values actually produced stay inside them.
+        for attrs in ({}, {"onOffStatus": "0"}, {"compressorHeatingCurrentStatus": "1"},
+                      {"compressorHeatingCurrentStatus": "1",
+                       "electricHeatingCurrentStatus": "1"}):
+            values = await self._values(**attrs)
+            for key in ("heating_status", "heat_source"):
+                self.assertIn(values[key], options[key], (key, attrs))
+
+    async def test_no_static_icon_so_the_per_state_icons_apply(self) -> None:
+        # An entity that carries its own icon writes it into the state and overrides the
+        # icon translations, pinning one symbol instead of following the running source.
+        added = {e.entity_description.key: e for e in await _build_sensors(
+            "HW", dict(self.SOURCES))}
+        for key in ("heating_status", "heat_source"):
+            self.assertIsNone(added[key].entity_description.icon, key)
+
+    async def test_shares_the_water_heater_derivation(self) -> None:
+        # One helper pair, so the sensors and the entity attributes cannot drift.
+        from custom_components.addhon.hw_values import hw_action, hw_heat_source
+
+        attributes = dict(self.SOURCES, compressorHeatingCurrentStatus="1")
+        values = await self._values(compressorHeatingCurrentStatus="1")
+        get_attr = attributes.get
+        self.assertEqual(values["heating_status"], hw_action(get_attr))
+        self.assertEqual(values["heat_source"], hw_heat_source(get_attr))
+
+
 if __name__ == "__main__":
     unittest.main()

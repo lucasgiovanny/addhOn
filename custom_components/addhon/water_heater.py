@@ -54,7 +54,13 @@ from .base_entity import HonBaseEntity, coordinator_data_map
 from .const import APPLIANCE_HW, APPLIANCE_WH, DOMAIN
 from .debug_utils import command_names, redact_id
 from .hon_commands import async_send_command, find_settings_param, param_range
-from .hw_values import HW_WATER_LEVEL_ATTR, hw_water_level
+from .hw_values import (
+    HW_POWER_ATTR,
+    HW_WATER_LEVEL_ATTR,
+    hw_action,
+    hw_heat_source,
+    hw_water_level,
+)
 from .program_options import (
     async_send_program,
     startprogram_program_codes,
@@ -74,31 +80,13 @@ WATER_HEATER_TYPES = (APPLIANCE_HW, APPLIANCE_WH)
 HW_TEMP_PARAM = "tempSel"
 HW_TEMP_COMMANDS = ("startProgram", "settings", "setParameters")
 
-# Power parameter, resolved on the usual settings/setParameters pair.
-HW_ON_OFF_PARAM = "onOffStatus"
+# Power parameter, resolved on the usual settings/setParameters pair. Same key the shared
+# helpers read for the action, so the entity and the sensors cannot disagree on power.
+HW_ON_OFF_PARAM = HW_POWER_ATTR
 
 # Current water temperature in the cloud shadow (same attribute the `water_temp` sensor
 # reads).
 HW_CURRENT_TEMP_ATTR = "temp"
-
-# The heat sources the appliance reports as currently running, ground-truthed on the real
-# HP250M7C-F9 (the same attributes the compressor / electric-heater binary sensors read).
-# Mapped to stable machine names so the exposed attribute is language-neutral. Protection
-# statuses (antifreeze, defrost) are deliberately NOT here: they are not heating the water.
-HW_HEAT_SOURCES: tuple[tuple[str, str], ...] = (
-    ("compressor", "compressorHeatingCurrentStatus"),
-    ("electric_heater", "electricHeatingCurrentStatus"),
-    ("aux_electric_heater", "auxElecHeatingStatus"),
-    ("boiler", "boilerHeatingCurrentStatus"),
-)
-
-# Reported when more than one source runs at once (the classic compressor + resistance
-# boost). A SCALAR value, not a list: Home Assistant only translates scalar attribute
-# values, and this integration keeps every user-facing string in translations/ -- joining
-# labels in code would ship untranslated English. Per-source detail stays available as the
-# individual binary sensors, which is the better handle for automations anyway.
-HW_SOURCE_MULTIPLE = "multiple"
-HW_SOURCE_NONE = "none"
 
 # Device program code -> Home Assistant's STANDARD water_heater operation state.
 #
@@ -338,32 +326,20 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
 
         Every key is independently capability-gated: a reading the device does not report
         is omitted rather than guessed, and a device that reports none of them gets no
-        attributes at all rather than a confident "not heating".  Attribute changes are
-        recorded, so `action` gets real history even though it is not its own entity --
-        the per-source binary sensors remain the graphable handles, and the only place the
-        exact combination of running sources is visible.
+        attributes at all rather than a confident "not heating".
+
+        These stay even though `sensor.<device>_heating_status` and
+        `sensor.<device>_heat_source` now expose the same two readings as entities: the
+        sensors are the GRAPHABLE handles (an attribute is recorded but no native card
+        plots one, and the more-info history chart is single-entity by construction),
+        while the attributes are what a tile card bound to THIS entity can put in its
+        state content. Both call the same hw_values helpers, so they cannot drift.
         """
         attrs: dict = {}
-        running: list[str] = []
-        reported = False
-        for name, attr in HW_HEAT_SOURCES:
-            raw = self._get_attr(attr)
-            if raw is None:
-                continue
-            reported = True
-            if str(raw).strip() == "1":
-                running.append(name)
-        if reported:
-            if self._on_off_command is not None and self._is_off:
-                attrs["action"] = STATE_OFF
-            else:
-                attrs["action"] = "heating" if running else "idle"
-            if not running:
-                attrs["heat_source"] = HW_SOURCE_NONE
-            elif len(running) == 1:
-                attrs["heat_source"] = running[0]
-            else:
-                attrs["heat_source"] = HW_SOURCE_MULTIPLE
+        action = hw_action(self._get_attr)
+        if action is not None:
+            attrs["action"] = action
+            attrs["heat_source"] = hw_heat_source(self._get_attr)
         level = hw_water_level(self._get_attr(HW_WATER_LEVEL_ATTR))
         if level is not None:
             attrs["hot_water_level"] = level

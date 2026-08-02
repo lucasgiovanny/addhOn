@@ -450,6 +450,25 @@
       "last_refresh": {
         "name": "Last refresh"
       },
+      "heating_status": {
+        "name": "Heating status",
+        "state": {
+          "off": "Off",
+          "idle": "Idle",
+          "heating": "Heating"
+        }
+      },
+      "heat_source": {
+        "name": "Heat source",
+        "state": {
+          "none": "None",
+          "compressor": "Compressor",
+          "electric_heater": "Electric heater",
+          "aux_electric_heater": "Auxiliary heater",
+          "boiler": "Boiler",
+          "multiple": "Multiple sources"
+        }
+      },
       "hot_water_level": {
         "name": "Hot water level"
       },

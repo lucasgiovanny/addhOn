@@ -443,6 +443,46 @@ class SensorStateTranslationTest(unittest.TestCase):
                     f"ENUM options used in code {sorted(options)}",
                 )
 
+    def test_enum_options_match_the_state_icons(self) -> None:
+        """An ENUM sensor with a block in icons.json must have one icon per option.
+
+        The JSON-only half of this (icons vs labels) is in test_icons.py; this half needs
+        the description tables, which only this module loads under stubs. A state key
+        present in one and not the other renders as a blank icon in the UI.
+        """
+        icons = json.loads((COMPONENT / "icons.json").read_text(encoding="utf-8"))
+        blocks = icons.get("entity", {}).get("sensor", {})
+        self.assertTrue(blocks, "no entity.sensor icon block to check")
+        by_tk = _collect_sensor_state_options()
+        for tk, block in blocks.items():
+            self.assertIn(tk, by_tk, f"entity.sensor.{tk} icons but no ENUM sensor")
+            self.assertEqual(
+                set(block.get("state", {})),
+                by_tk[tk],
+                f"icon/option mismatch for the '{tk}' sensor",
+            )
+
+    def test_sensors_with_state_icons_declare_no_static_icon(self) -> None:
+        """A static icon is written into the state and WINS over the icon translations
+        (entity.py takes `(entry and entry.icon) or self.icon` and only leaves the slot
+        for the frontend to fill when both are None), so it would freeze one symbol and
+        make the whole per-state block dead weight."""
+        from custom_components.addhon import sensor
+
+        icons = json.loads((COMPONENT / "icons.json").read_text(encoding="utf-8"))
+        iconed = set(icons.get("entity", {}).get("sensor", {}))
+        checked = 0
+        for descs in sensor.SENSORS.values():
+            for desc in descs:
+                if _tk(desc) in iconed:
+                    checked += 1
+                    self.assertIsNone(
+                        desc.icon,
+                        f"sensor '{_tk(desc)}' has per-state icons but a static icon "
+                        "that overrides them",
+                    )
+        self.assertTrue(checked, "no sensor description matched an icon block")
+
     def test_same_translation_key_descriptions_share_options(self) -> None:
         # ENUM sensors that share a translation_key must declare IDENTICAL options,
         # so the single per-tk state block is unambiguous (the cross-check above
