@@ -233,6 +233,19 @@ class FakeCommand:
 
 
 class FakeAppliance:
+    def __init__(self, commands, model_attributes=None):
+        self.commands = commands
+        if model_attributes is not None:
+            self.model_attributes = model_attributes
+
+
+class FakeApplianceNoModel:
+    """An appliance implementation with NO `model_attributes` surface at all.
+
+    Guards the getattr default: an older/foreign appliance object must not make
+    the whole dump raise.
+    """
+
     def __init__(self, commands):
         self.commands = commands
 
@@ -276,9 +289,16 @@ def _build_coordinator() -> FakeCoordinator:
                 # no entity writes this -> unmapped writable
                 "mysteryParam": FakeParam(value="3", typology="enum", values=["3", "4"]),
             }),
-        }
+        },
+        # Cloud CATALOGUE metadata (applianceModel.attributes), not shadow telemetry.
+        model_attributes={
+            "zones": "fridge|freezer|vtRoom2",
+            "seriesVersion": "fd90Series7a",
+            "doorNumber": 4,
+        },
     )
-    wd = FakeAppliance(
+    # No model_attributes surface at all -> the block must still build, with {}.
+    wd = FakeApplianceNoModel(
         commands={
             "settings": FakeCommand({
                 "program": FakeParam(value="9", typology="enum", values=["9", "10"]),  # mapped
@@ -375,6 +395,63 @@ class DiagnosticsValuesTest(unittest.TestCase):
         schema = diagnostics._param_schema(param)
         self.assertEqual((schema["min"], schema["max"], schema["step"]), (0, 1400, 100))
         self.assertNotIn("enum", schema)
+        self.assertNotIn("values", schema)
+
+    def test_a_small_range_carries_the_values_it_materialises(self):
+        """min/max/step cannot answer why a 0/1 control is missing: param_range
+        casts through float(), so "0"/"1" and "0.0"/"1.0" print the same here,
+        while the capability gates compare those exact strings."""
+        param = FakeParam(
+            value="0", typology="range", rng=(0, 1, 1), values=["0", "1"]
+        )
+        self.assertEqual(["0", "1"], diagnostics._param_schema(param)["values"])
+
+    def test_a_decimal_spelled_range_is_visible_as_such(self):
+        """The whole point: the dump must distinguish the grid that passes a
+        capability gate from the one that silently removes the control."""
+        param = FakeParam(
+            value="0", typology="range", rng=(0, 1, 1), values=["0.0", "1.0"]
+        )
+        schema = diagnostics._param_schema(param)
+        self.assertEqual((schema["min"], schema["max"], schema["step"]), (0, 1, 1))
+        self.assertEqual(["0.0", "1.0"], schema["values"])
+
+    def test_the_materialised_grid_is_bounded(self):
+        """Emitted only for a grid small enough to be a toggle or a few-position
+        control. The bound is evaluated arithmetically, so `.values` is never read
+        for a real setpoint range."""
+        cap = diagnostics._RANGE_MAX_MATERIALISED
+        inside = FakeParam(
+            value="0", typology="range", rng=(0, cap - 1, 1),
+            values=[str(v) for v in range(cap)],
+        )
+        outside = FakeParam(
+            value="0", typology="range", rng=(0, cap, 1),
+            values=[str(v) for v in range(cap + 1)],
+        )
+        self.assertIn("values", diagnostics._param_schema(inside))
+        self.assertNotIn("values", diagnostics._param_schema(outside))
+
+    def test_a_huge_grid_is_never_materialised_to_measure_it(self):
+        """A parameter whose `.values` would explode must be refused WITHOUT the
+        property ever being read: the count comes from min/max/step. Not a
+        FakeParam subclass, because that one ASSIGNS self.values and a property
+        cannot be assigned over."""
+
+        class ExplodingRange:
+            typology = "range"
+            category = "command"
+            mandatory = 0
+            value = "0"
+            min, max, step = 0, 100000, 1
+
+            @property
+            def values(self):  # pragma: no cover - must never be reached
+                raise AssertionError("`.values` was materialised for a huge range")
+
+        schema = diagnostics._param_schema(ExplodingRange())
+        self.assertNotIn("values", schema)
+        self.assertEqual(100000, schema["max"])
 
     def test_mac_in_value_under_benign_key_is_masked(self):
         # Identity that lands in a string VALUE under a non-redacted key (an event
@@ -397,6 +474,54 @@ class DiagnosticsValuesTest(unittest.TestCase):
         dumped = json.dumps(out)
         self.assertNotIn("3C:71:BF:BD:32:2C", dumped)
         self.assertEqual(out["deviceInfo"], "mac ***")
+
+
+class DiagnosticsModelAttributesTest(unittest.TestCase):
+    """The model CATALOGUE block (`applianceModel.attributes`).
+
+    It answers what the appliance IS where the shadow cannot: which zones the
+    model declares, which series it belongs to. Without it a zone-indexing
+    report cannot be diagnosed from the dump alone (issue #75).
+    """
+
+    def test_model_attributes_present_and_readable(self):
+        _, blocks = _entry_diag()
+        model = blocks["AC"]["model_attributes"]
+        self.assertEqual(model["zones"], "fridge|freezer|vtRoom2")
+        self.assertEqual(model["seriesVersion"], "fd90Series7a")
+        self.assertEqual(model["doorNumber"], 4)
+
+    def test_appliance_without_the_surface_gets_empty_dict(self):
+        _, blocks = _entry_diag()
+        self.assertEqual(blocks["WD"]["model_attributes"], {})
+
+    def test_distinct_from_shadow_attributes(self):
+        # Same block, two axes: catalogue vs telemetry. A key of one must not
+        # leak into the other.
+        _, blocks = _entry_diag()
+        self.assertNotIn("zones", blocks["AC"]["attributes"])
+        self.assertNotIn("tempIndoor", blocks["AC"]["model_attributes"])
+
+    def test_non_mapping_surface_is_ignored(self):
+        self.assertEqual(diagnostics._model_attributes(object()), {})
+        self.assertEqual(
+            diagnostics._model_attributes(
+                FakeAppliance(commands={}, model_attributes=["zones"])
+            ),
+            {},
+        )
+
+    def test_redaction_still_applies_to_the_block(self):
+        # model_attributes goes through _redact like every other section: a
+        # catalogue row named after an identity key must not pass in cleartext.
+        app = FakeAppliance(
+            commands={}, model_attributes={"macAddress": "AA:BB:CC:DD:EE:FF", "zones": "fridge"}
+        )
+        block = diagnostics._appliance_block(
+            "id1", {"appliance": app, "type": "AC", "attributes": {}, "statistics": {}}
+        )
+        self.assertEqual(block["model_attributes"]["macAddress"], "***")
+        self.assertEqual(block["model_attributes"]["zones"], "fridge")
 
 
 class DiagnosticsCoverageTest(unittest.TestCase):
@@ -744,6 +869,48 @@ class LastErrorDiagnosticsTest(unittest.TestCase):
         self.assertEqual("load_appliances", le["phase"])
         self.assertFalse(le["had_refresh_token"])
         self.assertNotIn("mfa", le)  # not an MFA-band code
+
+    def test_last_error_includes_a_leak_free_phase_ledger(self) -> None:
+        # #76: without per-phase durations a report cannot say WHICH phase burned the
+        # time, so no timeout hypothesis is falsifiable on the user's machine.
+        from custom_components.addhon import error_codes as ec
+
+        class _Client:
+            last_error_code = ec.REFRESH_TIMEOUT
+            last_error_phase = "load_appliances/auth/refresh"
+            last_mfa_summary = None
+            last_phase_ledger = [
+                {"phase": "load_appliances/auth/refresh", "seconds": 50.0, "outcome": "timeout"},
+                {"phase": "load_appliances", "seconds": 50.1, "outcome": "error"},
+            ]
+            _refresh_token = "rt"
+
+        hass = FakeHass(_build_coordinator())
+        hass.data[DOMAIN]["e1"]["client"] = _Client()
+        result = _run(diagnostics.async_get_config_entry_diagnostics(hass, FakeEntry()))
+        le = result["last_error"]
+        self.assertEqual("ADDHON-406", le["code"])
+        self.assertEqual(2, len(le["phase_ledger"]))
+        blob = json.dumps(le["phase_ledger"])
+        self.assertNotIn("@", blob)
+        self.assertNotIn("http", blob)
+        for entry in le["phase_ledger"]:
+            self.assertIn(entry["outcome"], ("ok", "error", "timeout"))
+
+    def test_last_error_omits_the_ledger_when_absent(self) -> None:
+        from custom_components.addhon import error_codes as ec
+
+        class _Client:
+            last_error_code = ec.NETWORK_TIMEOUT
+            last_error_phase = "load_appliances"
+            last_mfa_summary = None
+            last_phase_ledger = None
+            _refresh_token = ""
+
+        hass = FakeHass(_build_coordinator())
+        hass.data[DOMAIN]["e1"]["client"] = _Client()
+        result = _run(diagnostics.async_get_config_entry_diagnostics(hass, FakeEntry()))
+        self.assertNotIn("phase_ledger", result["last_error"])
 
     def test_last_error_includes_mfa_summary_for_mfa_code(self) -> None:
         from custom_components.addhon import error_codes as ec

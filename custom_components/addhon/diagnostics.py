@@ -9,6 +9,14 @@ diagnostics" button for the config entry AND for each device (the latter is wire
 by async_get_device_diagnostics below); no custom button is needed.
 
 Per appliance the dump carries, beyond the bare key list it used to emit:
+  * `model_attributes` - the cloud CATALOGUE metadata for the model
+                    (`applianceModel.attributes`): `zones`, `seriesVersion`,
+                    `doorNumber`, `vtRoom1`/`vtRoom2`, ... It answers what the
+                    appliance IS, which the shadow cannot: the hOn app decides
+                    which fridge zones exist from `zones`.split("|"), not from
+                    which `tempZ*` keys the shadow carries. Without it, a
+                    zone-indexing report (issue #75) needs a round trip to the
+                    reporter before it can even be diagnosed.
   * `attributes`  - the attribute VALUES (telemetry/state), recursively redacted;
   * `commands`    - the writable schema per command param: value + enum + min/max/
                     step + typology, so a maintainer sees the real ranges/options;
@@ -176,6 +184,13 @@ _COVERAGE_META_PARAMS = frozenset(
 # future-capability bounds it announces itself rather than truncating silently.
 _ENTITY_MAX_PER_DOMAIN = 80
 
+# Bound on materialising a RANGE's grid into the dump (see `_param_schema`). Only a
+# grid this small is enumerated, so the never-enumerate-a-setpoint rule stands. 8
+# covers every few-position control observed so far -- a 0/1 lock or tone, a 0..2
+# panel light, a 0..4 aroma -- and eight short numeric strings are noise next to the
+# blocks around them.
+_RANGE_MAX_MATERIALISED = 8
+
 _FUTURE_MAX_ENTRIES = 40
 _FUTURE_MAX_VALUES = 20
 # A separate CHARACTER bound. An unhandled state value is one scalar, so it needs a
@@ -258,8 +273,9 @@ def _param_value(param):
 
 
 def _param_schema(param) -> dict:
-    """Schema of one command parameter: value + metadata, plus range (min/max/step)
-    for a range param OR enum as a fallback only when the param is not a range."""
+    """Schema of one command parameter: value + metadata, plus range (min/max/step,
+    and the materialised grid when it is small enough) for a range param OR enum as
+    a fallback only when the param is not a range."""
     schema: dict = {
         "value": _param_value(param),
         "typology": getattr(param, "typology", None),
@@ -274,12 +290,46 @@ def _param_schema(param) -> dict:
     # meaningful for enum/fixed params, where param_range() returns None.
     rng = param_range(param)
     if rng is not None:
+        low, high, step = rng
         schema["min"], schema["max"], schema["step"] = rng
+        # ...and, for a SMALL grid only, the values it actually materialises.
+        #
+        # min/max/step cannot answer the question a missing 0/1 control raises.
+        # param_range() casts through float(), so a schema spelling its bounds
+        # "0"/"1" and one spelling them "0.0"/"1.0" print IDENTICALLY here, while
+        # `.values` yields ['0', '1'] for the first and ['0.0', '1.0'] for the
+        # second -- and the capability gates compare exactly those STRINGS
+        # (air_purifier.supports_lock is `lock_values == {"0", "1"}`). A single
+        # decimal-spelled minimumValue or incrementValue therefore removes a
+        # control, and until now the deciding input appeared nowhere in the dump.
+        #
+        # The bound is what keeps the rule above intact: a real setpoint range is
+        # still never enumerated. The point count is computed ARITHMETICALLY, and
+        # param_range() has already guaranteed step > 0 and max >= min, so a
+        # 0..1400 step 100 grid is refused without `.values` ever being read.
+        # Emitted under its own key, never `enum`: this is the grid a range
+        # materialises, not an enumeration the device declares.
+        if (high - low) / step + 1 <= _RANGE_MAX_MATERIALISED:
+            schema["values"] = param_values(param)
     else:
         enum = param_values(param)
         if enum:
             schema["enum"] = enum
     return schema
+
+
+def _model_attributes(appliance) -> dict:
+    """Cloud catalogue metadata for the MODEL, flattened to parName -> parValue.
+
+    Read straight off the appliance (`applianceModel.attributes`, already
+    normalised by the engine), not off the coordinator entry: it is per-model
+    and immutable for the session, so it never belongs in the polled snapshot.
+    Returns {} for any appliance implementation that does not expose it.
+    """
+    raw = getattr(appliance, "model_attributes", None)
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(name): value for name, value in raw.items()}
 
 
 def _command_schema(appliance) -> dict:
@@ -543,16 +593,18 @@ def _appliance_block(
     statistics = statistics if isinstance(statistics, Mapping) else {}
 
     commands = _command_schema(appliance)
+    model_attributes = _model_attributes(appliance)
     coverage = _coverage(app_type, attributes, statistics, appliance)
     future = _future_capabilities(app_type, attributes, appliance)
 
     _LOGGER.debug(
-        "Diagnostics debug: appliance id=%s name=%s type=%s attrs=%d commands=%d "
-        "unmapped_attrs=%d unmapped_params=%d",
+        "Diagnostics debug: appliance id=%s name=%s type=%s attrs=%d model_attrs=%d "
+        "commands=%d unmapped_attrs=%d unmapped_params=%d",
         redact_id(appliance_id),
         data.get("name"),
         app_type,
         len(attributes),
+        len(model_attributes),
         len(commands),
         len(coverage["attributes_unmapped"]),
         len(coverage["command_params_unmapped"]),
@@ -565,6 +617,8 @@ def _appliance_block(
         "model": data.get("model"),
         "serial": _REDACTED,
         "mac": _REDACTED,
+        # Before `attributes` on purpose: what the model IS, then what it is doing.
+        "model_attributes": model_attributes,
         "attributes": dict(attributes),
         "commands": commands,
         "coverage": coverage,
@@ -823,6 +877,13 @@ def _last_error(hass: HomeAssistant, entry: ConfigEntry) -> dict | None:
         "phase": getattr(client, "last_error_phase", None),
         "had_refresh_token": bool(getattr(client, "_refresh_token", "")),
     }
+    # Per-phase duration+outcome of the failed attempt (issue #76): without it a report
+    # cannot say WHICH phase burned the time, so no hypothesis about a timeout is
+    # falsifiable. Same leak-proof shape as the block above: phase names from a closed
+    # vocabulary, rounded seconds, and an outcome in {ok, error, timeout}.
+    ledger = getattr(client, "last_phase_ledger", None)
+    if ledger:
+        out["phase_ledger"] = ledger
     # 2FA summary only when the failure is in the MFA band (160-169) -- challenge_kind is
     # the enum "email"/None and can_resend is a bool; the MfaContext secrets are NEVER here.
     mfa = getattr(client, "last_mfa_summary", None)
