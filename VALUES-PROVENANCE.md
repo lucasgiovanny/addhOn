@@ -16,6 +16,17 @@ legacy library's).
 
 - **OBSERVED** — Haier-mandated. Any correct client hitting the hOn cloud must send
   this exact value/shape. Identity with another client is interop, not copying.
+
+  **None of these is a secret.** They are PUBLIC CLIENT values: every hOn installation
+  ships them, they are extractable from the app by anyone, and they identify the client
+  software rather than a user or an account. `CLIENT_ID` (a Salesforce connected-app id),
+  `CONFIG_API_KEY`, `AWS_ENDPOINT` and `AWS_AUTHORIZER` are all of this kind. That is why
+  they live in source control instead of in the config entry: a per-user value would be
+  wrong here, since the server expects the client's value, not the user's. User
+  credentials and session tokens are a different matter entirely and appear nowhere in
+  this file — they are supplied at runtime and never persisted in the repository.
+  Treating a public client key as a confidential credential would not add security; it
+  would only make the integration impossible to install.
 - **CLIENT-CHOSEN** — addhOn's own identity / a format the server does not pin.
 - **UNRESOLVED** — still needs an independent capture (hOn APK / mitmproxy) to be
   legitimately sourced. Kept working, but flagged so the debt stays visible.
@@ -38,6 +49,8 @@ inherited literal from hiding as OBSERVED to dodge the anti-copy check.
 | `OAUTH_RESPONSE_TYPE` | `token+id_token` | sec5 | OBSERVED | no | ✅ sourced |
 | `OAUTH_SCOPE` | `api openid refresh_token web` | sec5 | OBSERVED | no | ✅ sourced |
 | `API_URL` | `https://api-iot.he.services` | sec2 | OBSERVED | no | ✅ sourced |
+| `CONFIG_MICROSERVICE` | `config` | sec2 | OBSERVED | no | ✅ sourced |
+| `CONFIG_API_KEY` | `GRCqFhC6Gk@…,MxY-configuration` | sec2 | OBSERVED | no | ✅ sourced |
 | `AWS_ENDPOINT` | `a30f6tqw0oh1x0-ats.iot.eu-west-1.amazonaws.com` | sec10 | OBSERVED | no | ✅ sourced |
 | `AWS_AUTHORIZER` | `candy-iot-authorizer` | sec10 | OBSERVED | no | ✅ sourced |
 | `CONTENT_TYPE` | `application/json` | sec4 | OBSERVED | no | ✅ sourced |

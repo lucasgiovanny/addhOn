@@ -15,6 +15,7 @@ exactly as real HA supports. A plain `Exception` subclass would raise TypeError 
 those keyword arguments, so the stub below mirrors HA's signature and exposes the
 attributes for assertions.
 """
+import dataclasses
 import sys
 import types
 
@@ -93,8 +94,15 @@ def _install_shared_entity_stubs() -> None:
         def available(self) -> bool:
             return getattr(self.coordinator, "last_update_success", True)
 
+        @property
+        def unique_id(self):
+            return getattr(self, "_attr_unique_id", None)
+
         def async_write_ha_state(self) -> None:
             self.state_writes = getattr(self, "state_writes", 0) + 1
+
+        def _handle_coordinator_update(self) -> None:
+            self.async_write_ha_state()
 
     uc.CoordinatorEntity = getattr(uc, "CoordinatorEntity", CoordinatorEntity)
     uc.DataUpdateCoordinator = getattr(
@@ -131,6 +139,253 @@ def _install_shared_entity_stubs() -> None:
     )
 
 
+def _install_entity_platform_stubs() -> None:
+    """Shared entity-platform stubs: `binary_sensor`, `fan`, `light`, `number`,
+    `select`, `sensor` and `switch`.
+
+    Installed here rather than per test module: each of these is imported by
+    several test modules, and a partial per-file stub winning the first-wins
+    `getattr` race is exactly the order-dependence this conftest exists to
+    remove. `AddEntitiesCallback` lands here for the same reason.
+
+    A test asserts this list against what the function actually stubs, because the
+    name and the docstring were both stale once: it said fan while stubbing seven
+    platforms, having grown one per campaign task."""
+    components = _ensure_module("homeassistant.components")
+    sys.modules["homeassistant"].components = components
+
+    fan = _ensure_module("homeassistant.components.fan")
+    components.fan = fan
+
+    class FanEntity:
+        """Mirror of HA's FanEntity surface the AP fan overrides.
+
+        The `_attr_*`-reading properties are what real HA's Entity/FanEntity
+        provide; without them a test would read the private attribute and pass
+        even if the entity never exposed the value to Home Assistant."""
+
+        _attr_preset_mode = None
+        _attr_preset_modes = None
+        _attr_supported_features = 0
+        _attr_is_on = None
+
+        @property
+        def preset_mode(self):
+            return self._attr_preset_mode
+
+        @property
+        def preset_modes(self):
+            return self._attr_preset_modes
+
+        @property
+        def supported_features(self):
+            return self._attr_supported_features
+
+        @property
+        def is_on(self):
+            return self._attr_is_on
+
+    class FanEntityFeature:
+        # Real Home Assistant values, so a stub-vs-real mismatch cannot hide a
+        # wrong feature declaration.
+        SET_SPEED = 1
+        OSCILLATE = 2
+        DIRECTION = 4
+        PRESET_MODE = 8
+        TURN_OFF = 16
+        TURN_ON = 32
+
+    fan.FanEntity = getattr(fan, "FanEntity", FanEntity)
+    fan.FanEntityFeature = getattr(fan, "FanEntityFeature", FanEntityFeature)
+
+    light = _ensure_module("homeassistant.components.light")
+    components.light = light
+
+    class LightEntity:
+        """Mirror of HA's LightEntity surface the AP panel light overrides."""
+
+        _attr_brightness = None
+        _attr_color_mode = None
+        _attr_supported_color_modes = None
+        _attr_is_on = None
+
+        @property
+        def brightness(self):
+            return self._attr_brightness
+
+        @property
+        def color_mode(self):
+            return self._attr_color_mode
+
+        @property
+        def supported_color_modes(self):
+            return self._attr_supported_color_modes
+
+        @property
+        def is_on(self):
+            return self._attr_is_on
+
+    class ColorMode:
+        UNKNOWN = "unknown"
+        ONOFF = "onoff"
+        BRIGHTNESS = "brightness"
+
+    light.LightEntity = getattr(light, "LightEntity", LightEntity)
+    light.ColorMode = getattr(light, "ColorMode", ColorMode)
+    light.ATTR_BRIGHTNESS = getattr(light, "ATTR_BRIGHTNESS", "brightness")
+
+    # Bare platform bases: the addhon entities define every property themselves,
+    # so nothing beyond the class is needed to subclass them.
+    switch = _ensure_module("homeassistant.components.switch")
+    components.switch = switch
+    switch.SwitchEntity = getattr(switch, "SwitchEntity", type("SwitchEntity", (), {}))
+
+    select = _ensure_module("homeassistant.components.select")
+    components.select = select
+
+    class SelectEntity:
+        """Mirror of HA's SelectEntity: `options` is exposed over `_attr_options`."""
+
+        _attr_options = None
+        _attr_current_option = None
+
+        @property
+        def options(self):
+            return self._attr_options
+
+        @property
+        def current_option(self):
+            return self._attr_current_option
+
+    select.SelectEntity = getattr(select, "SelectEntity", SelectEntity)
+
+    # The two description dataclasses only (NOT the DeviceClass/StateClass enums,
+    # whose member sets legitimately differ per test module). Six modules declare an
+    # identical copy of each; installing them here means a description field added
+    # later -- `entity_category` was the first -- cannot depend on which module wins
+    # the first-wins race.
+    sensor = _ensure_module("homeassistant.components.sensor")
+    components.sensor = sensor
+
+    @dataclasses.dataclass(frozen=True, kw_only=True)
+    class SensorEntityDescription:
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        icon: str | None = None
+        native_unit_of_measurement: str | None = None
+        device_class: object | None = None
+        state_class: object | None = None
+        options: object | None = None
+        entity_category: object | None = None
+
+    sensor.SensorEntityDescription = getattr(
+        sensor, "SensorEntityDescription", SensorEntityDescription
+    )
+
+    # The device/state class enums, with REAL Home Assistant values. Every test
+    # module used to declare its own subset, so which MEMBERS existed depended on
+    # collection order: a module whose stub lacked SAFETY made an unrelated
+    # "never a safety device" assertion fail with AttributeError. Values differed
+    # too (`co2` vs the real `carbon_dioxide`), which would let a wrong device class
+    # pass unnoticed.
+    class SensorDeviceClass:
+        AQI = "aqi"
+        BATTERY = "battery"
+        CO = "carbon_monoxide"
+        CO2 = "carbon_dioxide"
+        DURATION = "duration"
+        ENERGY = "energy"
+        ENUM = "enum"
+        HUMIDITY = "humidity"
+        PM10 = "pm10"
+        PM25 = "pm25"
+        POWER = "power"
+        TEMPERATURE = "temperature"
+        TIMESTAMP = "timestamp"
+        VOLATILE_ORGANIC_COMPOUNDS_PARTS = "volatile_organic_compounds_parts"
+        WATER = "water"
+        WEIGHT = "weight"
+
+    class SensorStateClass:
+        MEASUREMENT = "measurement"
+        TOTAL = "total"
+        TOTAL_INCREASING = "total_increasing"
+
+    sensor.SensorDeviceClass = getattr(sensor, "SensorDeviceClass", SensorDeviceClass)
+    sensor.SensorStateClass = getattr(sensor, "SensorStateClass", SensorStateClass)
+
+    binary_sensor = _ensure_module("homeassistant.components.binary_sensor")
+    components.binary_sensor = binary_sensor
+
+    @dataclasses.dataclass(frozen=True, kw_only=True)
+    class BinarySensorEntityDescription:
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: object | None = None
+        entity_category: object | None = None
+
+    class BinarySensorDeviceClass:
+        CONNECTIVITY = "connectivity"
+        DOOR = "door"
+        HEAT = "heat"
+        LIGHT = "light"
+        LOCK = "lock"
+        OCCUPANCY = "occupancy"
+        POWER = "power"
+        PROBLEM = "problem"
+        RUNNING = "running"
+        SAFETY = "safety"
+
+    binary_sensor.BinarySensorEntityDescription = getattr(
+        binary_sensor, "BinarySensorEntityDescription", BinarySensorEntityDescription
+    )
+    binary_sensor.BinarySensorDeviceClass = getattr(
+        binary_sensor, "BinarySensorDeviceClass", BinarySensorDeviceClass
+    )
+
+    number = _ensure_module("homeassistant.components.number")
+    components.number = number
+
+    @dataclasses.dataclass(frozen=True, kw_only=True)
+    class NumberEntityDescription:
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: object | None = None
+        entity_category: object | None = None
+        native_unit_of_measurement: str | None = None
+        native_min_value: float | None = None
+        native_max_value: float | None = None
+        native_step: float | None = None
+        mode: object | None = None
+
+    class NumberDeviceClass:
+        TEMPERATURE = "temperature"
+        DURATION = "duration"
+
+    class NumberMode:
+        AUTO = "auto"
+        BOX = "box"
+        SLIDER = "slider"
+
+    number.NumberEntityDescription = getattr(
+        number, "NumberEntityDescription", NumberEntityDescription
+    )
+    number.NumberEntity = getattr(number, "NumberEntity", type("NumberEntity", (), {}))
+    number.NumberDeviceClass = getattr(number, "NumberDeviceClass", NumberDeviceClass)
+    number.NumberMode = getattr(number, "NumberMode", NumberMode)
+
+    entity_platform = _ensure_module("homeassistant.helpers.entity_platform")
+    sys.modules["homeassistant.helpers"].entity_platform = entity_platform
+    entity_platform.AddEntitiesCallback = getattr(
+        entity_platform, "AddEntitiesCallback", object
+    )
+
+
 def _ensure_yarl() -> None:
     """The CI test env installs only pytest (no yarl). config_flow now imports the
     transport auth (which does `from yarl import URL`), so importing config_flow -- and
@@ -155,4 +410,5 @@ def _ensure_yarl() -> None:
 
 _install_homeassistant_error()
 _install_shared_entity_stubs()
+_install_entity_platform_stubs()
 _ensure_yarl()

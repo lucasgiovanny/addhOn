@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 import voluptuous as vol
@@ -15,8 +16,21 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 
 from .client.transport.auth import MFAChallengeRequired, MFACodeInvalid
-from .const import CONF_ENABLE_DEBUG, CONF_ENABLE_MQTT_DEBUG, DOMAIN
-from .error_codes import MFA_CODE_INVALID, UNKNOWN, HonErrorCode, classify
+from .const import (
+    CONF_AUTH_DIAGNOSTICS,
+    CONF_ENABLE_DEBUG,
+    CONF_ENABLE_EXPERIMENTAL,
+    CONF_ENABLE_MQTT_DEBUG,
+    DOMAIN,
+)
+from .error_codes import (
+    MFA_CODE_INVALID,
+    MFA_TOKEN_AFTER_VERIFY_FAILED,
+    UNKNOWN,
+    HonErrorCode,
+    classify,
+    error_detail,
+)
 from .hon_client import HonClient, _requires_reauth
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,6 +52,16 @@ def _error_base_and_code(exc: BaseException, fallback_base: str) -> tuple[str, s
     return fallback_base, ""
 
 
+def _discard_diagnostics(client: Any) -> None:
+    """Drop a client's buffered auth trace before closing it.
+
+    Duck-typed: the config-flow tests pass doubles, and a client without the opt-in
+    diagnostics simply has nothing to discard."""
+    discard = getattr(client, "discard_auth_diagnostics", None)
+    if callable(discard):
+        discard()
+
+
 def _redact_email(email: str | None) -> str | None:
     if not email:
         return None
@@ -46,21 +70,50 @@ def _redact_email(email: str | None) -> str | None:
     _, domain = email.split("@", 1)
     return f"***@{domain}"
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required("email"): str,
-        vol.Required("password"): str,
-    }
-)
+
+def _step_user_data_schema(auth_diagnostics: bool = False) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required("email"): str,
+            vol.Required("password"): str,
+            vol.Optional(
+                CONF_AUTH_DIAGNOSTICS, default=auth_diagnostics
+            ): bool,
+        }
+    )
 
 
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
+def _step_reauth_data_schema(auth_diagnostics: bool = False) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required("password"): str,
+            vol.Optional(
+                CONF_AUTH_DIAGNOSTICS, default=auth_diagnostics
+            ): bool,
+        }
+    )
+
+
+STEP_USER_DATA_SCHEMA = _step_user_data_schema()
+
+
+async def validate_input(
+    hass: HomeAssistant,
+    data: dict[str, Any],
+    *,
+    auth_diagnostics: bool = False,
+) -> dict[str, Any]:
     """Validate the hOn credentials."""
     _LOGGER.debug("ConfigFlow debug: starting validation for account %s", _redact_email(data.get("email")))
     # validation=True: authenticate + count appliances only, NO MQTT and no
     # per-appliance loads, so a slow/blocked realtime or a single dead endpoint can
     # no longer make the whole validation hit the 60s loop cap (issue #30).
-    client = HonClient(email=data["email"], password=data["password"], validation=True)
+    client = HonClient(
+        email=data["email"],
+        password=data["password"],
+        validation=True,
+        auth_diagnostics=auth_diagnostics,
+    )
     mfa_pending = False
 
     try:
@@ -80,11 +133,20 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
             raise
         except ImportError as err:
             code = classify(err)
-            _LOGGER.error("Validation failed [%s]: required dependency not installed: %s", code.label, err)
+            client.emit_auth_diagnostics(code, "setup", "unexpected")
+            _LOGGER.error(
+                "Validation failed [%s]: required dependency not installed: %s",
+                code.label, error_detail(err),
+            )
             raise CannotConnect(code) from err
         except Exception as err:
             code = classify(err)
-            _LOGGER.error("Validation failed [%s]: %s", code.label, err)
+            client.emit_auth_diagnostics(code, "setup", "unexpected")
+            # error_detail() strips a leading "ADDHON-NNN: ": a HonCodedError already
+            # renders as "ADDHON-400: reason", so printing the label too produced
+            # "Validation failed [ADDHON-400]: ADDHON-400: ..." -- the doubled line
+            # reported in #76, which also crowds out the detail that would help.
+            _LOGGER.error("Validation failed [%s]: %s", code.label, error_detail(err))
             if _requires_reauth(err):
                 raise InvalidAuth(code) from err
             raise CannotConnect(code) from err
@@ -106,7 +168,13 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
             )
         except Exception as err:
             code = classify(err)
-            _LOGGER.error("Validation failed [%s] fetching appliances: %s", code.label, err)
+            client.emit_auth_diagnostics(
+                code, "appliance_list", "appliance_list_failed"
+            )
+            _LOGGER.error(
+                "Validation failed [%s] fetching appliances: %s",
+                code.label, error_detail(err),
+            )
             if _requires_reauth(err):
                 raise InvalidAuth(code) from err
             raise CannotConnect(code) from err
@@ -114,6 +182,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         # nulls the session, after which the property returns ""). Persisting it lets a
         # non-2FA account skip the full login on the next restart too.
         refresh_token = client.refresh_token
+        client.discard_auth_diagnostics()
     finally:
         # On a 2FA challenge the client must stay open for the 2FA step (the flow
         # handler closes it); otherwise close it here as before.
@@ -160,24 +229,36 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle the first user step."""
         errors: dict[str, str] = {}
         error_code = ""
+        auth_diagnostics = False
 
         if user_input is not None:
+            auth_diagnostics = bool(
+                user_input.get(CONF_AUTH_DIAGNOSTICS, False)
+            )
+            credentials = {
+                "email": user_input["email"],
+                "password": user_input["password"],
+            }
             _LOGGER.debug(
                 "ConfigFlow debug: submit user step for account %s",
-                _redact_email(user_input.get("email")),
+                _redact_email(credentials.get("email")),
             )
             # Set the unique_id and abort BEFORE the network validation, so re-adding
             # an already-configured account is rejected without a costly hOn login +
             # appliance fetch (rate-limited). Must be OUTSIDE the try below: the
             # AbortFlow raised by _abort_if_unique_id_configured() would otherwise be
             # swallowed by the broad `except Exception`. (#18)
-            await self.async_set_unique_id(user_input["email"].lower())
+            await self.async_set_unique_id(credentials["email"].lower())
             self._abort_if_unique_id_configured()
             try:
-                info = await validate_input(self.hass, user_input)
+                info = await validate_input(
+                    self.hass,
+                    credentials,
+                    auth_diagnostics=auth_diagnostics,
+                )
             except MFAChallengeRequired as err:
                 # 2FA required: hold the live client and move to the OTP step.
-                await self._mfa_begin(err, dict(user_input), reauth_entry=None)
+                await self._mfa_begin(err, credentials, reauth_entry=None)
                 return await self.async_step_2fa()
             except CannotConnect as err:
                 errors["base"], error_code = _error_base_and_code(err, "cannot_connect")
@@ -192,17 +273,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 _LOGGER.debug(
                     "ConfigFlow debug: creating entry for account %s appliance_count=%s",
-                    _redact_email(user_input.get("email")),
+                    _redact_email(credentials.get("email")),
                     info.get("appliance_count"),
                 )
                 return self.async_create_entry(
                     title=info["title"],
-                    data={**user_input, "refresh_token": info.get("refresh_token", "")},
+                    data={
+                        **credentials,
+                        "refresh_token": info.get("refresh_token", ""),
+                    },
                 )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            data_schema=_step_user_data_schema(auth_diagnostics),
             errors=errors,
             description_placeholders={
                 "docs_url": "https://github.com/tis24dev/addhOn",
@@ -226,6 +310,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Ask for the password again (the email stays the entry's one)."""
         errors: dict[str, str] = {}
         error_code = ""
+        auth_diagnostics = False
         reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
         )
@@ -238,9 +323,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         email = reauth_entry.data["email"]
 
         if user_input is not None:
+            auth_diagnostics = bool(
+                user_input.get(CONF_AUTH_DIAGNOSTICS, False)
+            )
             data = {"email": email, "password": user_input["password"]}
             try:
-                info = await validate_input(self.hass, data)
+                info = await validate_input(
+                    self.hass,
+                    data,
+                    auth_diagnostics=auth_diagnostics,
+                )
             except MFAChallengeRequired as err:
                 # 2FA required during reauth: hold the client and move to the OTP step,
                 # which finishes by UPDATING this entry (not creating a new one).
@@ -274,7 +366,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema({vol.Required("password"): str}),
+            data_schema=_step_reauth_data_schema(auth_diagnostics),
             errors=errors,
             description_placeholders={"email": email, "error_code": error_code},
         )
@@ -295,27 +387,120 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._mfa_data = data
         self._mfa_reauth_entry = reauth_entry
 
-    async def _async_close_mfa_client(self) -> None:
-        """Tear down the held 2FA client. Idempotent (clears the ref first), so it is
-        safe to call from both the success path and the flow-removal hook."""
+    def _detach_mfa_client(self) -> Any:
+        """Take the held 2FA client off the flow and return it, or None.
+
+        Runs on the caller's thread and clears the state FIRST, so a teardown handed to
+        another thread can never be scheduled twice for the same client. The cached form
+        data goes with it: ``_mfa_data`` holds the plaintext password and
+        ``_mfa_reauth_entry`` the reauth target, so stale credentials are not left
+        reachable on the flow object after success, abort, or removal."""
         client = self._mfa_client
         self._mfa_client = None
         self._mfa_context = None
-        # Drop the cached form data too: _mfa_data holds the plaintext password and
-        # _mfa_reauth_entry the reauth target, so stale credentials/state are not left
-        # reachable on the flow object after success, abort, or async_remove.
         self._mfa_data = None
         self._mfa_reauth_entry = None
-        if client is not None:
-            try:
-                await client.async_close()
-            except Exception as err:  # noqa: BLE001 - cleanup must not mask the flow
-                _LOGGER.warning("Error closing HonClient after 2FA: %s", err)
+        return client
 
-    async def async_remove(self) -> None:
+    async def _async_close_client(self, client: Any) -> None:
+        """Close a detached client on the event loop (``async_close`` does the blocking
+        part on the executor, so this never stalls the loop)."""
+        try:
+            _discard_diagnostics(client)
+            await client.async_close()
+        except Exception as err:  # noqa: BLE001 - cleanup must not mask the flow
+            _LOGGER.warning("Error closing HonClient after 2FA: %s", err)
+
+    @staticmethod
+    def _close_client_sync(client: Any) -> None:
+        """Blocking twin of :meth:`_async_close_client`. Waits on the client's dedicated
+        loop and joins its thread, so it belongs on an executor or a thread of its own,
+        never on the event-loop thread."""
+        try:
+            _discard_diagnostics(client)
+            client.close_sync()
+        except Exception as err:  # noqa: BLE001 - cleanup must not mask the removal
+            _LOGGER.warning("Error closing HonClient after 2FA: %s", err)
+
+    async def _async_close_mfa_client(self) -> None:
+        """Tear down the held 2FA client. Idempotent (detaches first), so it is safe to
+        call from both the success path and the flow-removal hook."""
+        client = self._detach_mfa_client()
+        if client is not None:
+            await self._async_close_client(client)
+
+    def async_remove(self) -> None:
         """Called by HA when the flow is removed/aborted/abandoned: close the held 2FA
-        client so an unfinished verification does not leak its loop/thread/session."""
-        await self._async_close_mfa_client()
+        client so an unfinished verification does not leak its loop/thread/session.
+
+        SYNC on purpose. ``data_entry_flow`` calls ``flow.async_remove()`` WITHOUT
+        awaiting it, so the previous coroutine version was never executed: Home
+        Assistant only logged "coroutine 'ConfigFlow.async_remove' was never awaited"
+        and the client kept its loop, thread and aiohttp session alive.
+
+        The teardown itself BLOCKS (it waits on the client's dedicated loop and joins its
+        thread), so it must never run on the event-loop thread. The strategies below are
+        tried in order and the first one that accepts the work wins; the last one brings
+        its own thread, so an HA that refuses both of its schedulers can neither be
+        stalled by the teardown nor leak the client."""
+        client = self._detach_mfa_client()
+        if client is None:
+            return
+        for schedule in (
+            self._teardown_on_event_loop,
+            self._teardown_in_executor,
+            self._teardown_in_own_thread,
+        ):
+            if schedule(client):
+                return
+        _LOGGER.warning(
+            "Could not schedule the 2FA client teardown; giving up on this client"
+        )
+
+    def _teardown_on_event_loop(self, client: Any) -> bool:
+        """Preferred: the async teardown as a task on Home Assistant's loop."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return False
+        coro = self._async_close_client(client)
+        try:
+            hass.async_create_task(coro)
+        except Exception as err:  # noqa: BLE001 - the next strategy takes over
+            # Closing the coroutine matters: an un-awaited one would reproduce the very
+            # warning this method exists to remove.
+            coro.close()
+            _LOGGER.debug("2FA teardown: async_create_task refused it (%s)", err)
+            return False
+        return True
+
+    def _teardown_in_executor(self, client: Any) -> bool:
+        """Fallback: the blocking teardown on Home Assistant's executor."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return False
+        try:
+            hass.async_add_executor_job(self._close_client_sync, client)
+        except Exception as err:  # noqa: BLE001 - the next strategy takes over
+            _LOGGER.debug("2FA teardown: the executor refused it (%s)", err)
+            return False
+        return True
+
+    def _teardown_in_own_thread(self, client: Any) -> bool:
+        """Last resort: our own thread, so no Home Assistant scheduler is needed at all.
+
+        Daemon on purpose: if Home Assistant is going down, a teardown must not hold the
+        process up (the client's own loop thread is a daemon for the same reason)."""
+        try:
+            threading.Thread(
+                target=self._close_client_sync,
+                args=(client,),
+                name="addhon_2fa_teardown",
+                daemon=True,
+            ).start()
+        except Exception as err:  # noqa: BLE001 - nothing left to try
+            _LOGGER.debug("2FA teardown: could not start a thread for it (%s)", err)
+            return False
+        return True
 
     async def async_step_2fa(
         self, user_input: dict[str, Any] | None = None
@@ -359,6 +544,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"], error_code = _error_base_and_code(err, "invalid_auth")
                     _LOGGER.debug("ConfigFlow debug: 2FA code rejected [%s]", error_code)
                 except Exception as err:  # noqa: BLE001
+                    code = classify(err)
+                    if code == MFA_TOKEN_AFTER_VERIFY_FAILED:
+                        emit = getattr(
+                            self._mfa_client,
+                            "emit_auth_diagnostics",
+                            None,
+                        )
+                        if callable(emit):
+                            emit(
+                                code,
+                                "resume_token",
+                                "mfa_token_failed",
+                            )
                     errors["base"], error_code = self._mfa_error(err)
                     _LOGGER.debug("ConfigFlow debug: 2FA submit failed [%s]", error_code)
                 else:
@@ -403,31 +601,40 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Integration options: two independent debug toggles.
+    """Integration options: two independent debug toggles plus experimental features.
 
     HA 2024.12.0+: do NOT set self.config_entry in __init__ (deprecated and
     injected automatically). The defaults are read from self.config_entry.options
-    (False on installations that never saved options). The values are applied on
-    the fly by _apply_debug_options via the options update listener: NB the loggers
-    are global to the process, so with more than one account the last one that
-    changes wins (typical case = single account).
+    (False on installations that never saved options). The debug values are applied
+    on the fly by _apply_debug_options via the options update listener: NB the
+    loggers are global to the process, so with more than one account the last one
+    that changes wins (typical case = single account). enable_experimental instead
+    decides which entities EXIST, so the listener reloads the entry for it.
+
+    The submitted payload REPLACES entry.options wholesale, so it is built on top of
+    the current mapping: an option key this screen does not render (added by a newer
+    build, or no longer shown) must survive a save instead of being dropped.
     """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        options = dict(self.config_entry.options)
         if user_input is not None:
             return self.async_create_entry(
                 title="",
                 data={
+                    **options,
                     CONF_ENABLE_DEBUG: bool(user_input.get(CONF_ENABLE_DEBUG, False)),
                     CONF_ENABLE_MQTT_DEBUG: bool(
                         user_input.get(CONF_ENABLE_MQTT_DEBUG, False)
                     ),
+                    CONF_ENABLE_EXPERIMENTAL: bool(
+                        user_input.get(CONF_ENABLE_EXPERIMENTAL, False)
+                    ),
                 },
             )
 
-        options = self.config_entry.options
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -439,6 +646,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ENABLE_MQTT_DEBUG,
                         default=options.get(CONF_ENABLE_MQTT_DEBUG, False),
+                    ): bool,
+                    vol.Required(
+                        CONF_ENABLE_EXPERIMENTAL,
+                        default=options.get(CONF_ENABLE_EXPERIMENTAL, False),
                     ): bool,
                 }
             ),

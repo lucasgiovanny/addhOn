@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from time import monotonic
 from typing import Any, Optional
@@ -142,6 +143,33 @@ class HonAppliance:
     @property
     def options(self) -> dict[str, Any]:
         return dict(self._appliance_model.get("options", {}))
+
+    @property
+    def model_attributes(self) -> dict[str, Any]:
+        """Per-MODEL metadata from `applianceModel.attributes` (cloud catalogue).
+
+        Distinct from `attributes`, which is the device SHADOW (live telemetry):
+        this describes what the MODEL is, not what it is currently doing:
+        `zones`, `vtRoom1`/`vtRoom2`, `seriesVersion`, `doorNumber`, ... The hOn
+        app treats these as authoritative where the shadow is not: it decides
+        which fridge zones exist from `zones`.split("|"), never from which
+        `tempZ*`/`tempSel*` keys the shadow happens to carry.
+
+        The cloud sends a LIST of `{parName, parValue, ...}` rows; flatten it to
+        parName -> parValue, the same normalisation __init__ applies to the
+        appliance-level `attributes`. Some payloads send a mapping already;
+        accept both and never raise on a malformed row.
+        """
+        raw = self._appliance_model.get("attributes")
+        if isinstance(raw, Mapping):
+            return {str(key): value for key, value in raw.items()}
+        if isinstance(raw, list):
+            return {
+                str(row["parName"]): row.get("parValue")
+                for row in raw
+                if isinstance(row, Mapping) and row.get("parName")
+            }
+        return {}
 
     @property
     def commands(self) -> dict[str, HonCommand]:
@@ -357,6 +385,17 @@ class HonAppliance:
                 self.attributes["parameters"][key].update(
                     str(new.intern_value), shield=True
                 )
+
+    def sync_payload_to_params(
+        self, params: Mapping[str, str | float]
+    ) -> None:
+        shadow = self.attributes.get("parameters", {})
+        if not isinstance(shadow, dict):
+            return
+        for key, value in params.items():
+            current = shadow.get(key)
+            if current is not None and hasattr(current, "update"):
+                current.update(str(value), shield=True)
 
     def sync_params_to_command(self, command_name: str) -> None:
         if not (command := self.commands.get(command_name)):

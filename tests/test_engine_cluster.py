@@ -18,6 +18,7 @@ import sys
 import unittest
 from copy import copy
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _golden import REPO, frozen, install_stubs, normalize  # noqa: E402
@@ -29,6 +30,10 @@ from custom_components.addhon.client import factory  # noqa: E402
 from custom_components.addhon.client.engine.commands import HonCommand as NaCommand  # noqa: E402
 from custom_components.addhon.client.engine.rules import HonRuleSet  # noqa: E402
 from custom_components.addhon.client import interfaces  # noqa: E402
+from custom_components.addhon.command_dispatch import (  # noqa: E402
+    CommandDispatcher,
+    CommandPatch,
+)
 
 NaAppliance = factory._native_engine_appliance_cls()
 
@@ -338,12 +343,360 @@ class ClusterGoldenTest(unittest.TestCase):
         self.assertEqual(normalize(snap), frozen("engine_cluster", snap))
 
 
+class LastCategoryRecoveryTest(unittest.TestCase):
+    """The command history must actually restore the last started program.
+
+    These are EXPLICIT assertions, not just a golden row, on purpose. The recovery was
+    inert for a long time and the golden happily froze the broken output: `rich_recover`
+    was byte-identical to `rich_load`, so nothing failed. A snapshot can only catch a
+    change, never a wrong baseline -- these pin the intent, so the behaviour cannot be
+    re-frozen broken.
+
+    Root cause of the original defect: `_set_last_category` swapped the category through
+    the `command.category` setter, which writes to `appliance.commands`, while
+    `HonAppliance.load_commands` adopts the loader's dict only afterwards -- overwriting
+    the swap.
+    """
+
+    def _recovered(self, history):
+        return _build(NaAppliance, DictApi(_RICH_COMMANDS, history=history))
+
+    def test_history_program_selects_that_category(self) -> None:
+        app = self._recovered(_RICH_HISTORY)
+        self.assertEqual("PROGRAMS.REF.SUPER_FREEZE", app.commands["startProgram"].category)
+        self.assertEqual(
+            "super_freeze", app.commands["startProgram"].parameters["program"].value
+        )
+
+    def test_recovery_differs_from_the_default_category(self) -> None:
+        # The regression guard: without the fix these two are identical, because the
+        # default (first) category survives the load untouched.
+        default = _build(NaAppliance, DictApi(_RICH_COMMANDS))
+        self.assertNotEqual(
+            default.commands["startProgram"].category,
+            self._recovered(_RICH_HISTORY).commands["startProgram"].category,
+        )
+
+    def test_an_unknown_program_keeps_the_default(self) -> None:
+        # A stale or renamed program in the history must not raise, nor blank the command.
+        history = [
+            {
+                "command": {
+                    "commandName": "startProgram",
+                    "parameters": {"program": "PROGRAMS.REF.GONE"},
+                }
+            }
+        ]
+        default = _build(NaAppliance, DictApi(_RICH_COMMANDS))
+        self.assertEqual(
+            default.commands["startProgram"].category,
+            self._recovered(history).commands["startProgram"].category,
+        )
+
+
 class ClusterBehaviorTest(unittest.TestCase):
     def test_send_prstr_and_programrules(self) -> None:
         snap = _native_snapshot()
         name, params, ancillary, _ = snap["send_start"][0]
         self.assertEqual(params["prStr"], "PROGRAMS.REF.SUPER_COOL")
         self.assertNotIn("programRules", ancillary)
+
+    def test_legacy_send_payloads_match_exact_goldens(self) -> None:
+        snap = _native_snapshot()
+
+        self.assertEqual(
+            [
+                (
+                    "settings",
+                    {"tempSelZ1": "5", "tempSelZ2": "-18", "tempSelZ3": "1"},
+                    {},
+                    "setParameters",
+                )
+            ],
+            snap["send_settings"],
+        )
+        self.assertEqual(
+            [
+                (
+                    "startProgram",
+                    {
+                        "prCode": "1",
+                        "prStr": "PROGRAMS.REF.SUPER_COOL",
+                        "tempSel": "5",
+                        "speed": "3",
+                    },
+                    {"remoteActionable": "1"},
+                    "PROGRAMS.REF.SUPER_COOL",
+                )
+            ],
+            snap["send_start"],
+        )
+        self.assertEqual(
+            [
+                (
+                    "startProgram",
+                    {
+                        "prCode": "1",
+                        "prStr": "PROGRAMS.REF.SUPER_COOL",
+                        "tempSel": 5,
+                    },
+                    {"remoteActionable": "1"},
+                    "PROGRAMS.REF.SUPER_COOL",
+                )
+            ],
+            snap["send_specific"],
+        )
+
+    def test_legacy_category_program_send_payload_matches_exact_golden(self) -> None:
+        api = DictApi(_RICH_COMMANDS)
+        appliance = _build(NaAppliance, api)
+        appliance.commands["startProgram"].parameters["program"].value = "super_freeze"
+
+        _run(appliance.commands["startProgram"].send())
+
+        self.assertEqual(
+            [
+                (
+                    "startProgram",
+                    {
+                        "prCode": "5",
+                        "prStr": "PROGRAMS.REF.SUPER_FREEZE",
+                        "tempSel": "5",
+                        "speed": "3",
+                    },
+                    {},
+                    "PROGRAMS.REF.SUPER_FREEZE",
+                )
+            ],
+            api.sent,
+        )
+
+    def test_prstr_normalization_does_not_mutate_caller_payload(self) -> None:
+        api = DictApi(_RICH_COMMANDS)
+        appliance = _build(NaAppliance, api)
+        command = appliance.commands["startProgram"]
+        payload = {"prCode": "1", "prStr": "caller-value"}
+
+        _run(command.send_exact(payload))
+
+        self.assertEqual({"prCode": "1", "prStr": "caller-value"}, payload)
+        self.assertEqual(
+            {"prCode": "1", "prStr": "PROGRAMS.REF.SUPER_COOL"},
+            api.sent[0][1],
+        )
+
+    def test_dispatch_reuses_canonical_start_program_payload(self) -> None:
+        from custom_components.addhon.client.engine.attributes import HonAttribute
+
+        class IdentityApi(DictApi):
+            def __init__(self) -> None:
+                super().__init__(_RICH_COMMANDS)
+                self.wire_payload = None
+
+            async def send_command(
+                self, appliance, name, params, ancillary, category
+            ):
+                self.wire_payload = params
+                return await super().send_command(
+                    appliance, name, params, ancillary, category
+                )
+
+        api = IdentityApi()
+        appliance = _build(NaAppliance, api)
+        appliance._attributes = {
+            "parameters": {
+                "tempSel": HonAttribute("old-temp"),
+                "prCode": HonAttribute("old-code"),
+                "prStr": HonAttribute("old-program"),
+            }
+        }
+        synced_payloads = []
+        original_sync = appliance.sync_payload_to_params
+
+        def capture_sync(payload) -> None:
+            synced_payloads.append(payload)
+            original_sync(payload)
+
+        appliance.sync_payload_to_params = capture_sync
+        expected_payloads = []
+        payload_events = []
+
+        def capture_expected(_appliance, _action, payload) -> None:
+            expected_payloads.append(payload)
+
+        def capture_event(event, fields) -> None:
+            if event == "command_payload":
+                payload_events.append(fields["payload"])
+
+        with (
+            patch(
+                "custom_components.addhon.command_dispatch.record_expected_update",
+                side_effect=capture_expected,
+            ),
+            patch(
+                "custom_components.addhon.command_dispatch.emit_command_event",
+                side_effect=capture_event,
+            ),
+        ):
+            result = _run(
+                CommandDispatcher().dispatch(
+                    appliance,
+                    CommandPatch(
+                        "startProgram",
+                        {"tempSel": 6},
+                        action="start_program",
+                    ),
+                )
+            )
+
+        expected = {
+            "tempSel": "6",
+            "prCode": "1",
+            "prStr": "PROGRAMS.REF.SUPER_COOL",
+        }
+        self.assertIs(result, True)
+        self.assertEqual(expected, api.wire_payload)
+        self.assertEqual(expected, synced_payloads[0])
+        self.assertEqual(expected, expected_payloads[0])
+        self.assertEqual(expected, payload_events[0])
+        self.assertIs(api.wire_payload, synced_payloads[0])
+        self.assertIs(api.wire_payload, expected_payloads[0])
+        self.assertIs(api.wire_payload, payload_events[0])
+        self.assertEqual(
+            "PROGRAMS.REF.SUPER_COOL",
+            appliance.attributes["parameters"]["prStr"].value,
+        )
+
+    def test_send_exact_does_not_broadly_sync_shadow(self) -> None:
+        from custom_components.addhon.client.engine.attributes import HonAttribute
+
+        api = FakeApi()
+        app = NaAppliance(api, dict(_INFO), zone=0)
+        command = NaCommand(
+            "settings",
+            {
+                "parameters": {
+                    "mode": _range(default="1", lo="0", hi="3", inc="1"),
+                    "light": _enum("on", ["off", "on"]),
+                }
+            },
+            app,
+        )
+        app._commands = {"settings": command}
+        app._attributes = {
+            "parameters": {
+                "mode": HonAttribute({"parNewVal": "old"}),
+                "light": HonAttribute({"parNewVal": "old-light"}),
+            }
+        }
+
+        result = _run(command.send_exact({"mode": "2"}))
+
+        self.assertIs(result, True)
+        self.assertEqual(api.sent[0][1], {"mode": "2"})
+        self.assertEqual(app.attributes["parameters"]["mode"].value, "old")
+        self.assertEqual(app.attributes["parameters"]["light"].value, "old-light")
+
+    def test_dispatch_rollback_preserves_concurrent_mqtt_update(self) -> None:
+        from custom_components.addhon.client.engine.attributes import HonAttribute
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingFailApi(FakeApi):
+            async def send_command(self, appliance, name, params, ancillary, category):
+                started.set()
+                await release.wait()
+                raise RuntimeError("cloud send failed")
+
+        api = BlockingFailApi()
+        app = NaAppliance(api, dict(_INFO), zone=0)
+        command = NaCommand(
+            "settings",
+            {
+                "parameters": {
+                    "mode": _range(default="1", lo="0", hi="3", inc="1"),
+                    "light": _enum("off", ["off", "on"]),
+                }
+            },
+            app,
+        )
+        app._commands = {"settings": command}
+        app._attributes = {
+            "parameters": {
+                "mode": HonAttribute({"parNewVal": "old"}),
+                "light": HonAttribute({"parNewVal": "off"}),
+            }
+        }
+
+        async def scenario() -> None:
+            task = asyncio.create_task(
+                CommandDispatcher().dispatch(
+                    app,
+                    CommandPatch("settings", {"mode": "2"}, action="set_mode"),
+                )
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+            # What the awscrt MQTT thread does while send_exact is suspended
+            # awaiting the cloud: write the shadow directly, then re-apply it
+            # onto whichever command is currently live via the SAME production
+            # method mqtt.py calls (sync_params_to_command). "light" is a real
+            # device-reported value, not something this transaction touched.
+            app.attributes["parameters"]["light"].update("on", shield=True)
+            app.sync_params_to_command("settings")
+
+            release.set()
+            with self.assertRaises(RuntimeError):
+                await task
+
+        _run(scenario())
+
+        # The concurrent MQTT-driven update survives the failed send's rollback,
+        # on both the shadow and the live command parameter it pushed into.
+        self.assertEqual(app.attributes["parameters"]["light"].value, "on")
+        self.assertEqual(command.parameters["light"].value, "on")
+        # Our own untouched-since prepare()-time write is still correctly undone.
+        self.assertEqual(command.parameters["mode"].value, 1)
+        self.assertEqual(app.attributes["parameters"]["mode"].value, "old")
+
+    def test_targeted_shadow_sync_updates_payload_keys_only(self) -> None:
+        from custom_components.addhon.client.engine.attributes import HonAttribute
+
+        app = NaAppliance(FakeApi(), dict(_INFO), zone=0)
+        app._attributes = {
+            "parameters": {
+                "mode": HonAttribute({"parNewVal": "old"}),
+                "light": HonAttribute({"parNewVal": "old-light"}),
+            }
+        }
+
+        app.sync_payload_to_params({"mode": "2"})
+
+        self.assertEqual(app.attributes["parameters"]["mode"].value, 2)
+        self.assertEqual(app.attributes["parameters"]["light"].value, "old-light")
+
+    def test_targeted_shadow_sync_ignores_missing_key(self) -> None:
+        from custom_components.addhon.client.engine.attributes import HonAttribute
+
+        app = NaAppliance(FakeApi(), dict(_INFO), zone=0)
+        app._attributes = {
+            "parameters": {"mode": HonAttribute({"parNewVal": "old"})}
+        }
+
+        app.sync_payload_to_params({"missing": "2"})
+
+        self.assertEqual({"mode"}, set(app.attributes["parameters"]))
+        self.assertEqual("old", app.attributes["parameters"]["mode"].value)
+
+    def test_targeted_shadow_sync_ignores_non_updateable_value(self) -> None:
+        marker = object()
+        app = NaAppliance(FakeApi(), dict(_INFO), zone=0)
+        app._attributes = {"parameters": {"mode": marker}}
+
+        app.sync_payload_to_params({"mode": "2"})
+
+        self.assertIs(marker, app.attributes["parameters"]["mode"])
 
     def test_ids_excludes_iot_and_sorted(self) -> None:
         snap = _native_snapshot()

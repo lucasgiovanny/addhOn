@@ -15,9 +15,18 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .ac_command import async_send_settings, settings_param
-from .base_entity import HonAccountEntity, HonBaseEntity
+from .base_entity import HonAccountEntity, HonBaseEntity, coordinator_data_map
+from .air_purifier import (
+    AirPurifierCapabilities,
+    ap_patch,
+    discover_capabilities,
+    raw_text,
+    reports_attribute,
+)
+from .command_dispatch import async_dispatch_patch
 from .const import (
     APPLIANCE_AC,
+    APPLIANCE_AP,
     APPLIANCE_HW,
     APPLIANCE_TD,
     APPLIANCE_WASH_GROUP,
@@ -110,6 +119,49 @@ _SETTINGS_SWITCHES: dict[str, tuple[HonSettingsSwitchDescription, ...]] = {
 
 
 @dataclass(frozen=True, kw_only=True)
+class HonAirPurifierSwitchDescription:
+    """Air purifier 0/1 toggle written as a SPARSE settings patch.
+
+    Deliberately separate from HonSettingsSwitchDescription: that one drives
+    HonSettingsSwitch, which applies the value to the whole `settings` command and
+    sends it through the legacy sender. The purifier writes only its own field
+    through the transactional dispatcher, so it needs its own description and its
+    own entity class rather than a flag on the legacy pair.
+
+    `capability` names the AirPurifierCapabilities property that gates the write
+    half; `action` names the `ap_patch` intent that performs it.
+    """
+
+    key: str            # translation_key + unique_id suffix
+    param: str          # the settings parameter, and the attribute read back
+    capability: str
+    action: str
+    icon: str | None = None
+
+
+# Confirmed 0/1 purifier toggles (AP_PARAMS_ENUM "Toggles"). `child_lock` reuses the
+# air conditioner's translation key: same parameter name, same meaning. `touch_tone`
+# is NOT folded into the AC's `mute`, whose polarity is the opposite (mute on = sound
+# off, touch tone on = sound on).
+_AIR_PURIFIER_SWITCHES: tuple[HonAirPurifierSwitchDescription, ...] = (
+    HonAirPurifierSwitchDescription(
+        key="child_lock",
+        param="lockStatus",
+        capability="supports_lock",
+        action="set_lock",
+        icon="mdi:lock",
+    ),
+    HonAirPurifierSwitchDescription(
+        key="touch_tone",
+        param="touchToneStatus",
+        capability="supports_tone",
+        action="set_tone",
+        icon="mdi:volume-high",
+    ),
+)
+
+
+@dataclass(frozen=True, kw_only=True)
 class HonProgramOptionSwitchDescription:
     """Boolean program-option switch buffered onto the startProgram command (#35).
 
@@ -160,6 +212,130 @@ def _param_snapshot(params) -> dict:
     }
 
 
+def _appliance_switches(coordinator, appliance_id: str, data: dict, client) -> list:
+    """Every switch ONE appliance contributes, or [] when it contributes none.
+
+    Extracted from the setup loop so an appliance whose schema or state trips an
+    unexpected error costs only its own switches. Inline, one raised exception
+    aborted `async_setup_entry` before `async_add_entities` ever ran, so a single
+    bad appliance silently removed EVERY switch of the entry, the account debug
+    toggles included -- a failure that reads exactly like "the integration does
+    not offer that control". Returning the list instead of appending to a shared
+    one also keeps a partial failure from leaving half an appliance behind.
+    """
+    found: list = []
+    app_type = data.get("type")
+    appliance = data.get("appliance")
+    _LOGGER.debug(
+        "Switch debug: evaluating appliance '%s' id=%s type=%s commands=%s",
+        redact_id(data.get("name"), appliance_id),
+        redact_id(appliance_id),
+        app_type,
+        _command_names(appliance),
+    )
+    if app_type in APPLIANCE_WASH_GROUP:
+        if appliance and hasattr(appliance, "commands"):
+            cmds = getattr(appliance, "commands", None)
+            cmds = cmds if isinstance(cmds, dict) else {}
+            if "pauseProgram" in cmds and "resumeProgram" in cmds:
+                _LOGGER.debug("Switch debug: creating pause switch for id=%s", redact_id(appliance_id))
+                found.append(HonWashingMachinePauseSwitch(coordinator, appliance_id, client))
+                _LOGGER.info("Added pause switch: id=%s", redact_id(appliance_id))
+            else:
+                _LOGGER.debug(
+                    "Switch debug: pause switch not created for id=%s; pause/resume missing",
+                    redact_id(appliance_id),
+                )
+        # Writable program-option switches (#35): created only for the params this
+        # model genuinely exposes as settable in its startProgram schema.
+        created_opts: list[str] = []
+        for desc in _PROGRAM_OPTION_SWITCHES:
+            if app_type not in desc.types:
+                continue
+            if not HonProgramOptionSwitch.supports(appliance, desc.param):
+                continue
+            found.append(HonProgramOptionSwitch(coordinator, appliance_id, desc, client))
+            created_opts.append(desc.key)
+        if created_opts:
+            _LOGGER.info(
+                "Added %d program-option switches: id=%s",
+                len(created_opts),
+                redact_id(appliance_id),
+            )
+        _LOGGER.debug(
+            "Switch debug: option switches for id=%s type=%s -> %s",
+            redact_id(appliance_id),
+            app_type,
+            created_opts,
+        )
+    elif app_type == APPLIANCE_AP:
+        attributes = data.get("attributes")
+        attributes = attributes if isinstance(attributes, dict) else {}
+        capabilities = discover_capabilities(appliance, attributes)
+        created_ap: list[str] = []
+        for desc in _AIR_PURIFIER_SWITCHES:
+            # Both halves are gated: the write schema via the capability, the
+            # read state via the reported attribute. A toggle that cannot be
+            # read back would ship permanently unknown.
+            #
+            # A REJECTION is logged, with both verdicts and the whole capability
+            # set. These two gates used to `continue` in silence and the summary
+            # below names only what WAS built, so a purifier missing a toggle
+            # read exactly like a purifier that never reached this branch -- the
+            # state a field report sat in for two weeks. The sibling platforms
+            # (light.py, select.py) have always logged their skips this way.
+            #
+            # The capability set is the deciding input and nothing else carries
+            # it: the gate compares MATERIALISED schema values, while the
+            # diagnostics dump casts a range's bounds through float(), so "0"/"1"
+            # and "0.0"/"1.0" look identical there though only the first passes.
+            # Logged whole because `settings_command` answers a second question
+            # in the same line, namely which command the parameters were resolved
+            # against. Every field is derived data -- raw values, bools, a command
+            # name -- and none of it is identity.
+            writable = bool(getattr(capabilities, desc.capability, False))
+            readable = reports_attribute(attributes, desc.param)
+            if not writable or not readable:
+                _LOGGER.debug(
+                    "Switch debug: no purifier '%s' switch for id=%s "
+                    "(%s=%s reports_%s=%s caps=%s)",
+                    desc.key,
+                    redact_id(appliance_id),
+                    desc.capability,
+                    writable,
+                    desc.param,
+                    readable,
+                    capabilities,
+                )
+                continue
+            found.append(
+                HonAirPurifierSwitch(
+                    coordinator, appliance_id, desc, capabilities, client
+                )
+            )
+            created_ap.append(desc.key)
+        _LOGGER.debug(
+            "Switch debug: purifier switches id=%s -> %d %s",
+            redact_id(appliance_id), len(created_ap), created_ap,
+        )
+    elif app_type in _SETTINGS_SWITCHES:
+        created: list[str] = []
+        for desc in _SETTINGS_SWITCHES[app_type]:
+            # capability-gate: only if the parameter exists in the settings command
+            if settings_param(appliance, desc.param) is None:
+                continue
+            found.append(HonSettingsSwitch(coordinator, appliance_id, desc, client))
+            created.append(desc.key)
+        _LOGGER.debug(
+            "Switch debug: settings switches '%s' id=%s type=%s -> %d %s",
+            redact_id(data.get("name"), appliance_id), redact_id(appliance_id),
+            app_type, len(created), created,
+        )
+    else:
+        _LOGGER.debug("Switch debug: appliance id=%s ignored, type=%s", redact_id(appliance_id), app_type)
+    return found
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -168,67 +344,22 @@ async def async_setup_entry(
     # FIX: consistent access to the hass.data[DOMAIN][entry_id]["coordinator"] structure
     entry_data = hass.data[DOMAIN][entry.entry_id]
     coordinator = entry_data["coordinator"]
-    client = entry_data["client"]
+    # `.get`, like the light and fan platforms: a missing client leaves the READ half
+    # of every switch working, while a KeyError here would take the whole platform
+    # down, account debug toggles included. The write path already refuses without
+    # one, with a localized error.
+    client = entry_data.get("client")
     entities = []
-    for appliance_id, data in coordinator.data.items():
-        app_type = data.get("type")
-        appliance = data.get("appliance")
-        _LOGGER.debug(
-            "Switch debug: evaluating appliance '%s' id=%s type=%s commands=%s",
-            data.get("name"),
-            redact_id(appliance_id),
-            app_type,
-            _command_names(appliance),
-        )
-        if app_type in APPLIANCE_WASH_GROUP:
-            if appliance and hasattr(appliance, "commands"):
-                cmds = getattr(appliance, "commands", None)
-                cmds = cmds if isinstance(cmds, dict) else {}
-                if "pauseProgram" in cmds and "resumeProgram" in cmds:
-                    _LOGGER.debug("Switch debug: creating pause switch for id=%s", redact_id(appliance_id))
-                    entities.append(HonWashingMachinePauseSwitch(coordinator, appliance_id, client))
-                    _LOGGER.info("Added pause switch: id=%s", redact_id(appliance_id))
-                else:
-                    _LOGGER.debug(
-                        "Switch debug: pause switch not created for id=%s; pause/resume missing",
-                        redact_id(appliance_id),
-                    )
-            # Writable program-option switches (#35): created only for the params this
-            # model genuinely exposes as settable in its startProgram schema.
-            created_opts: list[str] = []
-            for desc in _PROGRAM_OPTION_SWITCHES:
-                if app_type not in desc.types:
-                    continue
-                if not HonProgramOptionSwitch.supports(appliance, desc.param):
-                    continue
-                entities.append(HonProgramOptionSwitch(coordinator, appliance_id, desc, client))
-                created_opts.append(desc.key)
-            if created_opts:
-                _LOGGER.info(
-                    "Added %d program-option switches: id=%s",
-                    len(created_opts),
-                    redact_id(appliance_id),
-                )
-            _LOGGER.debug(
-                "Switch debug: option switches for id=%s type=%s -> %s",
+    for appliance_id, data in coordinator_data_map(coordinator).items():
+        try:
+            entities.extend(
+                _appliance_switches(coordinator, appliance_id, data, client)
+            )
+        except Exception:  # noqa: BLE001 - one appliance must not cost the rest
+            _LOGGER.exception(
+                "Switch debug: appliance id=%s contributed no switches",
                 redact_id(appliance_id),
-                app_type,
-                created_opts,
             )
-        elif app_type in _SETTINGS_SWITCHES:
-            created: list[str] = []
-            for desc in _SETTINGS_SWITCHES[app_type]:
-                # capability-gate: only if the parameter exists in the settings command
-                if settings_param(appliance, desc.param) is None:
-                    continue
-                entities.append(HonSettingsSwitch(coordinator, appliance_id, desc, client))
-                created.append(desc.key)
-            _LOGGER.debug(
-                "Switch debug: settings switches '%s' id=%s type=%s -> %d %s",
-                data.get("name"), redact_id(appliance_id), app_type, len(created), created,
-            )
-        else:
-            _LOGGER.debug("Switch debug: appliance id=%s ignored, type=%s", redact_id(appliance_id), app_type)
     # Account-level debug switches (one set per config entry, independent of the
     # appliances): they mirror the two persisted toggles of the Options flow.
     sw_version = entry_data.get("integration_version")
@@ -350,6 +481,90 @@ class HonWashingMachinePauseSwitch(HonBaseEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         await self._send_pause_command("resumeProgram", "0")
+
+
+class HonAirPurifierSwitch(HonBaseEntity, SwitchEntity):
+    """Air purifier 0/1 toggle written as a sparse settings patch.
+
+    NOT a HonSettingsSwitch subclass: that class applies the value to the whole
+    `settings` command and sends it, which would restate every sibling setting.
+    This one dispatches a patch carrying its own field alone.
+
+    Never gated on power: a lock and a beep setting are meaningful and changeable
+    with the purifier stopped.
+    """
+
+    entity_description: HonAirPurifierSwitchDescription
+
+    def __init__(
+        self,
+        coordinator,
+        appliance_id: str,
+        description: HonAirPurifierSwitchDescription,
+        capabilities: AirPurifierCapabilities,
+        client=None,
+    ) -> None:
+        super().__init__(coordinator, appliance_id, client)
+        self.entity_description = description
+        self._capabilities = capabilities
+        self._attr_translation_key = description.key
+        self._attr_unique_id = f"{appliance_id}_{description.key}"
+        if description.icon:
+            self._attr_icon = description.icon
+        _LOGGER.debug(
+            "Switch debug: initialized purifier switch '%s' id=%s param=%s",
+            description.key, redact_id(appliance_id), description.param,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        raw = self._get_attr(self.entity_description.param)
+        if raw is None:
+            return None
+        return raw_text(raw) == "1"
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._dispatch("1")
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._dispatch("0")
+
+    async def _dispatch(self, value: str) -> None:
+        """Send this toggle's intent, then refresh.
+
+        The intent is built INSIDE the try so a value the live schema rejects
+        surfaces as the same localized command error as a transport failure.
+        """
+        appliance = self._appliance
+        client = self._hon_client
+        if not appliance or not client:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="appliance_or_client_unavailable",
+            )
+        description = self.entity_description
+        try:
+            patch = ap_patch(
+                description.action, self._capabilities, value=value
+            )
+            _LOGGER.debug(
+                "Switch debug: purifier %s=%s id=%s",
+                description.param, value, redact_id(self._appliance_id),
+            )
+            await async_dispatch_patch(self.hass, client, appliance, patch)
+            await self._async_request_command_refresh()
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            _LOGGER.error(
+                "Purifier switch: set %s=%s failed: %s",
+                description.param, value, err, exc_info=True,
+            )
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_error",
+                translation_placeholders={"error": str(err)},
+            ) from err
 
 
 class HonSettingsSwitch(HonBaseEntity, SwitchEntity):

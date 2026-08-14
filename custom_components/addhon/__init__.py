@@ -27,6 +27,7 @@ from .const import (
     APPLIANCE_TD,
     ATTR_LEVEL,
     CONF_ENABLE_DEBUG,
+    CONF_ENABLE_EXPERIMENTAL,
     CONF_ENABLE_MQTT_DEBUG,
     DOMAIN,
     PLATFORMS,
@@ -43,6 +44,7 @@ from .logging_utils import (
     silence_mqtt_noise,
 )
 from .debug_utils import redact_id, redact_mac
+from . import program_labels
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -189,48 +191,71 @@ def _apply_debug_options(entry: ConfigEntry, *, reset_when_off: bool = True) -> 
         silence_mqtt_noise()
 
 
-_DEBUG_OPTS_KEY = "debug_options"
+_ENTRY_OPTS_KEY = "entry_options"
 
 
-def _debug_opts(entry: ConfigEntry) -> tuple[bool, bool]:
-    """Current (integration-debug, mqtt-debug) toggles for the entry."""
+def _entry_opts(entry: ConfigEntry) -> tuple[bool, bool, bool]:
+    """The options the update listener has to react to.
+
+    (integration-debug, mqtt-debug, experimental). The first two are applied on the
+    fly; the third decides which entities EXIST, so only it can require a reload.
+    """
     return (
         entry.options.get(CONF_ENABLE_DEBUG, False),
         entry.options.get(CONF_ENABLE_MQTT_DEBUG, False),
+        entry.options.get(CONF_ENABLE_EXPERIMENTAL, False),
     )
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Re-apply the log levels on the fly when the toggles change (no reload).
+    """React to an options change: log levels live, entity set by reload.
 
     A reload would tear down auth and the MQTT channel just to change a log level;
-    here we re-apply the levels on the fly, as the existing services do.
+    the debug levels are therefore re-applied on the fly, as the existing services
+    do. enable_experimental is different in kind: it adds or removes entities, which
+    only a reload can do, so it is the one option that reloads the entry.
 
     HA fires update listeners on ANY entry change (data, options, title), not only
     on an options change. A data-only write -- e.g. _persist_refresh_token rotating
     the OAuth refresh token during a routine poll -- must NOT re-apply/reset the
     debug levels: that would silently kill a debug level raised at runtime via the
     set_log_level / set_mqtt_log_level service (reset_when_off=True), exactly when the
-    logs are needed. So re-apply only when the debug toggles actually changed.
+    logs are needed, and must certainly not reload. So each half acts only on the
+    values it owns, and an experimental-only change leaves the loggers untouched.
     """
-    current = _debug_opts(entry)
+    current = _entry_opts(entry)
     hass_data = getattr(hass, "data", None)
     entry_data = (
         hass_data.get(DOMAIN, {}).get(entry.entry_id)
         if isinstance(hass_data, dict)
         else None
     )
+    previous: tuple[bool, bool, bool] | None = None
     if entry_data is not None:
-        if entry_data.get(_DEBUG_OPTS_KEY) == current:
-            return  # entry changed but the debug toggles didn't
-        entry_data[_DEBUG_OPTS_KEY] = current
+        previous = entry_data.get(_ENTRY_OPTS_KEY)
+        if previous == current:
+            return  # entry changed but none of these options did
+        # Recorded before the reload below: a reload detaches this dict from
+        # hass.data, so a write afterwards would land nowhere.
+        entry_data[_ENTRY_OPTS_KEY] = current
     _LOGGER.debug(
-        "Options debug: options updated entry=%s enable_debug=%s enable_mqtt_debug=%s",
+        "Options debug: options updated entry=%s enable_debug=%s enable_mqtt_debug=%s "
+        "enable_experimental=%s",
         entry.entry_id,
         current[0],
         current[1],
+        current[2],
     )
-    _apply_debug_options(entry)
+    # No baseline (a first call, or an entry absent from hass.data) is not evidence
+    # of a change: apply the levels as before, but never reload on a guess.
+    if previous is None or previous[:2] != current[:2]:
+        _apply_debug_options(entry)
+    if previous is not None and previous[2] != current[2]:
+        _LOGGER.info(
+            "Options: experimental features %s, reloading the entry",
+            "enabled" if current[2] else "disabled",
+        )
+        await hass.config_entries.async_reload(entry.entry_id)
 
 
 def _redact_email(email: str | None) -> str | None:
@@ -285,13 +310,17 @@ def _raise_setup_error(err: Exception) -> NoReturn:
     ConfigEntryNotReady so HA retries setup later. Extracted from async_setup_entry so
     the branch is unit-testable (a swapped branch would otherwise pass the suite). (#11)
     """
-    from .error_codes import classify
+    from .error_codes import classify, error_detail
     from .hon_client import _requires_reauth
 
     code = classify(err)
+    # error_detail() drops a leading "ADDHON-NNN: " so the code appears ONCE. These two
+    # messages are shown by Home Assistant on the config-entry page, so the user really
+    # did read the code twice before (#76).
+    detail = error_detail(err)
     if _requires_reauth(err):
-        raise ConfigEntryAuthFailed(f"[{code.label}] Invalid hOn credentials: {err}") from err
-    raise ConfigEntryNotReady(f"[{code.label}] Unable to connect to hOn: {err}") from err
+        raise ConfigEntryAuthFailed(f"[{code.label}] Invalid hOn credentials: {detail}") from err
+    raise ConfigEntryNotReady(f"[{code.label}] Unable to connect to hOn: {detail}") from err
 
 
 def _raise_update_error(err: Exception) -> NoReturn:
@@ -300,13 +329,14 @@ def _raise_update_error(err: Exception) -> NoReturn:
     An auth error triggers the reauth flow (ConfigEntryAuthFailed); anything else is a
     transient UpdateFailed (the coordinator keeps its last good snapshot and retries).
     Extracted for unit-testing (#11)."""
-    from .error_codes import classify
+    from .error_codes import classify, error_detail
     from .hon_client import _requires_reauth
 
     code = classify(err)
+    detail = error_detail(err)
     if _requires_reauth(err):
-        raise ConfigEntryAuthFailed(f"[{code.label}] Invalid hOn credentials: {err}") from err
-    raise UpdateFailed(f"[{code.label}] hOn update error: {err}") from err
+        raise ConfigEntryAuthFailed(f"[{code.label}] Invalid hOn credentials: {detail}") from err
+    raise UpdateFailed(f"[{code.label}] hOn update error: {detail}") from err
 
 
 # "Washer-only" sensors that were mistakenly created on the tumble dryers (TD)
@@ -334,6 +364,10 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
       '_total_energy', '_current_energy', '_current_water', '_loading_percentage'.
       Removed ONLY on devices of type TD (cross-checked with the coordinator),
       never on WM/WD/AC.
+    - The air purifier panel LIGHT (unique_id '<id>_panel_light'), replaced by a
+      select with the same unique_id in a different domain. Scoped to the light
+      domain for that reason: removing by unique_id alone would delete the
+      replacement along with the entity it replaces.
 
     Without this cleanup there would be orphan 'unavailable' entities with the '?' badge.
     """
@@ -364,6 +398,13 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
             registry.async_remove(reg_entry.entity_id)
             removed += 1
             _LOGGER.info("Removed legacy power switch: id=%s", redact_id(reg_entry.unique_id))
+        elif domain == "light" and unique_id.endswith("_panel_light"):
+            registry.async_remove(reg_entry.entity_id)
+            removed += 1
+            _LOGGER.info(
+                "Removed legacy purifier panel light: id=%s",
+                redact_id(reg_entry.unique_id),
+            )
         elif unique_id in td_orphans:
             registry.async_remove(reg_entry.entity_id)
             removed += 1
@@ -524,6 +565,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         coordinator.hon_client = hon_client
 
+        # Program-label catalog (#71). The appliance schema names a program with its
+        # i18n KEY (`PROGRAMS.WM_WD.HQD_AUTOCLEAN` -> slug `hqd_autoclean`), so readable
+        # names only exist in the catalog the hOn app downloads. Fetched ONCE here and
+        # parked on the coordinator, so no entity ever does I/O for a label. Best-effort
+        # by construction: async_load absorbs every failure and returns an empty catalog,
+        # in which case the entities keep showing the raw code.
+        setattr(
+            coordinator,
+            program_labels.COORDINATOR_ATTR,
+            await program_labels.async_load(hass),
+        )
+
         # Realtime: wire MQTT pushes to the coordinator (#4). Without this the push
         # channel was inert and entities only refreshed on the 60s poll. The push
         # arrives on the awscrt thread, so the snapshot is built THERE (a coherent
@@ -569,10 +622,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "coordinator": coordinator,
             "client": hon_client,
             "integration_version": integration_version,
-            # Baseline for _async_options_updated: the toggles already applied at the
-            # start of setup, so a later data-only entry write (token rotation) is a
-            # no-op and only a real options change re-applies the levels.
-            _DEBUG_OPTS_KEY: _debug_opts(entry),
+            # Baseline for _async_options_updated: the options already in effect at
+            # the start of setup, so a later data-only entry write (token rotation) is
+            # a no-op and only a real options change re-applies the levels or reloads.
+            _ENTRY_OPTS_KEY: _entry_opts(entry),
         }
         stored = True
         _LOGGER.debug("Setup debug: coordinator and client stored in hass.data for entry=%s", entry.entry_id)

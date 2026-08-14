@@ -37,6 +37,7 @@ from awsiot import mqtt5_client_builder  # type: ignore[import-untyped]
 
 from .device import MOBILE_ID
 from .values import AWS_AUTHORIZER, AWS_ENDPOINT
+from ...command_diagnostics import observe_mqtt_update
 from ...debug_utils import redact_id, redact_identity, redact_topic
 from ...error_codes import (
     AWS_TOKEN_FAILED,
@@ -201,13 +202,24 @@ class NativeMqttClient:
         return self._client
 
     def _set_setup_phase(self, phase: str) -> None:
-        """Record the setup phase on the parent session so a dedicated-loop 60s
-        timeout during the FIRST connect is attributed to the right MQTT step. Only
-        set from create() (not the watchdog reconnect, which runs after setup)."""
+        """Record the setup phase on the parent session so a setup watchdog expiring
+        during the FIRST connect is attributed to the right MQTT step. Only set from
+        create() (not the watchdog reconnect, which runs after setup)."""
         hon = self._hon
         if hon is not None:
             try:
                 hon._setup_phase = phase
+            except Exception:  # pragma: no cover - defensive
+                pass
+            try:
+                # The HIERARCHICAL mirror too (client/phase.py). `NativeHon.setup()`
+                # wraps this call in a `phase("mqtt_start")` scope for the MQTT_START
+                # budget, and that scope is what the cross-thread watchdog reads --
+                # without the refinement the outer name would SHIELD the flat mirror
+                # above and cost the connect/subscribe distinction. `step()` only
+                # rewrites the mirror (no ContextVar push), and the enclosing scope
+                # restores it on exit, so a refinement cannot outlive the start.
+                hon._phase_tracker.step(phase)
             except Exception:  # pragma: no cover - defensive
                 pass
 
@@ -431,6 +443,7 @@ class NativeMqttClient:
                             type(raw_params).__name__,
                         )
                     raw_params = []
+                observed_values: dict[str, object] = {}
                 for parameter in raw_params:
                     # Skip a single malformed element (e.g. a null in the list) so the
                     # valid parameters in the same batch are still applied (and notify
@@ -447,12 +460,26 @@ class NativeMqttClient:
                         )
                         continue
                     name = parameter.get("parName")
+                    if isinstance(name, str) and "parValue" in parameter:
+                        observed_values[name] = parameter["parValue"]
                     # Only already-known parameters (seeded by load_attributes). A new
                     # parName is recovered at the next HTTP poll; creating it here would
                     # couple this transport module to the engine's HonAttribute.
                     if name in params:
                         params[name].update(parameter)
                 appliance.sync_params_to_command("settings")
+                try:
+                    observe_mqtt_update(appliance, observed_values)
+                except Exception:
+                    # observe_mqtt_update is internally failure-safe, so anything
+                    # escaping is a bug in the diagnostics module rather than bad
+                    # input. Still swallowed, because a broken diagnostic must not
+                    # drop an appliance state update, but no longer silently: with a
+                    # bare pass the correlation could be dead for every command and
+                    # look exactly like a correlation that never matched.
+                    _LOGGER.debug(
+                        "MQTT: command correlation failed", exc_info=True
+                    )
             elif topic and "disconnected" in topic:
                 _LOGGER.info(
                     "Disconnected %s: %s",

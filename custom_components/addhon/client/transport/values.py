@@ -51,6 +51,33 @@ AUTH_HOST = urlsplit(AUTH_API).netloc
 # -- IoT command surface -- HHT-sec2 -------------------------------------------
 API_URL = "https://api-iot.he.services"            # OBSERVED: IoT command API host
 
+# -- Anonymous app-config surface (program-label catalog) -- HHT-sec2 ----------
+# The appliance schema does NOT carry program LABELS: a startProgram category is named
+# `PROGRAMS.<TYPE>.<PROGRAM>`, which is an i18n KEY. The hOn app resolves it against a
+# translation catalog it downloads at runtime, so a client that wants readable program
+# names must reproduce that anonymous two-step (app-config -> jsonPath -> catalog).
+#
+# Both values below were captured from the hOn 2.27.9 APK and then confirmed on the
+# wire (2026-08-02): see apk/probe_translations_live.py, which records the offsets in
+# apk/decomp.txt and the response matrix.
+CONFIG_MICROSERVICE = "config"                     # OBSERVED: app-config path segment
+# NOT A SECRET -- a PUBLIC CLIENT key, deliberately in source control.
+#
+# It identifies the client software, not a user or an account: every hOn installation
+# ships this same value and anyone can read it out of the app. It grants no access to
+# any account, carries no user data, and cannot be scoped per install -- the endpoint
+# expects the CLIENT's key, so a user-supplied one would simply be rejected. Storing it
+# in the config entry would add no security and would make the integration impossible to
+# install. User credentials and session tokens are a different matter entirely: they are
+# supplied at runtime and appear nowhere in this file. See the OBSERVED class definition
+# in VALUES-PROVENANCE.md, which covers CLIENT_ID, AWS_ENDPOINT and AWS_AUTHORIZER the
+# same way.
+#
+# OBSERVED: the gateway REJECTS the bare AWS api-key with 403 Forbidden. The app builds
+# `x-api-key` as `AWS_API_KEY + "-" + apiKeySuffix`, and `getConfig` passes the suffix
+# "configuration" -- so the suffixed form is the only one the endpoint accepts.
+CONFIG_API_KEY = "GRCqFhC6Gk@ikWXm1RmnSmX1cm,MxY-configuration"
+
 # -- AWS-IoT MQTT surface (custom authorizer) -- HHT-sec10 ---------------------
 AWS_ENDPOINT = "a30f6tqw0oh1x0-ats.iot.eu-west-1.amazonaws.com"  # OBSERVED: IoT-Data ATS
 AWS_AUTHORIZER = "candy-iot-authorizer"            # OBSERVED: custom-authorizer name

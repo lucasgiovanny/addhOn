@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -24,14 +25,29 @@ from yarl import URL
 
 from ...debug_utils import redact_remoting_summary
 from ...error_codes import (
+    ACCOUNT_ACTION_REQUIRED,
     MFA_CODE_INVALID,
     MFA_REQUIRED,
     MFA_SEND_FAILED,
     MFA_SERVICE_ERROR,
     MFA_TOKEN_AFTER_VERIFY_FAILED,
 )
+from ..auth_diagnostics import (
+    ACCOUNT_ACTION_VERDICTS,
+    AuthDiagnosticTrace,
+    analyze_page,
+    classify_endpoint,
+    classify_token_page,
+    summarize_json,
+    summarize_links,
+    summarize_response,
+    summarize_tokens,
+)
+from ..budget import AUTH_FULL, current_deadline
+from ..phase import PhaseTracker
 from .device import HonDevice
 from .headers import USER_AGENT
+from .retry import RetryBudget, retry_transport
 from .oauth import (
     APEXREMOTE_PATH,
     AUTH_API,
@@ -125,6 +141,17 @@ class MFATokenAfterVerifyFailed(NativeAuthError):
     error_code = MFA_TOKEN_AFTER_VERIFY_FAILED
 
 
+class AccountActionRequired(NativeAuthError):
+    """The password was accepted but the account is parked on a step only the USER can
+    clear (a set/change-password form, a consent wall) instead of the token hand-off.
+
+    Structurally detected on the token page (issue #67): retrying cannot fix it, so it
+    gets its own code and a message that says WHERE to go, rather than the mute
+    "token retrieval failed"."""
+
+    error_code = ACCOUNT_ACTION_REQUIRED
+
+
 class _NoAuthNeeded(Exception):
     """The authorize page was already the redirect with the tokens (login not needed)."""
 
@@ -132,11 +159,20 @@ class _NoAuthNeeded(Exception):
 class HonAuth:
     """Native hOn login flow. Assembles the pieces + the HTTP orchestration."""
 
-    def __init__(self, session, email: str, password: str, device: HonDevice) -> None:
+    def __init__(
+        self,
+        session,
+        email: str,
+        password: str,
+        device: HonDevice,
+        auth_trace: AuthDiagnosticTrace | None = None,
+        phase_tracker: PhaseTracker | None = None,
+    ) -> None:
         self._session = session
         self._email = email
         self._password = password
         self._device = device
+        self._auth_trace = auth_trace or AuthDiagnosticTrace(enabled=False)
         self._expires = datetime.now(timezone.utc)
         # Epoch seconds of the id_token's JWT `exp`, or None for an opaque token
         # (then the conservative opaque window applies). Set by _remember_expiry().
@@ -149,13 +185,23 @@ class HonAuth:
         self._loaded: Any = None
         self._page_url = ""
         # Last login phase reached, for the DEBUG trace + diagnostics attribution ("failed
-        # during mfa_verify"). Updated by _phase(); read via NativeHon.auth_phase.
+        # during mfa_verify"). Updated by _phase(); read via NativeHon.auth_phase. Stays
+        # FLAT on purpose: it is the legacy mirror the diagnostics already publish.
         self._current_phase = ""
+        # Shared with the session/connection (client/phase.py): the cross-thread mirror
+        # of the HIERARCHICAL phase, so a login running lazily inside load_appliances
+        # says "load_appliances/auth/..." instead of borrowing its caller's label (#76).
+        self._phase_tracker = phase_tracker
+        # Extra attempts for the idempotent steps of the CURRENT authenticate(); None
+        # outside it, so the refresh and 2FA paths are never retried.
+        self._retry_budget: RetryBudget | None = None
 
     def _phase(self, name: str, **fields: Any) -> None:
         """Mark + DEBUG-log a login phase. Content is STRUCTURE only (status/booleans/
         phase name) -- never email/password/OTP/token/csrf/cookie/url (leak-proof)."""
         self._current_phase = name
+        if self._phase_tracker is not None:
+            self._phase_tracker.step(name)
         if _LOGGER.isEnabledFor(logging.DEBUG):
             extra = " ".join(f"{k}={v}" for k, v in fields.items())
             _LOGGER.debug("auth phase %s%s", name, f": {extra}" if extra else "")
@@ -188,11 +234,111 @@ class HonAuth:
             headers.update(extra)
         return headers
 
+    def _diagnostic_request(
+        self, phase: str, method: str, endpoint: str
+    ) -> float | None:
+        if not self._auth_trace.enabled:
+            return None
+        self._auth_trace.request(phase, method, endpoint)
+        return time.monotonic()
+
+    def _diagnostic_response(
+        self, phase: str, resp: Any, body: str | bytes, started: float | None
+    ) -> None:
+        if not self._auth_trace.enabled or started is None:
+            return
+        history = getattr(resp, "history", ()) or ()
+        self._auth_trace.response(
+            phase,
+            summarize_response(
+                status=getattr(resp, "status", 0),
+                headers=getattr(resp, "headers", {}),
+                body=body,
+                elapsed_ms=(time.monotonic() - started) * 1000,
+                redirects=len(history),
+            ),
+        )
+
+    def _diagnostic_page(
+        self, phase: str, url: Any, text: Any
+    ) -> tuple[Any, Any] | None:
+        """Emit the structure AND the named identity of a page (issue #67).
+
+        The skeleton is emitted only for a page the flow did not expect: on the known
+        stops it would be noise, on an unexpected landing page it is what identifies it
+        without a second round-trip to the reporter. Returns the summary pair so a
+        caller that later needs a verdict does not parse the same body twice."""
+        if not self._auth_trace.enabled:
+            return None
+        try:
+            shape, page = analyze_page(url, text)
+        except Exception:  # noqa: BLE001 - diagnostics are observational, never fatal
+            return None
+        self._auth_trace.html(phase, shape)
+        self._auth_trace.page(phase, page)
+        if shape.page_kind not in ("login", "progressive_login", "oauth_done", "mfa"):
+            self._auth_trace.skeleton(phase, shape)
+        return shape, page
+
+    def _page_verdict(
+        self,
+        phase: str,
+        url: Any,
+        text: Any,
+        summaries: tuple[Any, Any] | None = None,
+    ) -> str:
+        """Why a page is a dead end, as a controlled verdict. Runs with the diagnostics
+        OFF too: the actionable error must not depend on the opt-in checkbox. Reuses the
+        summaries the trace already built, when there are any."""
+        verdict = "unknown"
+        try:
+            shape, page = summaries if summaries else analyze_page(url, text)
+            verdict = classify_token_page(shape, page)
+        except Exception:  # noqa: BLE001 - a diagnostic must never replace the failure
+            verdict = "unknown"
+        self._auth_trace.verdict(phase, verdict)
+        return verdict
+
+    def _guard_account_action(
+        self,
+        phase: str,
+        url: Any,
+        text: Any,
+        summaries: tuple[Any, Any] | None = None,
+    ) -> None:
+        """Raise AccountActionRequired when a dead-end page is a step only the USER can
+        clear, instead of the mute "no href" the caller would otherwise raise."""
+        verdict = self._page_verdict(phase, url, text, summaries)
+        if verdict in ACCOUNT_ACTION_VERDICTS:
+            raise AccountActionRequired(
+                f"{phase}: account action required ({verdict})"
+            )
+
+    def _diagnostic_links(
+        self, phase: str, hrefs: list[str], selected_index: int = -1
+    ) -> None:
+        if self._auth_trace.enabled:
+            self._auth_trace.links(
+                phase,
+                summarize_links(hrefs, selected_index=selected_index),
+            )
+
+    def _diagnostic_json(self, phase: str, value: Any) -> None:
+        if self._auth_trace.enabled:
+            self._auth_trace.json_shape(phase, summarize_json(value))
+
+    def _diagnostic_tokens(self, phase: str, text: Any) -> None:
+        if self._auth_trace.enabled:
+            self._auth_trace.token_shape(phase, summarize_tokens(text))
+
     async def _introduce(self) -> str:
         self._phase("introduce")
         url = build_authorize_url(generate_nonce())
+        started = self._diagnostic_request("introduce", "GET", "authorize")
         async with self._session.get(url, headers=self._ua()) as resp:
             text = await resp.text()
+            self._diagnostic_response("introduce", resp, text, started)
+            self._diagnostic_page("introduce", url, text)
             self._expires = datetime.now(timezone.utc)
             login_url = extract_login_url(text)
             if login_url is None:
@@ -204,6 +350,9 @@ class HonAuth:
                     # trailing '&' (RFC 6749 sec4.2.2). Require .complete before
                     # committing, mirroring _resume_tokens_after_2fa.
                     t = parse_token_fragment(oauth_done_fragment(text) or text)
+                    self._diagnostic_tokens(
+                        "introduce", oauth_done_fragment(text) or text
+                    )
                     if not t.complete:
                         self._phase(
                             "introduce", status=resp.status,
@@ -224,15 +373,24 @@ class HonAuth:
         return login_url
 
     async def _manual_redirect(self, url: str) -> str:
+        started = self._diagnostic_request(
+            "redirects", "GET", "manual_redirect"
+        )
         async with self._session.get(
             absolutize(url), allow_redirects=False, headers=self._ua()
         ) as resp:
+            self._diagnostic_response("redirects", resp, b"", started)
             return resp.headers.get("Location", "") or url
 
     async def _handle_redirects(self, login_url: str) -> str:
         self._phase("redirects")
-        r1 = await self._manual_redirect(login_url)
-        r2 = await self._manual_redirect(r1)
+        budget = self._retry_budget
+        r1 = await retry_transport(
+            budget, "manual_redirect", lambda: self._manual_redirect(login_url)
+        )
+        r2 = await retry_transport(
+            budget, "manual_redirect", lambda: self._manual_redirect(r1)
+        )
         return f"{r2}&System=IoT_Mobile_App&RegistrationSubChannel=hOn"
 
     async def _open_login_page(self, login_url: str) -> None:
@@ -241,10 +399,15 @@ class HonAuth:
         # already-encoded startURL=%2F... query, so the encoded contract is preserved
         # while a relative login_url no longer crashes the base_url-less session.
         login_url = absolutize(login_url)
+        started = self._diagnostic_request(
+            "login_page", "GET", classify_endpoint(login_url)
+        )
         async with self._session.get(
             URL(login_url, encoded=True), headers=self._ua()
         ) as resp:
             text = await resp.text()
+            self._diagnostic_response("login_page", resp, text, started)
+            self._diagnostic_page("login_page", login_url, text)
             match = _FWUID_RE.findall(text)
             if not match:
                 self._phase("login_page", status=resp.status, fwuid=False)
@@ -259,6 +422,10 @@ class HonAuth:
         body, params = build_login_payload(
             self._email, self._password, self._fw_uid, self._loaded, self._page_url
         )
+        started = self._diagnostic_request(
+            "login_submit", "POST", "aura_login"
+        )
+        self._auth_trace.payload("login_submit", "aura_login")
         async with self._session.post(
             AUTH_API + "/s/sfsites/aura",
             headers=self._ua({"Content-Type": "application/x-www-form-urlencoded"}),
@@ -268,34 +435,69 @@ class HonAuth:
             if resp.status == 200:
                 try:
                     result = await resp.json(content_type=None)
+                    self._diagnostic_json("login_submit", result)
                     redirect = str(result["events"][0]["attributes"]["values"]["url"])
+                    self._diagnostic_response(
+                        "login_submit", resp, b"", started
+                    )
                     self._phase("login_submit", status=resp.status, redirect=True)
                     return redirect
                 except (json.JSONDecodeError, KeyError, TypeError):
                     pass
+            self._diagnostic_response("login_submit", resp, b"", started)
             self._phase("login_submit", status=resp.status, redirect=False)
             raise NativeAuthError(f"login: failed (status {resp.status})")
 
     async def _get_token(self, url: str) -> None:
         self._phase("get_token")
-        async with self._session.get(absolutize(url), headers=self._ua()) as resp:
+        started = self._diagnostic_request(
+            "post_login", "GET", "post_login"
+        )
+        post_login_url = absolutize(url)
+        async with self._session.get(post_login_url, headers=self._ua()) as resp:
             if resp.status != 200:
+                self._diagnostic_response("post_login", resp, b"", started)
                 self._phase("get_token", status=resp.status)
                 raise NativeAuthError(f"get_token: status {resp.status}")
-            href = _HREF_RE.findall(await resp.text())
+            text = await resp.text()
+            self._diagnostic_response("post_login", resp, text, started)
+            post_login_summaries = self._diagnostic_page(
+                "post_login", post_login_url, text
+            )
+            href = _HREF_RE.findall(text)
+            self._diagnostic_links(
+                "post_login", href, selected_index=0 if href else -1
+            )
         if not href:
+            # A post-login page with no next hop may BE the account step (a consent form
+            # has no navigation href at all), so name it before failing (issue #67).
+            self._guard_account_action(
+                "post_login", post_login_url, text, post_login_summaries
+            )
             self._phase("get_token", status=resp.status, href=False)
             raise NativeAuthError("get_token: no href")
         if "ProgressiveLogin" in href[0]:
+            started = self._diagnostic_request(
+                "progressive_page", "GET", "progressive_login"
+            )
             async with self._session.get(absolutize(href[0]), headers=self._ua()) as resp:
                 if resp.status != 200:
+                    self._diagnostic_response(
+                        "progressive_page", resp, b"", started
+                    )
                     self._phase("progressive_detect", status=resp.status)
                     raise NativeAuthError(f"progressive: status {resp.status}")
                 prog_text = await resp.text()
+                self._diagnostic_response(
+                    "progressive_page", resp, prog_text, started
+                )
                 # resp.url is the final (post-redirect) URL; fall back to the requested
                 # href (absolutized, so the MfaContext host derivation is correct) if the
                 # response object does not expose it (e.g. test doubles).
                 prog_url = str(getattr(resp, "url", "") or absolutize(href[0]))
+                prog_summaries = self._diagnostic_page(
+                    "progressive_page", prog_url, prog_text
+                )
             # 2FA: when email OTP is enabled this page IS the verification step (no
             # usable redirect href -- the first one is a CSS asset). Detect it and
             # pause the login with the context to resume; otherwise behave exactly as
@@ -308,16 +510,51 @@ class HonAuth:
             if challenge is not None:
                 raise MFAChallengeRequired(challenge)
             href = _HREF_RE_PROGRESSIVE.findall(prog_text)
+            self._diagnostic_links(
+                "progressive_page",
+                href,
+                selected_index=0 if href else -1,
+            )
             if not href:  # like the guard after the first findall: no IndexError
+                self._guard_account_action(
+                    "progressive_page", prog_url, prog_text, prog_summaries
+                )
                 raise NativeAuthError("progressive: no href")
         token_url = absolutize(href[0])
         self._phase("get_token", status=200, href=True)
+        started = self._diagnostic_request(
+            "token_response", "GET", classify_endpoint(token_url)
+        )
         async with self._session.get(token_url, headers=self._ua()) as resp:
             if resp.status != 200:
+                self._diagnostic_response(
+                    "token_response", resp, b"", started
+                )
                 raise NativeAuthError(f"token page: status {resp.status}")
-            tokens = parse_token_fragment(await resp.text())
+            token_text = await resp.text()
+            self._diagnostic_response(
+                "token_response", resp, token_text, started
+            )
+            token_summaries = self._diagnostic_page(
+                "token_response", token_url, token_text
+            )
+            self._diagnostic_tokens("token_response", token_text)
+            tokens = parse_token_fragment(token_text)
         if not tokens.complete:
-            raise NativeAuthError("token page: incomplete tokens")
+            # The page that should carry the OAuth hand-off did not. Say WHAT it carried
+            # instead: a set/change-password form or a consent wall is an account step
+            # only the user can clear, and retrying it forever (ADDHON-130) told them
+            # nothing (issue #67). Never let the classification break the login: a
+            # diagnostic failure must still raise the original token error.
+            verdict = self._page_verdict(
+                "token_response", token_url, token_text, token_summaries
+            )
+            self._phase("get_token", tokens_complete=False, page=verdict)
+            if verdict in ACCOUNT_ACTION_VERDICTS:
+                raise AccountActionRequired(
+                    f"token page: account action required ({verdict})"
+                )
+            raise NativeAuthError(f"token page: incomplete tokens ({verdict})")
         self.access_token = tokens.access_token
         self.refresh_token = tokens.refresh_token
         self.id_token = tokens.id_token
@@ -333,12 +570,15 @@ class HonAuth:
             if hasattr(self._device, "payload")
             else self._device.get()
         )
+        started = self._diagnostic_request("api_auth", "POST", "api_auth")
+        self._auth_trace.payload("api_auth", "api_auth")
         async with self._session.post(
             f"{API_URL}/auth/v1/login",
             headers=self._ua({"id-token": self.id_token}),
             json=device_payload,
         ) as resp:
             if resp.status != 200:
+                self._diagnostic_response("api_auth", resp, b"", started)
                 self._phase("api_auth", status=resp.status, cognito_token=False)
                 # Preserve the HTTP status in the exception: the setup classifier uses
                 # it to distinguish retryable server/rate-limit failures from an actual
@@ -346,6 +586,8 @@ class HonAuth:
                 # and unnecessarily opened Home Assistant's reauth/2FA flow.
                 raise NativeAuthError(f"api_auth: status {resp.status}")
             data = await resp.json(content_type=None)
+            self._diagnostic_response("api_auth", resp, b"", started)
+            self._diagnostic_json("api_auth", data)
         self.cognito_token = data.get("cognitoUser", {}).get("Token", "")
         if not self.cognito_token:
             self._phase("api_auth", status=resp.status, cognito_token=False)
@@ -355,20 +597,58 @@ class HonAuth:
         self._phase("api_auth", status=resp.status, cognito_token=True)
 
     async def authenticate(self) -> None:
+        # WHAT IS RETRIED, and why the rest is not (issue #76). Retried, because a
+        # duplicate delivery costs nothing: _introduce (a GET whose replay only opens
+        # another authorize session, and which re-mints its own nonce), the two
+        # _manual_redirect hops (GETs with allow_redirects=False that read one header),
+        # _open_login_page (a GET, and the replay re-reads the fwuid/loaded that a
+        # framework rotation would have invalidated) and _api_auth (the hOn endpoint we
+        # already re-invoke on every successful refresh).
+        #
+        # NOT retried: _login submits the credentials and advances the Salesforce
+        # session (its payload embeds the fwuid captured one step earlier, and a
+        # duplicate delivery races the `sid` cookie the next three steps depend on); the
+        # three GETs inside _get_token each consume a SINGLE-USE hand-off (a second
+        # post-login fetch lands on a login page -> "no href" -> a transient blip would
+        # become a permanent credentials error, and a second ProgressiveLogin fetch mints
+        # a NEW MfaContext that any already-sent OTP no longer matches); refresh() spends
+        # a rotating, single-use refresh token; every MFA step sends an email or burns a
+        # verification attempt.
         self.clear()
+        # Deadline for the shared retry budget, taken from the budget scope that is
+        # ACTUALLY in force (client/budget.py) rather than re-derived from AUTH_FULL.
+        # Re-deriving it was a fiction: the enclosing scope may be tighter, and a gate
+        # measured against a deadline nobody enforces never refuses anything -- so the
+        # retry became the very thing that spent the budget, the opposite of the
+        # invariant retry.py claims. None only outside any scope (direct use, unit
+        # tests), where the phase budget the call sites open is the honest stand-in.
+        deadline = current_deadline()
+        if deadline is None:
+            deadline = time.monotonic() + AUTH_FULL
+        budget = RetryBudget(deadline=deadline)
+        self._retry_budget = budget
+        # The enclosing `phase("auth")` scope is opened by the CALLER (connection.py),
+        # next to the AUTH_FULL budget it belongs to, so an expiry is still inside the
+        # scope when it is converted into a coded error.
         try:
-            login_url = await self._introduce()
-            redirect = await self._handle_redirects(login_url)
-            await self._open_login_page(redirect)
-            url = await self._login()
-            await self._get_token(url)
-            await self._api_auth()
-        except _NoAuthNeeded:
-            # The authorize page already carried the OAuth tokens (a still-valid SSO
-            # cookie), so the login steps are skipped -- but cognito_token is minted
-            # ONLY by _api_auth and connection.py needs it for every API call. Run it
-            # so this path completes with usable auth headers instead of empty ones.
-            await self._api_auth()
+            try:
+                login_url = await retry_transport(budget, "introduce", self._introduce)
+                redirect = await self._handle_redirects(login_url)
+                await retry_transport(
+                    budget, "login_page", lambda: self._open_login_page(redirect)
+                )
+                url = await self._login()
+                await self._get_token(url)
+                await retry_transport(budget, "api_auth", self._api_auth)
+            except _NoAuthNeeded:
+                # The authorize page already carried the OAuth tokens (a still-valid
+                # SSO cookie), so the login steps are skipped -- but cognito_token is
+                # minted ONLY by _api_auth and connection.py needs it for every API
+                # call. Run it so this path completes with usable auth headers
+                # instead of empty ones.
+                await retry_transport(budget, "api_auth", self._api_auth)
+        finally:
+            self._retry_budget = None
         # Login complete: clear the phase so a LATER non-auth failure (e.g. a poll) is
         # not mis-attributed to the last auth step.
         self._current_phase = ""
@@ -391,12 +671,18 @@ class HonAuth:
                 "Referer": context.referer,
             }
         )
+        started = self._diagnostic_request(
+            phase, "POST", "mfa_remoting"
+        )
+        self._auth_trace.payload(phase, "mfa_remoting")
         async with self._session.post(
             context.host + APEXREMOTE_PATH, json=payload, headers=headers
         ) as resp:
             status = resp.status
             text = await resp.text()
+            self._diagnostic_response(phase, resp, text, started)
         entry = parse_remoting_result(text)
+        self._diagnostic_json(phase, entry)
         # Leak-proof structural summary (result/statusCode/type/key-names only).
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug(
@@ -435,6 +721,10 @@ class HonAuth:
             raise MFACodeInvalid("mfa: invalid verification code")
         # finishFlowCall: VF form postback (ViewState + the commandLink marker).
         self._phase("mfa_finish")
+        started = self._diagnostic_request(
+            "mfa_finish", "POST", "progressive_login"
+        )
+        self._auth_trace.payload("mfa_finish", "mfa_finish")
         async with self._session.post(
             context.vf_action,
             data=build_finish_body(context),
@@ -445,7 +735,10 @@ class HonAuth:
                 }
             ),
         ) as resp:
-            await resp.text()  # consume the postback response (redirect to retURL)
+            finish_text = await resp.text()
+            self._diagnostic_response(
+                "mfa_finish", resp, finish_text, started
+            )
         await self._resume_tokens_after_2fa()
         await self._api_auth()
         self._current_phase = ""  # 2FA login complete
@@ -459,8 +752,13 @@ class HonAuth:
         last fragment field is captured)."""
         self._phase("resume_token")
         url = build_authorize_url(generate_nonce())
+        started = self._diagnostic_request(
+            "resume_token", "GET", "authorize"
+        )
         async with self._session.get(url, headers=self._ua()) as resp:
             text = await resp.text()
+            self._diagnostic_response("resume_token", resp, text, started)
+            self._diagnostic_page("resume_token", url, text)
         self._expires = datetime.now(timezone.utc)
         # Extract the done-URL FIRST and parse only it (mirrors the live-validated probe).
         # Parsing the whole page first would let a stray `*_token=...&` substring elsewhere
@@ -468,9 +766,11 @@ class HonAuth:
         # parse_token_fragment reads the last field with no trailing '&' (RFC 6749).
         done_url = extract_login_url(text)
         if done_url and "access_token" in done_url:
-            tokens = parse_token_fragment(done_url)
+            token_source = done_url
         else:
-            tokens = parse_token_fragment(text)
+            token_source = text
+        self._diagnostic_tokens("resume_token", token_source)
+        tokens = parse_token_fragment(token_source)
         if not tokens.complete:
             self._phase("resume_token", done_url=bool(done_url), tokens_complete=False)
             raise MFATokenAfterVerifyFailed("mfa: token retrieval failed after verification")
@@ -487,6 +787,10 @@ class HonAuth:
             "refresh_token": self.refresh_token,
             "grant_type": "refresh_token",
         }
+        started = self._diagnostic_request(
+            "refresh", "POST", "token_refresh"
+        )
+        self._auth_trace.payload("refresh", "token_refresh")
         async with self._session.post(
             # Send the refresh_token in the FORM BODY (data=), not the query string
             # (params=). With params= it lands in the request URL, where it leaks into
@@ -496,8 +800,11 @@ class HonAuth:
             f"{AUTH_API}/services/oauth2/token", data=params, headers=self._ua()
         ) as resp:
             if resp.status >= 400:
+                self._diagnostic_response("refresh", resp, b"", started)
                 return False
             data = await resp.json(content_type=None)
+            self._diagnostic_response("refresh", resp, b"", started)
+            self._diagnostic_json("refresh", data)
         # A malformed 2xx (no id_token/access_token) must NOT raise KeyError: treat
         # it as a failed refresh so the caller falls back to authenticate(). Do not
         # touch _expires before validating, or a fake refresh would mask expiry.

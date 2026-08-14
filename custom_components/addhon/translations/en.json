@@ -6,14 +6,22 @@
         "description": "Enter your Haier hOn app credentials. Same email and password you use on the mobile app.\n\n⚠️ This integration is unofficial and uses the hOn API without authorization from Haier.",
         "data": {
           "email": "Email",
-          "password": "Password"
+          "password": "Password",
+          "auth_diagnostics": "Collect sign-in diagnostics"
+        },
+        "data_description": {
+          "auth_diagnostics": "If sign-in fails, record detailed sanitized technical information in the Home Assistant log. Credentials, tokens, and personal data are not included."
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate your hOn account",
         "description": "The credentials for {email} are no longer valid. Enter the password again.",
         "data": {
-          "password": "Password"
+          "password": "Password",
+          "auth_diagnostics": "Collect sign-in diagnostics"
+        },
+        "data_description": {
+          "auth_diagnostics": "If sign-in fails, record detailed sanitized technical information in the Home Assistant log. Credentials, tokens, and personal data are not included."
         }
       },
       "2fa": {
@@ -39,8 +47,11 @@
       "mfa_send_failed": "Could not send the verification code. Wait a moment and tap Resend. ({error_code})",
       "mfa_service_error": "The verification service had a temporary problem. Try the code again in a moment. ({error_code})",
       "mfa_token_after_verify_failed": "Your code was accepted but sign-in could not finish. Please start the login again. ({error_code})",
+      "account_action_required": "Your password was accepted, but hOn is asking for an extra step on the account (for example a new password to set, or terms to accept). Sign in on the hOn website or app, complete the requested step, then try again here. ({error_code})",
       "appliance_list_failed": "Could not fetch your appliance list. ({error_code})",
       "network_timeout": "Timed out contacting the hOn servers. Check your internet connection. ({error_code})",
+      "auth_timeout": "Timed out while signing in to hOn. The servers are slow or your connection dropped. Try again. ({error_code})",
+      "refresh_timeout": "Timed out while refreshing the hOn session. Try again in a moment. ({error_code})",
       "dns_failure": "Could not resolve the hOn servers (DNS). Check your network and DNS. ({error_code})",
       "tls_failure": "TLS/certificate error contacting hOn. Check the system date/time and network. ({error_code})",
       "connection_refused": "Could not connect to the hOn servers (refused, reset or unreachable). Check your network and firewall. ({error_code})",
@@ -60,14 +71,16 @@
   "options": {
     "step": {
       "init": {
-        "title": "Debug options",
+        "title": "Options",
         "data": {
           "enable_debug": "Enable debug logging",
-          "enable_mqtt_debug": "Enable MQTT realtime debug"
+          "enable_mqtt_debug": "Enable MQTT realtime debug",
+          "enable_experimental": "Enable experimental entities"
         },
         "data_description": {
           "enable_debug": "Raise this integration's log level to DEBUG (sign in, device discovery, polling, commands). Turn off to return to Home Assistant's configured level. MQTT realtime noise stays suppressed unless its own toggle is on.",
-          "enable_mqtt_debug": "Make the MQTT realtime channel very verbose. Normally keep this off; it only covers this integration's MQTT logger, not the underlying AWS IoT libraries (use Home Assistant's logger config for those)."
+          "enable_mqtt_debug": "Make the MQTT realtime channel very verbose. Normally keep this off; it only covers this integration's MQTT logger, not the underlying AWS IoT libraries (use Home Assistant's logger config for those).",
+          "enable_experimental": "Add entities whose meaning is based on incomplete evidence: they may be wrong, may be renamed, and may disappear again. They stay unavailable for any reading that has not been confirmed. Changing this reloads the integration."
         }
       }
     }
@@ -429,6 +442,24 @@
           "holding": "Holding"
         }
       },
+      "filter_life": {
+        "name": "Filter life"
+      },
+      "filter_cleaning": {
+        "name": "Pre-filter life"
+      },
+      "total_work_time": {
+        "name": "Total work time"
+      },
+      "pollen_level": {
+        "name": "Pollen level"
+      },
+      "air_quality_label": {
+        "name": "Air quality rating (experimental)",
+        "state": {
+          "good": "Good"
+        }
+      },
       "debug_status": {
         "name": "Debug status",
         "state": {
@@ -612,6 +643,15 @@
       "indicator_light": {
         "name": "Indicator light"
       },
+      "eco_active": {
+        "name": "Eco active"
+      },
+      "problem": {
+        "name": "Problem"
+      },
+      "co_alarm": {
+        "name": "Carbon monoxide indication (experimental, not a certified detector)"
+      },
       "update_ok": {
         "name": "Update OK"
       },
@@ -670,6 +710,9 @@
       },
       "child_lock": {
         "name": "Child lock"
+      },
+      "touch_tone": {
+        "name": "Touch tone"
       },
       "human_sensing": {
         "name": "Presence sensor"
@@ -780,11 +823,35 @@
       },
       "sterilization_temp": {
         "name": "Anti-legionella temperature"
+      },
+      "aroma_time_on": {
+        "name": "Aroma on time (experimental)"
+      },
+      "aroma_time_off": {
+        "name": "Aroma off time (experimental)"
       }
     },
     "select": {
       "program": {
         "name": "Program"
+      },
+      "aroma": {
+        "name": "Aroma",
+        "state": {
+          "off": "Off",
+          "soft": "Soft",
+          "mid": "Medium",
+          "h_biotics": "H-Biotics",
+          "custom": "Custom"
+        }
+      },
+      "panel_light": {
+        "name": "Panel light",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "high": "High"
+        }
       },
       "ref_program": {
         "name": "Program",
@@ -931,14 +998,25 @@
       "reset_debug": {
         "name": "Reset debug"
       }
+    },
+    "fan": {
+      "purifier": {
+        "name": "Purifier"
+      }
     }
   },
   "exceptions": {
     "appliance_or_client_unavailable": {
       "message": "The appliance or client is not available."
     },
+    "aroma_custom_not_active": {
+      "message": "The aroma timings can only be changed while the custom aroma mode is running."
+    },
     "command_error": {
       "message": "Command failed: {error}"
+    },
+    "command_rejected": {
+      "message": "The hOn service did not accept the command."
     },
     "invalid_setpoint": {
       "message": "Value {value} is not allowed (allowed: {allowed})."
@@ -948,6 +1026,9 @@
     },
     "program_not_supported": {
       "message": "Program \"{program}\" is not supported by this device."
+    },
+    "purifier_not_running": {
+      "message": "The purifier must be confirmed running to change this."
     },
     "refresh_after_command_failed": {
       "message": "Refresh after the command failed."
@@ -960,6 +1041,9 @@
     },
     "swing_position_not_allowed": {
       "message": "Swing position {position} is not allowed (allowed: {allowed})."
+    },
+    "speed_not_supported": {
+      "message": "This purifier runs in discrete modes and has no fan speed. Set a preset mode instead of a percentage."
     }
   }
 }

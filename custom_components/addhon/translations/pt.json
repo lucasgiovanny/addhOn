@@ -6,14 +6,22 @@
         "description": "Introduza as credenciais da app Haier hOn. O mesmo e-mail e palavra-passe que usa na aplicação.\n\n⚠️ Esta integração não é oficial e usa a API hOn sem autorização da Haier.",
         "data": {
           "email": "E-mail",
-          "password": "Palavra-passe"
+          "password": "Palavra-passe",
+          "auth_diagnostics": "Recolher diagnósticos de início de sessão"
+        },
+        "data_description": {
+          "auth_diagnostics": "Se o início de sessão falhar, regista no registo do Home Assistant informação técnica detalhada e higienizada. Credenciais, tokens e dados pessoais não são incluídos."
         }
       },
       "reauth_confirm": {
         "title": "Reautentique a sua conta hOn",
         "description": "As credenciais de {email} já não são válidas. Introduza a palavra-passe novamente.",
         "data": {
-          "password": "Palavra-passe"
+          "password": "Palavra-passe",
+          "auth_diagnostics": "Recolher diagnósticos de início de sessão"
+        },
+        "data_description": {
+          "auth_diagnostics": "Se o início de sessão falhar, regista no registo do Home Assistant informação técnica detalhada e higienizada. Credenciais, tokens e dados pessoais não são incluídos."
         }
       },
       "2fa": {
@@ -39,8 +47,11 @@
       "mfa_send_failed": "Não foi possível enviar o código de verificação. Aguarde um momento e toque em Reenviar. ({error_code})",
       "mfa_service_error": "O serviço de verificação teve um problema temporário. Tente o código novamente em instantes. ({error_code})",
       "mfa_token_after_verify_failed": "O seu código foi aceite, mas o início de sessão não pôde ser concluído. Inicie sessão novamente. ({error_code})",
+      "account_action_required": "A palavra-passe foi aceite, mas a hOn está a pedir um passo adicional na conta (por exemplo, definir uma nova palavra-passe ou aceitar termos). Inicie sessão no site ou na app hOn, conclua o passo pedido e tente novamente aqui. ({error_code})",
       "appliance_list_failed": "Não foi possível obter a sua lista de eletrodomésticos. ({error_code})",
       "network_timeout": "Tempo esgotado ao contactar os servidores hOn. Verifique a sua ligação à internet. ({error_code})",
+      "auth_timeout": "O início de sessão na hOn excedeu o tempo limite. Os servidores estão lentos ou a ligação caiu. Tente novamente. ({error_code})",
+      "refresh_timeout": "A atualização da sessão hOn excedeu o tempo limite. Tente novamente dentro de momentos. ({error_code})",
       "dns_failure": "Não foi possível resolver os servidores hOn (DNS). Verifique a sua rede e o DNS. ({error_code})",
       "tls_failure": "Erro de TLS/certificado ao contactar o hOn. Verifique a data/hora do sistema e a rede. ({error_code})",
       "connection_refused": "Não foi possível ligar aos servidores hOn (ligação recusada, reiniciada ou inacessível). Verifique a sua rede e firewall. ({error_code})",
@@ -63,11 +74,13 @@
         "title": "Opções de depuração",
         "data": {
           "enable_debug": "Ativar registo de depuração",
-          "enable_mqtt_debug": "Ativar depuração MQTT em tempo real"
+          "enable_mqtt_debug": "Ativar depuração MQTT em tempo real",
+          "enable_experimental": "Ativar entidades experimentais"
         },
         "data_description": {
           "enable_debug": "Eleva o nível de registo desta integração para DEBUG (início de sessão, descoberta de dispositivos, polling, comandos). Desative para voltar ao nível configurado no Home Assistant. O ruído do MQTT em tempo real continua suprimido, a menos que o respetivo botão esteja ativado.",
-          "enable_mqtt_debug": "Torna o canal MQTT em tempo real muito verboso. Normalmente mantenha desativado; cobre apenas o logger MQTT desta integração, não as bibliotecas AWS IoT subjacentes (para essas, use a configuração de logger do Home Assistant)."
+          "enable_mqtt_debug": "Torna o canal MQTT em tempo real muito verboso. Normalmente mantenha desativado; cobre apenas o logger MQTT desta integração, não as bibliotecas AWS IoT subjacentes (para essas, use a configuração de logger do Home Assistant).",
+          "enable_experimental": "Adiciona entidades cujo significado se baseia em evidência incompleta: podem estar erradas, ser renomeadas e voltar a desaparecer. Ficam indisponíveis para qualquer leitura que não tenha sido confirmada. Alterar isto recarrega a integração."
         }
       }
     }
@@ -429,6 +442,24 @@
           "holding": "A manter"
         }
       },
+      "filter_life": {
+        "name": "Vida útil do filtro"
+      },
+      "filter_cleaning": {
+        "name": "Vida útil do pré-filtro"
+      },
+      "total_work_time": {
+        "name": "Tempo total de funcionamento"
+      },
+      "pollen_level": {
+        "name": "Nível de pólen"
+      },
+      "air_quality_label": {
+        "name": "Avaliação da qualidade do ar (experimental)",
+        "state": {
+          "good": "Boa"
+        }
+      },
       "debug_status": {
         "name": "Estado de depuração",
         "state": {
@@ -612,6 +643,15 @@
       "indicator_light": {
         "name": "Luz indicadora"
       },
+      "eco_active": {
+        "name": "Eco ativo"
+      },
+      "problem": {
+        "name": "Problema"
+      },
+      "co_alarm": {
+        "name": "Indicação de monóxido de carbono (experimental, não é um detetor certificado)"
+      },
       "update_ok": {
         "name": "Atualização OK"
       },
@@ -670,6 +710,9 @@
       },
       "child_lock": {
         "name": "Bloqueio para crianças"
+      },
+      "touch_tone": {
+        "name": "Som das teclas"
       },
       "human_sensing": {
         "name": "Sensor de presença"
@@ -780,11 +823,35 @@
       },
       "sterilization_temp": {
         "name": "Temperatura anti-legionela"
+      },
+      "aroma_time_on": {
+        "name": "Tempo de aroma ligado (experimental)"
+      },
+      "aroma_time_off": {
+        "name": "Tempo de aroma desligado (experimental)"
       }
     },
     "select": {
       "program": {
         "name": "Programa"
+      },
+      "aroma": {
+        "name": "Aroma",
+        "state": {
+          "off": "Desligado",
+          "soft": "Suave",
+          "mid": "Médio",
+          "h_biotics": "H-Biotics",
+          "custom": "Personalizado"
+        }
+      },
+      "panel_light": {
+        "name": "Luz do painel",
+        "state": {
+          "off": "Desligada",
+          "low": "Baixa",
+          "high": "Alta"
+        }
       },
       "ref_program": {
         "name": "Programa",
@@ -931,14 +998,25 @@
       "reset_debug": {
         "name": "Repor depuração"
       }
+    },
+    "fan": {
+      "purifier": {
+        "name": "Purificador"
+      }
     }
   },
   "exceptions": {
     "appliance_or_client_unavailable": {
       "message": "O eletrodoméstico ou o cliente não está disponível."
     },
+    "aroma_custom_not_active": {
+      "message": "Os tempos do aroma só podem ser alterados enquanto o modo de aroma personalizado está em funcionamento."
+    },
     "command_error": {
       "message": "Falha no comando: {error}"
+    },
+    "command_rejected": {
+      "message": "O serviço hOn não aceitou o comando."
     },
     "invalid_setpoint": {
       "message": "O valor {value} não é permitido (permitidos: {allowed})."
@@ -948,6 +1026,9 @@
     },
     "program_not_supported": {
       "message": "O programa \"{program}\" não é suportado por este dispositivo."
+    },
+    "purifier_not_running": {
+      "message": "O purificador tem de estar confirmadamente em funcionamento para que isto seja alterado."
     },
     "refresh_after_command_failed": {
       "message": "A atualização após o comando falhou."
@@ -960,6 +1041,9 @@
     },
     "swing_position_not_allowed": {
       "message": "A posição de oscilação {position} não é permitida (permitidas: {allowed})."
+    },
+    "speed_not_supported": {
+      "message": "Este purificador funciona em modos discretos e não tem velocidade de ventilação. Defina um modo predefinido em vez de uma percentagem."
     }
   }
 }

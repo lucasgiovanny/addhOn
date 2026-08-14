@@ -17,6 +17,7 @@ false "sent".
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
@@ -31,6 +32,18 @@ from .rules import HonRuleSet
 import logging
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _CanonicalExactPayload(dict[str, str | float]):
+    __slots__ = ("command",)
+
+    def __init__(
+        self,
+        command: HonCommand,
+        params: Mapping[str, str | float],
+    ) -> None:
+        super().__init__(params)
+        self.command = command
 
 
 class HonCommand:
@@ -50,6 +63,10 @@ class HonCommand:
         self._parameters: dict[str, HonParameter] = {}
         self._data: dict[str, Any] = {}
         self._rules: list[HonRuleSet] = []
+        # Set only when this category is deliberately chosen (see the `category` setter
+        # and `mark_selected_explicitly`). Declared here rather than created on first
+        # write so the state is explicit and `__copy__` can reset it.
+        self._selected_explicitly = False
         attributes.pop("description", "")
         attributes.pop("protocolType", "")
         self._load_parameters(attributes)
@@ -69,6 +86,14 @@ class HonCommand:
         new = self.__class__.__new__(self.__class__)
         new.__dict__.update(self.__dict__)
         new._parameters = {name: copy(param) for name, param in self._parameters.items()}
+        # A copy has NOT been selected, whatever the original was. `_add_favourites`
+        # copies a base program category, so without this a favourite could inherit the
+        # flag and `HonParameterProgram.name_for_code` would trust it as the running
+        # program. Unreachable today only because `_add_favourites` runs before
+        # `_recover_last_command_states` and nothing is marked yet -- an ordering, not an
+        # invariant. Isolating it here matches what this method already does for
+        # `_parameters`, the triggers and the rule sets.
+        new._selected_explicitly = False
         # A shallow-copied parameter still SHARES its `_triggers` table with the base, and
         # every rule callback in it closes over THIS command -- so setting a value on the
         # copy would fire rules that mutate the base's parameters (the exact corruption the
@@ -188,12 +213,23 @@ class HonCommand:
                 params[key] = parameter.value
         return await self.send_parameters(params)
 
-    async def send_parameters(self, params: dict[str, str | float]) -> bool:
-        ancillary_params = self.parameter_groups.get("ancillaryParameters", {})
+    async def _send_parameters(
+        self,
+        params: dict[str, str | float],
+        *,
+        sync_shadow: bool,
+    ) -> bool:
+        if not (
+            isinstance(params, _CanonicalExactPayload)
+            and params.command is self
+        ):
+            params = self.canonical_exact_payload(params)
+        ancillary_params = dict(
+            self.parameter_groups.get("ancillaryParameters", {})
+        )
         ancillary_params.pop("programRules", None)
-        if "prStr" in params:
-            params["prStr"] = self._category_name.upper()
-        self.appliance.sync_command_to_params(self.name)
+        if sync_shadow:
+            self.appliance.sync_command_to_params(self.name)
         result = await self.api.send_command(
             self._appliance,
             self._name,
@@ -205,6 +241,21 @@ class HonCommand:
             _LOGGER.error("Command rejected by cloud: %s", self._name)
             raise ApiError("Can't send command")
         return result
+
+    async def send_parameters(self, params: dict[str, str | float]) -> bool:
+        return await self._send_parameters(params, sync_shadow=True)
+
+    def canonical_exact_payload(
+        self,
+        params: Mapping[str, str | float],
+    ) -> dict[str, str | float]:
+        payload = _CanonicalExactPayload(self, params)
+        if "prStr" in payload:
+            payload["prStr"] = self._category_name.upper()
+        return payload
+
+    async def send_exact(self, params: dict[str, str | float]) -> bool:
+        return await self._send_parameters(params, sync_shadow=False)
 
     @property
     def categories(self) -> dict[str, "HonCommand"]:
@@ -219,7 +270,29 @@ class HonCommand:
     @category.setter
     def category(self, category: str) -> None:
         if category in self.categories:
-            self._appliance.commands[self._name] = self.categories[category]
+            selected = self.categories[category]
+            # Record that THIS category was deliberately chosen (a program set by the
+            # user, or the last-started one recovered from the command history), as
+            # opposed to being the schema's first entry that a fresh load leaves active
+            # by default. `HonParameterProgram.name_for_code` needs to tell the two
+            # apart: a default category sharing the reported prCode is a coincidence,
+            # not evidence of what is running. See `selected_explicitly`.
+            selected.mark_selected_explicitly()
+            self._appliance.commands[self._name] = selected
+
+    def mark_selected_explicitly(self) -> None:
+        """Flag this category command as deliberately selected (see the category setter).
+
+        Lives on the CATEGORY command rather than on the program parameter because a
+        selection swaps the whole command object: a flag on the pre-swap parameter would
+        not survive, while this one travels with the category that was picked.
+        """
+        self._selected_explicitly = True
+
+    @property
+    def selected_explicitly(self) -> bool:
+        """True if this category was chosen, rather than left active by default."""
+        return self._selected_explicitly
 
     @property
     def setting_keys(self) -> list[str]:

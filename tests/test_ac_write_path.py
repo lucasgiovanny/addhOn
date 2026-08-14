@@ -68,7 +68,10 @@ class _CoordinatorEntity:
         return self.coordinator.last_update_success
 
 
-_uc.CoordinatorEntity = _CoordinatorEntity
+# getattr-guarded: conftest installs a COMPLETE CoordinatorEntity (this one lacks
+# unique_id and _handle_coordinator_update), and whichever class is installed first
+# becomes the permanent base for every entity in the run.
+_uc.CoordinatorEntity = getattr(_uc, "CoordinatorEntity", _CoordinatorEntity)
 
 from custom_components.addhon import ac_command, climate, switch  # noqa: E402
 from custom_components.addhon.const import (  # noqa: E402
@@ -1018,6 +1021,33 @@ class AcCommandUnitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {"windDirectionVertical": "8", "windDirectionHorizontal": "3"}, settings.sent
         )
+
+    async def test_pre_send_payload_matches_legacy_golden(self) -> None:
+        settings = RecordingCommand(
+            {
+                "windDirectionVertical": Param("0", values=["2", "4"]),
+                "windDirectionHorizontal": Param("9", values=["0", "3"]),
+                "tempSel": Param("21"),
+            }
+        )
+        appliance = _ac({"settings": settings})["ac-1"]["appliance"]
+
+        await ac_command.async_send_settings(
+            FakeHass(),
+            FakeClient(),
+            appliance,
+            {"windDirectionVertical": "8", "tempSel": "23"},
+        )
+
+        self.assertEqual(
+            {
+                "windDirectionVertical": "8",
+                "windDirectionHorizontal": "3",
+                "tempSel": "23",
+            },
+            settings.sent,
+        )
+        self.assertEqual(1, settings.send_calls)
 
     async def test_sanitize_skips_when_allowed_empty(self) -> None:
         # A wind-direction param with no enum values must be left untouched, never

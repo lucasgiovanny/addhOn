@@ -15,6 +15,7 @@ Pure file/JSON checks: no Home Assistant import required.
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -69,9 +70,12 @@ class TranslationsContentTest(unittest.TestCase):
 
     def test_user_step_exposes_credentials(self) -> None:
         for lang in LANGS:
-            data = self.data[lang]["config"]["step"]["user"]["data"]
+            step = self.data[lang]["config"]["step"]["user"]
+            data = step["data"]
             self.assertIn("email", data)
             self.assertIn("password", data)
+            self.assertIn("auth_diagnostics", data)
+            self.assertIn("auth_diagnostics", step["data_description"])
 
     def test_error_keys_present(self) -> None:
         for lang in LANGS:
@@ -103,6 +107,8 @@ class TranslationsContentTest(unittest.TestCase):
         for lang in LANGS:
             step = self.data[lang]["config"]["step"]["reauth_confirm"]
             self.assertIn("password", step["data"])
+            self.assertIn("auth_diagnostics", step["data"])
+            self.assertIn("auth_diagnostics", step["data_description"])
             self.assertIn(
                 "{email}",
                 step["description"],
@@ -161,6 +167,344 @@ class TranslationsMatchConfigFlowTest(unittest.TestCase):
         # the only abort reason this code passes explicitly.
         self.assertIn('reason="reauth_account_mismatch"', self.source)
         self.assertIn("reauth_account_mismatch", self.en["abort"])
+
+
+class OptionsScreenTranslationTest(unittest.TestCase):
+    """Every option the Configure screen RENDERS must be labelled and described.
+
+    The entity-key parity tests do not reach here: `options.step.init.data` is a
+    config-flow schema, not an entity translation_key, so an unlabelled toggle would
+    render as a raw key like `enable_experimental` with no test complaining."""
+
+    OPTION_KEYS = ("enable_debug", "enable_mqtt_debug", "enable_experimental")
+
+    def setUp(self) -> None:
+        self.data = {lang: _load(lang) for lang in LANGS}
+        self.source = (COMPONENT / "config_flow.py").read_text(encoding="utf-8")
+
+    def test_every_rendered_option_is_labelled_and_described(self) -> None:
+        for lang in LANGS:
+            step = self.data[lang]["options"]["step"]["init"]
+            self.assertEqual(
+                set(self.OPTION_KEYS), set(step["data"]), f"{lang}: option labels"
+            )
+            self.assertEqual(
+                set(self.OPTION_KEYS),
+                set(step["data_description"]),
+                f"{lang}: option descriptions",
+            )
+
+    def test_the_option_list_matches_the_flow_schema(self) -> None:
+        # A key added to the schema without a label, or a label for a key the screen
+        # no longer renders, both fail here.
+        rendered = {
+            key
+            for key in self.OPTION_KEYS
+            if f"CONF_{key.upper()}," in self.source or f"CONF_{key.upper()}\n" in self.source
+        }
+        self.assertEqual(set(self.OPTION_KEYS), rendered)
+
+    def test_the_experimental_description_warns_about_the_evidence(self) -> None:
+        """The toggle creates entities whose meaning is inferred from a single
+        observation. The description must say so, or a user reads a wrong value as
+        fact."""
+        expected = {
+            "en": ("incomplete evidence",),
+            "it": ("indizi incompleti",),
+            "pt": ("evidência incompleta",),
+            "pt-BR": ("evidências incompletas",),
+        }
+        for lang in LANGS:
+            text = self.data[lang]["options"]["step"]["init"]["data_description"][
+                "enable_experimental"
+            ]
+            for fragment in expected[lang]:
+                self.assertIn(fragment, text, f"{lang}: {fragment}")
+
+    def test_the_options_title_is_not_debug_only(self) -> None:
+        # The screen carries a non-debug toggle now; a "Debug options" title would
+        # mislabel it.
+        for lang in LANGS:
+            title = self.data[lang]["options"]["step"]["init"]["title"]
+            self.assertNotIn("ebug", title, f"{lang}: {title}")
+
+
+class AirPurifierTranslationTest(unittest.TestCase):
+    """The exact air purifier key set, per platform, in BOTH languages.
+
+    The generic parity tests compare code against JSON and en against it; this pins
+    the LIST itself, so silently dropping an AP entity's label (or adding one for an
+    entity that does not exist) fails here even if code and JSON agree with each
+    other."""
+
+    EXPECTED = {
+        "sensor": {
+            "temp_indoor", "humidity_indoor", "pm25", "pm10", "voc", "air_quality",
+            "fan_speed", "filter_life", "filter_cleaning", "total_work_time",
+            "errors", "co", "pollen_level", "air_quality_label",
+        },
+        "binary_sensor": {"eco_active", "problem", "co_alarm"},
+        "switch": {"child_lock", "touch_tone"},
+        "select": {"aroma", "panel_light"},
+        "number": {"aroma_time_on", "aroma_time_off"},
+        "fan": {"purifier"},
+    }
+
+    def setUp(self) -> None:
+        self.data = {lang: _load(lang) for lang in LANGS}
+
+    def test_every_air_purifier_key_is_named_in_both_languages(self) -> None:
+        for lang in LANGS:
+            entity = self.data[lang]["entity"]
+            for platform, keys in self.EXPECTED.items():
+                present = set(entity.get(platform, {}))
+                missing = keys - present
+                self.assertEqual(set(), missing, f"{lang} entity.{platform}: {missing}")
+                for key in keys:
+                    self.assertTrue(
+                        entity[platform][key].get("name"),
+                        f"{lang} entity.{platform}.{key}.name is empty",
+                    )
+
+    def test_the_purifier_platforms_exist_at_all(self) -> None:
+        # A whole missing platform block would leave the generic collector nothing
+        # to compare and pass vacuously. `light` is deliberately absent: the panel
+        # has three steps and no brightness axis, so it is a select.
+        for lang in LANGS:
+            entity = self.data[lang]["entity"]
+            for platform in ("fan", "select", "switch"):
+                self.assertIn(platform, entity, f"{lang}: {platform}")
+            self.assertNotIn("light", entity, lang)
+
+    def test_the_aroma_states_are_labelled(self) -> None:
+        for lang in LANGS:
+            states = self.data[lang]["entity"]["select"]["aroma"]["state"]
+            self.assertEqual(
+                {"off", "soft", "mid", "h_biotics", "custom"}, set(states)
+            )
+
+    def test_the_confirmed_air_quality_label_is_translated(self) -> None:
+        for lang in LANGS:
+            states = self.data[lang]["entity"]["sensor"]["air_quality_label"]["state"]
+            self.assertEqual({"good"}, set(states))
+
+    def test_the_co_entity_denies_being_a_safety_detector(self) -> None:
+        """The name is the ONLY place a user sees this. HA gives a binary sensor no
+        description field, so the disclaimer has to live in the label."""
+        fragments = {
+            "en": "not a certified",
+            "it": "un rilevatore certificato",
+            "pt": "não é um detetor certificado",
+            "pt-BR": "não é um detector certificado",
+        }
+        for lang in LANGS:
+            name = self.data[lang]["entity"]["binary_sensor"]["co_alarm"]["name"]
+            self.assertIn(fragments[lang], name, f"{lang}: {name}")
+
+    def test_experimental_entities_say_so_in_their_name(self) -> None:
+        """They may be wrong or disappear; the label is what tells the user."""
+        # Portuguese reuses the English word, so the same marker covers both variants.
+        marker = {"en": "experimental", "it": "sperimentale",
+                  "pt": "experimental", "pt-BR": "experimental"}
+        experimental = {
+            "sensor": ("air_quality_label",),
+            "binary_sensor": ("co_alarm",),
+            "number": ("aroma_time_on", "aroma_time_off"),
+        }
+        for lang in LANGS:
+            for platform, keys in experimental.items():
+                for key in keys:
+                    name = self.data[lang]["entity"][platform][key]["name"].lower()
+                    self.assertIn(marker[lang], name, f"{lang} {platform}.{key}: {name}")
+
+    def test_standard_air_purifier_entities_do_not_claim_to_be_experimental(
+        self,
+    ) -> None:
+        # Portuguese reuses the English word, so the same marker covers both variants.
+        marker = {"en": "experimental", "it": "sperimentale",
+                  "pt": "experimental", "pt-BR": "experimental"}
+        standard = {
+            "sensor": self.EXPECTED["sensor"] - {"air_quality_label"},
+            "binary_sensor": {"eco_active", "problem"},
+            "switch": self.EXPECTED["switch"],
+            "select": self.EXPECTED["select"],
+            "fan": self.EXPECTED["fan"],
+        }
+        for lang in LANGS:
+            for platform, keys in standard.items():
+                for key in keys:
+                    name = self.data[lang]["entity"][platform][key]["name"].lower()
+                    self.assertNotIn(marker[lang], name, f"{lang} {platform}.{key}")
+
+    def test_no_air_purifier_label_leaks_implementation_detail(self) -> None:
+        """Entity names must not mention parameters, schemas, the decompiled app or
+        debug mechanics: they are what a normal user reads in the dashboard."""
+        forbidden = (
+            "machmode", "aromastatus", "lightstatus", "onoffstatus", "colevel",
+            "schema", "apk", "decomp", "mqtt", "debug", "dispatcher",
+        )
+        for lang in LANGS:
+            entity = self.data[lang]["entity"]
+            for platform, keys in self.EXPECTED.items():
+                for key in keys:
+                    blob = json.dumps(entity[platform][key], ensure_ascii=False).lower()
+                    for token in forbidden:
+                        self.assertNotIn(
+                            token, blob, f"{lang} entity.{platform}.{key}: {token}"
+                        )
+
+    # Words Italian title case leaves lowercase (articles, prepositions, elisions).
+    _IT_MINOR = frozenset({"di", "del", "della", "dell", "delle", "dei", "al", "in"})
+
+    def _it_style(self, name: str) -> str:
+        # Ignore a trailing parenthetical qualifier: "(sperimentale)" is a status
+        # marker, not part of the entity's name.
+        head = name.split("(")[0]
+        words = [
+            word
+            for word in re.findall(r"[^\W\d_]+", head, re.UNICODE)
+            if len(word) > 2 and word.lower() not in self._IT_MINOR
+        ]
+        if len(words) < 2:
+            return "single"
+        capitalized = sum(1 for word in words[1:] if word[0].isupper())
+        if capitalized == len(words) - 1:
+            return "title"
+        return "sentence" if capitalized == 0 else "mixed"
+
+    def test_the_italian_air_purifier_labels_share_one_capitalization_style(
+        self,
+    ) -> None:
+        """The purifier's entities sit next to each other on one dashboard, so a
+        mix of "Durata Filtro" and "durata filtro" reads as a bug. The rest of the
+        file is not touched by this: the AP block only has to be internally
+        consistent."""
+        styles: dict[str, list[str]] = {}
+        entity = self.data["it"]["entity"]
+        for platform, keys in self.EXPECTED.items():
+            for key in keys:
+                name = entity[platform][key]["name"]
+                style = self._it_style(name)
+                if style == "single":
+                    continue
+                styles.setdefault(style, []).append(f"{platform}.{key}: {name}")
+        self.assertEqual(
+            ["title"], sorted(styles), f"mixed capitalization styles: {styles}"
+        )
+
+    def test_the_english_air_purifier_labels_start_capitalized(self) -> None:
+        entity = self.data["en"]["entity"]
+        for platform, keys in self.EXPECTED.items():
+            for key in keys:
+                name = entity[platform][key]["name"]
+                self.assertTrue(name[0].isupper(), f"en {platform}.{key}: {name}")
+
+    def test_the_two_filter_labels_are_symmetric(self) -> None:
+        """Both report a REMAINING percentage. An asymmetric pair ("Filter life" vs
+        "Pre-filter cleaning") reads as one gauge and one alarm.
+
+        Overlap is the right rule HERE and only here: these two read different
+        attributes and must stay distinguishable, so they have to share a register
+        without naming the same thing. Entities that read the SAME attribute are held
+        to equality instead, by SharedAttributeNamingTest in
+        test_air_purifier_entities.py, because overlap passed the truncated-referent
+        bug that test was written for.
+        """
+        for lang in LANGS:
+            sensors = self.data[lang]["entity"]["sensor"]
+            main = sensors["filter_life"]["name"]
+            pre = sensors["filter_cleaning"]["name"]
+            self.assertNotEqual(main, pre)
+            shared = set(main.lower().split()) & set(pre.lower().split())
+            self.assertTrue(shared, f"{lang}: {main!r} / {pre!r} share no wording")
+
+    def test_the_aroma_timing_exception_is_translated(self) -> None:
+        for lang in LANGS:
+            message = self.data[lang]["exceptions"]["aroma_custom_not_active"][
+                "message"
+            ]
+            self.assertTrue(message)
+            self.assertNotIn("{", message)
+
+    def test_the_stopped_purifier_exception_is_translated(self) -> None:
+        for lang in LANGS:
+            message = self.data[lang]["exceptions"]["purifier_not_running"]["message"]
+            self.assertTrue(message)
+            self.assertNotIn("{", message)
+
+
+class ExceptionKeyParityTest(unittest.TestCase):
+    """Every localized error the code can raise must exist in BOTH languages.
+
+    Nothing checked this before: a `translation_key` with no JSON entry surfaces to
+    the user as the raw key, and only at the moment the error fires.
+
+    Derived by AST rather than by pattern, and over the WHOLE component tree. A
+    textual scan gets this wrong in both directions: keyword order is free, so
+    `translation_placeholders={"error": str(err)}` sitting before `translation_key`
+    hides the raise from any expression that cannot cross a bracket, and a scan
+    limited to the top level would call a key that moved under client/ unused.
+    """
+
+    @staticmethod
+    def _raised_keys() -> dict[str, set[str]]:
+        """{translation_key: {file, ...}} for every raise of a localized error."""
+        import ast
+
+        keys: dict[str, set[str]] = {}
+        for path in sorted(COMPONENT.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Raise) or not isinstance(
+                    node.exc, ast.Call
+                ):
+                    continue
+                for keyword in node.exc.keywords:
+                    if keyword.arg != "translation_key":
+                        continue
+                    if isinstance(keyword.value, ast.Constant) and isinstance(
+                        keyword.value.value, str
+                    ):
+                        keys.setdefault(keyword.value.value, set()).add(
+                            str(path.relative_to(COMPONENT))
+                        )
+                    else:
+                        # A computed key cannot be verified against the JSON, so it
+                        # must not exist: it would reach the user unresolved.
+                        raise AssertionError(
+                            f"{path}:{node.lineno}: non-literal translation_key"
+                        )
+        return keys
+
+    def test_every_raised_key_exists_in_both_languages(self) -> None:
+        keys = self._raised_keys()
+        # Anti-vacuity, by SHAPE rather than by count: one raise with placeholders
+        # after the key, one with placeholders before it would be equally covered,
+        # and the key this test was added for.
+        for expected in (
+            "command_error",
+            "appliance_or_client_unavailable",
+            "purifier_not_running",
+        ):
+            self.assertIn(expected, keys)
+        for lang in LANGS:
+            exceptions = _load(lang).get("exceptions", {})
+            for key, sources in sorted(keys.items()):
+                self.assertIn(key, exceptions, f"{lang}: raised in {sorted(sources)}")
+                self.assertTrue(exceptions[key].get("message"), f"{lang}: {key}")
+
+    def test_no_language_carries_an_unused_exception(self) -> None:
+        """The mirror check: a key no code path raises is dead weight that reads as
+        coverage."""
+        raised = set(self._raised_keys())
+        for lang in LANGS:
+            for key in _load(lang).get("exceptions", {}):
+                self.assertIn(key, raised, f"{lang}: {key} is never raised")
+
+    def test_the_two_languages_declare_the_same_exceptions(self) -> None:
+        declared = {lang: set(_load(lang).get("exceptions", {})) for lang in LANGS}
+        for lang in LANGS[1:]:
+            self.assertEqual(declared[LANGS[0]], declared[lang], lang)
 
 
 if __name__ == "__main__":

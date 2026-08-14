@@ -6,14 +6,22 @@
         "description": "Inserisci le credenziali dell'app Haier hOn. Le stesse email e password che usi sull'app mobile.\n\n⚠️ Questa integrazione è non ufficiale e usa le API hOn in modo non autorizzato da Haier.",
         "data": {
           "email": "Email",
-          "password": "Password"
+          "password": "Password",
+          "auth_diagnostics": "Raccogli diagnostica dell'accesso"
+        },
+        "data_description": {
+          "auth_diagnostics": "In caso di errore registra nei log di Home Assistant dettagli tecnici sanitizzati. Credenziali, token e dati personali non vengono inclusi."
         }
       },
       "reauth_confirm": {
         "title": "Ri-autentica il tuo account hOn",
         "description": "Le credenziali per {email} non sono più valide. Inserisci di nuovo la password.",
         "data": {
-          "password": "Password"
+          "password": "Password",
+          "auth_diagnostics": "Raccogli diagnostica dell'accesso"
+        },
+        "data_description": {
+          "auth_diagnostics": "In caso di errore registra nei log di Home Assistant dettagli tecnici sanitizzati. Credenziali, token e dati personali non vengono inclusi."
         }
       },
       "2fa": {
@@ -39,8 +47,11 @@
       "mfa_send_failed": "Impossibile inviare il codice di verifica. Attendi un momento e premi Reinvia. ({error_code})",
       "mfa_service_error": "Il servizio di verifica ha avuto un problema temporaneo. Riprova il codice tra poco. ({error_code})",
       "mfa_token_after_verify_failed": "Codice accettato ma l'accesso non si è completato. Riprova ad accedere da capo. ({error_code})",
+      "account_action_required": "La password è corretta, ma hOn chiede un passaggio aggiuntivo sull'account (per esempio una nuova password da impostare o condizioni da accettare). Accedi dal sito o dall'app hOn, completa il passaggio richiesto, poi riprova qui. ({error_code})",
       "appliance_list_failed": "Impossibile recuperare la lista dei dispositivi. ({error_code})",
       "network_timeout": "Timeout nel contattare i server hOn. Controlla la connessione internet. ({error_code})",
+      "auth_timeout": "Timeout durante l'accesso a hOn. I server sono lenti o la connessione si è interrotta. Riprova. ({error_code})",
+      "refresh_timeout": "Timeout durante il rinnovo della sessione hOn. Riprova tra poco. ({error_code})",
       "dns_failure": "Impossibile risolvere i server hOn (DNS). Controlla rete e DNS. ({error_code})",
       "tls_failure": "Errore TLS/certificato nel contattare hOn. Controlla data/ora di sistema e rete. ({error_code})",
       "connection_refused": "Impossibile connettersi ai server hOn (rifiutata, interrotta o irraggiungibile). Controlla rete e firewall. ({error_code})",
@@ -60,14 +71,16 @@
   "options": {
     "step": {
       "init": {
-        "title": "Opzioni di debug",
+        "title": "Opzioni",
         "data": {
           "enable_debug": "Abilita log di debug",
-          "enable_mqtt_debug": "Abilita debug MQTT realtime"
+          "enable_mqtt_debug": "Abilita debug MQTT realtime",
+          "enable_experimental": "Abilita entità sperimentali"
         },
         "data_description": {
           "enable_debug": "Porta il livello di log dell'integrazione a DEBUG (accesso, rilevamento dispositivi, polling, comandi). Disattiva per tornare al livello configurato in Home Assistant. Il rumore MQTT realtime resta silenziato a meno che non attivi il suo toggle.",
-          "enable_mqtt_debug": "Rende molto verboso il canale MQTT realtime. Di norma tienilo disattivato; copre solo il logger MQTT di questa integrazione, non le librerie AWS IoT sottostanti (per quelle usa la configurazione logger di Home Assistant)."
+          "enable_mqtt_debug": "Rende molto verboso il canale MQTT realtime. Di norma tienilo disattivato; copre solo il logger MQTT di questa integrazione, non le librerie AWS IoT sottostanti (per quelle usa la configurazione logger di Home Assistant).",
+          "enable_experimental": "Aggiunge entità il cui significato si basa su indizi incompleti: possono essere sbagliate, cambiare nome o sparire. Restano non disponibili per ogni lettura non confermata. Cambiare questa opzione ricarica l'integrazione."
         }
       }
     }
@@ -244,10 +257,10 @@
         "name": "COV"
       },
       "co": {
-        "name": "Monossido di carbonio"
+        "name": "Monossido di Carbonio"
       },
       "air_quality": {
-        "name": "Qualità dell'aria"
+        "name": "Qualità dell'Aria"
       },
       "water_hardness": {
         "name": "Durezza dell'acqua"
@@ -427,6 +440,24 @@
           "ready": "Pronto",
           "heating": "Riscaldamento",
           "holding": "Mantenimento"
+        }
+      },
+      "filter_life": {
+        "name": "Durata Filtro"
+      },
+      "filter_cleaning": {
+        "name": "Durata Prefiltro"
+      },
+      "total_work_time": {
+        "name": "Tempo di Funzionamento Totale"
+      },
+      "pollen_level": {
+        "name": "Livello Polline"
+      },
+      "air_quality_label": {
+        "name": "Giudizio Qualità Aria (sperimentale)",
+        "state": {
+          "good": "Buona"
         }
       },
       "debug_status": {
@@ -612,6 +643,15 @@
       "indicator_light": {
         "name": "Spia"
       },
+      "eco_active": {
+        "name": "Eco Attivo"
+      },
+      "problem": {
+        "name": "Guasto"
+      },
+      "co_alarm": {
+        "name": "Indicazione Monossido di Carbonio (sperimentale, non è un rilevatore certificato)"
+      },
       "update_ok": {
         "name": "Aggiornamento OK"
       },
@@ -670,6 +710,9 @@
       },
       "child_lock": {
         "name": "Blocco Bambini"
+      },
+      "touch_tone": {
+        "name": "Suono Tasti"
       },
       "human_sensing": {
         "name": "Sensore Presenza"
@@ -780,11 +823,35 @@
       },
       "sterilization_temp": {
         "name": "Temperatura anti-legionella"
+      },
+      "aroma_time_on": {
+        "name": "Durata Aroma Attivo (sperimentale)"
+      },
+      "aroma_time_off": {
+        "name": "Durata Aroma Spento (sperimentale)"
       }
     },
     "select": {
       "program": {
         "name": "Programma"
+      },
+      "aroma": {
+        "name": "Aroma",
+        "state": {
+          "off": "Spento",
+          "soft": "Leggero",
+          "mid": "Medio",
+          "h_biotics": "H-Biotics",
+          "custom": "Personalizzato"
+        }
+      },
+      "panel_light": {
+        "name": "Luce Pannello",
+        "state": {
+          "off": "Spenta",
+          "low": "Bassa",
+          "high": "Alta"
+        }
       },
       "ref_program": {
         "name": "Programma",
@@ -931,14 +998,25 @@
       "reset_debug": {
         "name": "Reset debug"
       }
+    },
+    "fan": {
+      "purifier": {
+        "name": "Purificatore"
+      }
     }
   },
   "exceptions": {
+    "aroma_custom_not_active": {
+      "message": "Le durate dell'aroma si possono cambiare solo mentre la modalità aroma personalizzata è in corso."
+    },
     "appliance_or_client_unavailable": {
       "message": "L'apparecchio o il client non è disponibile."
     },
     "command_error": {
       "message": "Comando non riuscito: {error}"
+    },
+    "command_rejected": {
+      "message": "Il servizio hOn non ha accettato il comando."
     },
     "invalid_setpoint": {
       "message": "Il valore {value} non è ammesso (ammessi: {allowed})."
@@ -948,6 +1026,9 @@
     },
     "program_not_supported": {
       "message": "Programma \"{program}\" non supportato da questo apparecchio."
+    },
+    "purifier_not_running": {
+      "message": "Il purificatore deve risultare in funzione per cambiare questa impostazione."
     },
     "refresh_after_command_failed": {
       "message": "Aggiornamento dopo il comando non riuscito."
@@ -960,6 +1041,9 @@
     },
     "swing_position_not_allowed": {
       "message": "Posizione oscillazione {position} non ammessa (ammesse: {allowed})."
+    },
+    "speed_not_supported": {
+      "message": "Questo purificatore funziona a modalità discrete e non ha una velocità della ventola. Imposta una modalità preimpostata invece di una percentuale."
     }
   }
 }

@@ -9,16 +9,45 @@ diagnostics" button for the config entry AND for each device (the latter is wire
 by async_get_device_diagnostics below); no custom button is needed.
 
 Per appliance the dump carries, beyond the bare key list it used to emit:
+  * `model_attributes` - the cloud CATALOGUE metadata for the model
+                    (`applianceModel.attributes`): `zones`, `seriesVersion`,
+                    `doorNumber`, `vtRoom1`/`vtRoom2`, ... It answers what the
+                    appliance IS, which the shadow cannot: the hOn app decides
+                    which fridge zones exist from `zones`.split("|"), not from
+                    which `tempZ*` keys the shadow carries. Without it, a
+                    zone-indexing report (issue #75) needs a round trip to the
+                    reporter before it can even be diagnosed.
   * `attributes`  - the attribute VALUES (telemetry/state), recursively redacted;
   * `commands`    - the writable schema per command param: value + enum + min/max/
                     step + typology, so a maintainer sees the real ranges/options;
   * `coverage`    - the signal: which bare attribute keys and which writable command
                     params the device exposes with NO addhon entity. That is what
                     tells the maintainer what to add.
+  * `future_capabilities` - for the types that declare which raw values they handle
+                    (air purifier today), the values the device declares or is
+                    currently reporting that this code does NOT handle. Passive: it
+                    surfaces a firmware ahead of the integration without any entity
+                    being guessed into existence.
+  * `entities`    - what Home Assistant ACTUALLY has for this appliance, read from
+                    the entity registry and cross-checked against the live state
+                    machine. `coverage` above says what the code could map for this
+                    TYPE; it is computed from static tables and stays identical
+                    whether an entity was created or the whole platform crashed.
+                    That gap is why "the control is missing from Home Assistant"
+                    used to be unanswerable from a dump and needed the log as well.
+
+The entry-level `platforms` block is the same reading one level up, and it exists
+for the case the per-appliance one cannot cover: when setup fails there are no
+appliances at all, and the registry is owned by Home Assistant core, so it is
+still readable. Its per-domain `account` counts are the discriminator between a
+platform that DIED and a device that was legitimately gated out: the two account
+debug entities are created unconditionally, so a domain missing them never ran.
 
 Identity (id/serial/mac and credential-ish keys) is redacted. The device nickname
 (`name`) is kept readable on purpose, to correlate the dump with the physical
-appliance.
+appliance. The entity inventory deliberately emits neither `entity_id` (its
+object_id is the nickname slug) nor a raw `unique_id` (its prefix is the
+appliance id): only the entity domain and the code-authored unique_id suffix.
 """
 from __future__ import annotations
 
@@ -31,6 +60,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     APPLIANCE_AC,
+    APPLIANCE_AP,
     APPLIANCE_WASH_GROUP,
     DOMAIN,
     PROGRAM_PARAM_NAMES,
@@ -146,6 +176,30 @@ _COVERAGE_META_PARAMS = frozenset(
 )
 
 
+# Bounds for the future-capability section. It is passive evidence, not a report:
+# a firmware declaring hundreds of values must add a hint to the dump, never bloat
+# it. Truncation is announced with a `truncated` flag rather than silently applied.
+# Bound for the entity inventory, per appliance and per domain. An appliance has a
+# few dozen entities today; the cap is a runaway guard, not a filter, and like the
+# future-capability bounds it announces itself rather than truncating silently.
+_ENTITY_MAX_PER_DOMAIN = 80
+
+# Bound on materialising a RANGE's grid into the dump (see `_param_schema`). Only a
+# grid this small is enumerated, so the never-enumerate-a-setpoint rule stands. 8
+# covers every few-position control observed so far -- a 0/1 lock or tone, a 0..2
+# panel light, a 0..4 aroma -- and eight short numeric strings are noise next to the
+# blocks around them.
+_RANGE_MAX_MATERIALISED = 8
+
+_FUTURE_MAX_ENTRIES = 40
+_FUTURE_MAX_VALUES = 20
+# A separate CHARACTER bound. An unhandled state value is one scalar, so it needs a
+# length cap rather than a count; reusing _FUTURE_MAX_VALUES here read as "20 values"
+# while meaning "80 characters". Generous, since a value long enough to be truncated
+# is itself the interesting evidence.
+_FUTURE_MAX_VALUE_CHARS = 80
+
+
 def _is_meta_attr(name: str) -> bool:
     """True if a bare attribute name is protocol/debug noise (scalar residue)."""
     return name.lower() in _COVERAGE_META_ATTRS or any(
@@ -219,8 +273,9 @@ def _param_value(param):
 
 
 def _param_schema(param) -> dict:
-    """Schema of one command parameter: value + metadata, plus range (min/max/step)
-    for a range param OR enum as a fallback only when the param is not a range."""
+    """Schema of one command parameter: value + metadata, plus range (min/max/step,
+    and the materialised grid when it is small enough) for a range param OR enum as
+    a fallback only when the param is not a range."""
     schema: dict = {
         "value": _param_value(param),
         "typology": getattr(param, "typology", None),
@@ -235,12 +290,46 @@ def _param_schema(param) -> dict:
     # meaningful for enum/fixed params, where param_range() returns None.
     rng = param_range(param)
     if rng is not None:
+        low, high, step = rng
         schema["min"], schema["max"], schema["step"] = rng
+        # ...and, for a SMALL grid only, the values it actually materialises.
+        #
+        # min/max/step cannot answer the question a missing 0/1 control raises.
+        # param_range() casts through float(), so a schema spelling its bounds
+        # "0"/"1" and one spelling them "0.0"/"1.0" print IDENTICALLY here, while
+        # `.values` yields ['0', '1'] for the first and ['0.0', '1.0'] for the
+        # second -- and the capability gates compare exactly those STRINGS
+        # (air_purifier.supports_lock is `lock_values == {"0", "1"}`). A single
+        # decimal-spelled minimumValue or incrementValue therefore removes a
+        # control, and until now the deciding input appeared nowhere in the dump.
+        #
+        # The bound is what keeps the rule above intact: a real setpoint range is
+        # still never enumerated. The point count is computed ARITHMETICALLY, and
+        # param_range() has already guaranteed step > 0 and max >= min, so a
+        # 0..1400 step 100 grid is refused without `.values` ever being read.
+        # Emitted under its own key, never `enum`: this is the grid a range
+        # materialises, not an enumeration the device declares.
+        if (high - low) / step + 1 <= _RANGE_MAX_MATERIALISED:
+            schema["values"] = param_values(param)
     else:
         enum = param_values(param)
         if enum:
             schema["enum"] = enum
     return schema
+
+
+def _model_attributes(appliance) -> dict:
+    """Cloud catalogue metadata for the MODEL, flattened to parName -> parValue.
+
+    Read straight off the appliance (`applianceModel.attributes`, already
+    normalised by the engine), not off the coordinator entry: it is per-model
+    and immutable for the session, so it never belongs in the polled snapshot.
+    Returns {} for any appliance implementation that does not expose it.
+    """
+    raw = getattr(appliance, "model_attributes", None)
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(name): value for name, value in raw.items()}
 
 
 def _command_schema(appliance) -> dict:
@@ -270,6 +359,7 @@ def _mapped_sets(app_type) -> tuple[set[str], set[str]]:
     mapped_attrs: set[str] = set(_CUSTOM_MAPPED_ATTRS.get(app_type, ()))
     mapped_params: set[str] = set()
     try:
+        from .air_purifier import AP_ENTITY_PARAMS
         from .binary_sensor import BINARY_SENSORS, _CONNECTIVITY, _UNIVERSAL_GATED
         from .number import NUMBERS
         from .sensor import SENSORS
@@ -298,6 +388,13 @@ def _mapped_sets(app_type) -> tuple[set[str], set[str]]:
         mapped_params |= _AC_CLIMATE_PARAMS
     if app_type in APPLIANCE_WASH_GROUP:
         mapped_params.update(PROGRAM_PARAM_NAMES)
+    if app_type == APPLIANCE_AP:
+        # The AP fan, light, aroma select, toggles and timing numbers are fixed-key
+        # entities or live outside the NUMBERS/_SETTINGS_SWITCHES tables, so the
+        # registry walk above cannot see them. Each name is BOTH read as state and
+        # written as a command field, hence both axes.
+        mapped_attrs |= AP_ENTITY_PARAMS
+        mapped_params |= AP_ENTITY_PARAMS
     return mapped_attrs, mapped_params
 
 
@@ -380,8 +477,114 @@ def _coverage(app_type, attributes: Mapping, statistics: Mapping, appliance) -> 
     }
 
 
-def _appliance_block(appliance_id: str, data: Mapping) -> dict:
-    """Build the (redacted) diagnostics block for a single appliance."""
+def _handled_values(app_type) -> dict[str, frozenset[str]]:
+    """Per-parameter raw values the integration HANDLES, for the types that say.
+
+    Lazily imported like `_mapped_sets`, and empty for every type with no registry,
+    so the future-capability section simply does not appear there instead of being
+    filled with guesses.
+    """
+    if app_type != APPLIANCE_AP:
+        return {}
+    try:
+        from .air_purifier import AP_HANDLED_VALUES
+    except Exception:  # pragma: no cover - diagnostics must never crash
+        _LOGGER.debug("Diagnostics debug: AP value registry unavailable", exc_info=True)
+        return {}
+    return dict(AP_HANDLED_VALUES)
+
+
+def _scalar_text(value) -> str | None:
+    """Canonical text of a shadow scalar, or None when it is not one.
+
+    An integral float drops its decimal tail and a bool renders as the device's own
+    1/0 spelling, so a value the client handed back as 3.0 or True still compares
+    equal to the schema's "3" / "1". Containers return None: a delta only makes
+    sense against a scalar.
+    """
+    plain = _jsonable(value)
+    if plain is None or isinstance(plain, (Mapping, list)):
+        return None
+    if isinstance(plain, bool):
+        return "1" if plain else "0"
+    if isinstance(plain, float) and plain.is_integer():
+        return str(int(plain))
+    text = str(plain)
+    return text or None
+
+
+def _enum_deltas(appliance, handled: Mapping[str, frozenset[str]]) -> tuple[dict, bool]:
+    """Declared enum values the integration does not handle, per command param.
+
+    Range parameters are skipped: a numeric range has no enumerable unhandled value,
+    and `.values` on one would enumerate the whole grid (see `_param_schema`).
+    """
+    commands = getattr(appliance, "commands", None)
+    if not isinstance(commands, Mapping):
+        return {}, False
+    deltas: dict[str, list[str]] = {}
+    truncated = False
+    for cmd_name in sorted(commands, key=str):
+        params = getattr(commands[cmd_name], "parameters", None)
+        if not isinstance(params, Mapping):
+            continue
+        for p_name in sorted(params, key=str):
+            known = handled.get(str(p_name))
+            param = params[p_name]
+            if known is None or param_range(param) is not None:
+                continue
+            extra = sorted(set(param_values(param)) - known)
+            if not extra:
+                continue
+            if len(deltas) >= _FUTURE_MAX_ENTRIES:
+                return deltas, True
+            if len(extra) > _FUTURE_MAX_VALUES:
+                extra = extra[:_FUTURE_MAX_VALUES]
+                truncated = True
+            deltas[f"{cmd_name}.{p_name}"] = extra
+    return deltas, truncated
+
+
+def _future_capabilities(app_type, attributes: Mapping, appliance) -> dict:
+    """Passive capture of what the device can do and this code cannot.
+
+    Two signals the coverage block cannot express, because they are about
+    parameters the integration DOES map:
+      * `enum_deltas`            - values the schema declares and no entity handles;
+      * `state_values_unhandled` - a value the device is reporting RIGHT NOW that no
+                                   mapping covers (an active mode 3, say).
+    Parameter names and raw non-identity values only. A writable parameter with no
+    entity at all is already `coverage.command_params_unmapped`; it is not repeated
+    here. Nothing in this section creates an entity or a control: it exists so a beta
+    report shows the gap instead of the code guessing at it.
+    """
+    handled = _handled_values(app_type)
+    if not handled:
+        return {}
+    deltas, truncated = _enum_deltas(appliance, handled)
+    unhandled_state: dict[str, str] = {}
+    for name in sorted(handled):
+        text = _scalar_text(attributes.get(name))
+        if text is not None and text not in handled[name]:
+            unhandled_state[name] = text[:_FUTURE_MAX_VALUE_CHARS]
+    section: dict = {
+        "enum_deltas": deltas,
+        "state_values_unhandled": unhandled_state,
+    }
+    if truncated:
+        section["truncated"] = True
+    return section
+
+
+def _appliance_block(
+    appliance_id: str, data: Mapping, entities: Mapping | None = None
+) -> dict:
+    """Build the (redacted) diagnostics block for a single appliance.
+
+    `entities` is the registry-derived inventory for THIS appliance, already
+    computed once for the whole dump. It defaults to None so the helper stays
+    hass-less and pure, and so a caller with no registry still produces a block.
+    """
     appliance = data.get("appliance")
     app_type = data.get("type")
     attributes = data.get("attributes")
@@ -390,15 +593,18 @@ def _appliance_block(appliance_id: str, data: Mapping) -> dict:
     statistics = statistics if isinstance(statistics, Mapping) else {}
 
     commands = _command_schema(appliance)
+    model_attributes = _model_attributes(appliance)
     coverage = _coverage(app_type, attributes, statistics, appliance)
+    future = _future_capabilities(app_type, attributes, appliance)
 
     _LOGGER.debug(
-        "Diagnostics debug: appliance id=%s name=%s type=%s attrs=%d commands=%d "
-        "unmapped_attrs=%d unmapped_params=%d",
+        "Diagnostics debug: appliance id=%s name=%s type=%s attrs=%d model_attrs=%d "
+        "commands=%d unmapped_attrs=%d unmapped_params=%d",
         redact_id(appliance_id),
         data.get("name"),
         app_type,
         len(attributes),
+        len(model_attributes),
         len(commands),
         len(coverage["attributes_unmapped"]),
         len(coverage["command_params_unmapped"]),
@@ -411,11 +617,238 @@ def _appliance_block(appliance_id: str, data: Mapping) -> dict:
         "model": data.get("model"),
         "serial": _REDACTED,
         "mac": _REDACTED,
+        # Before `attributes` on purpose: what the model IS, then what it is doing.
+        "model_attributes": model_attributes,
         "attributes": dict(attributes),
         "commands": commands,
         "coverage": coverage,
+        # Next to coverage on purpose: one says what the code could map for this
+        # type, the other what Home Assistant actually holds. Reading them together
+        # is the whole point, and a disagreement between them IS the finding.
+        "entities": dict(entities) if isinstance(entities, Mapping) else None,
+        "future_capabilities": future,
     }
     return _redact(block)
+
+
+def _registry_entries(hass: HomeAssistant, entry: ConfigEntry) -> list | None:
+    """Every registry row of this config entry, or None when unreadable.
+
+    The import is function-local, mirroring `_remove_legacy_entities`: the module
+    must stay importable where `homeassistant.helpers.entity_registry` is not
+    installed, and the registry is only ever needed while a dump is being built.
+
+    None and [] mean DIFFERENT things and must never be folded together: [] is
+    "Home Assistant remembers nothing for this entry", which is a finding, while
+    None is "this dump could not look", which is the absence of one. Reporting the
+    second as the first would invent the exact failure the section exists to
+    detect.
+    """
+    try:
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        if registry is None:
+            return None
+        entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    except Exception:  # noqa: BLE001 - a dump must degrade, never raise
+        _LOGGER.debug("Diagnostics debug: entity registry unreadable", exc_info=True)
+        return None
+    return list(entries)
+
+
+def _states_getter(hass: HomeAssistant):
+    """`hass.states.get`, or None where there is no state machine to ask."""
+    try:
+        return getattr(getattr(hass, "states", None), "get", None)
+    except Exception:  # noqa: BLE001 - same rule as above
+        return None
+
+
+# A zoned appliance id is `<base>_z<N>` (client/engine/appliance.py `_check_name_zone`),
+# so the base id is a proper prefix of its own zones'. Longest-first matching handles
+# that while every zone is present, but a zone the current poll dropped would have its
+# rows fall back onto the base appliance. No entity of the base appliance has a
+# unique_id suffix in this shape, so it is a safe tell.
+_ZONE_SUFFIX_RE = re.compile(r"^z\d+_")
+
+
+def _entity_row(unique_id: str, appliance_id: str) -> str:
+    """The unique_id with its appliance prefix removed.
+
+    Every entity in this integration is named `f"{appliance_id}_{suffix}"` where the
+    suffix is a constant written in this repository, so what is emitted is drawn
+    from a closed, already-public vocabulary. Slicing (rather than masking) is what
+    keeps the appliance id out: the caller has already proven the prefix matches.
+    """
+    return unique_id[len(appliance_id) + 1:]
+
+
+def _entity_inventory(
+    entries: list | None,
+    appliance_ids: list,
+    entry_id: str,
+    state_get,
+) -> tuple[dict, dict]:
+    """Split the registry rows into a per-appliance view and an entry-wide one.
+
+    Returns ``(per_appliance, platforms)``. Pure: it takes the rows, never `hass`.
+
+    Three facts drive the shape:
+
+    - A row is attributed by unique_id PREFIX, longest id first. Prefixes nest for
+      real (a multi-zone appliance expands into `<id>`, `<id>_z1`), and the
+      mandatory separator plus longest-first order resolves that. Suffix matching,
+      which the legacy cleanup documents as ambiguous, is never used.
+    - A DISABLED row has no state by construction: Home Assistant does not add
+      disabled entities to the state machine. Consulting the state machine for one
+      would report every user-disabled entity as "the platform failed", which is
+      the single most common reason a control is missing and the least alarming.
+    - A row that is enabled and yet has no live state (or a `restored` one) is the
+      interesting case: Home Assistant remembers the entity from an earlier run but
+      nothing re-created it now. That is what a dead platform looks like, and it is
+      invisible to the registry alone, which survives reloads.
+    """
+    unavailable = {"status": "unavailable"}
+    ids = sorted(
+        (i for i in appliance_ids if isinstance(i, str) and i), key=len, reverse=True
+    )
+    if entries is None:
+        return ({appliance_id: dict(unavailable) for appliance_id in ids}, dict(unavailable))
+
+    status = "ok" if callable(state_get) else "registry_only"
+    # Seeded for EVERY appliance, before a single row is read: an appliance with no
+    # rows must render as "nothing was created", never as "nothing was looked at".
+    per_appliance: dict = {
+        appliance_id: {"status": status, "by_domain": {}} for appliance_id in ids
+    }
+    account: dict = {}
+    account_not_created: dict = {}
+    unattributed = 0
+    truncated = False
+
+    for row in entries:
+        unique_id = getattr(row, "unique_id", None) or ""
+        entity_id = getattr(row, "entity_id", None) or ""
+        domain = entity_id.split(".", 1)[0]
+        if not unique_id or not domain:
+            unattributed += 1
+            continue
+        if entry_id and unique_id.startswith(f"{entry_id}_diag_"):
+            # Account-level debug entities: they belong to no appliance, and they
+            # are created unconditionally. A domain missing from here is a domain
+            # whose platform did not finish, which is what separates a dead
+            # platform from a device that was simply gated out.
+            #
+            # Counted the same way an appliance row is: a registry row left over
+            # from an earlier run proves the platform ran ONCE, not that it ran
+            # now, and taking it at face value would clear the very platform that
+            # just died. Disabled rows are skipped for the same reason as below.
+            account[domain] = account.get(domain, 0) + 1
+            if (
+                callable(state_get)
+                and not _enum_text(getattr(row, "disabled_by", None))
+                and _is_restored(state_get, entity_id)
+            ):
+                account_not_created[domain] = account_not_created.get(domain, 0) + 1
+            continue
+        appliance_id = next(
+            (i for i in ids if unique_id.startswith(f"{i}_")), None
+        )
+        if appliance_id is not None and _ZONE_SUFFIX_RE.match(
+            _entity_row(unique_id, appliance_id)
+        ):
+            # The row belongs to a ZONE of this appliance, and that zone is not in
+            # the data this dump was built from: the poll dropped it, or the cloud
+            # stopped declaring it. Attributing it to the base appliance would put
+            # an entity in a block that does not own it, and would drag its
+            # not_created finding along with it.
+            appliance_id = None
+        if appliance_id is None:
+            unattributed += 1
+            continue
+
+        section = per_appliance[appliance_id]
+        bucket = section["by_domain"].setdefault(domain, [])
+        if len(bucket) >= _ENTITY_MAX_PER_DOMAIN:
+            # Marked on the section that actually dropped a row, not entry-wide:
+            # a complete inventory carrying someone else's truncation flag reads
+            # as incomplete, and the reader stops trusting the one thing this
+            # section exists to state.
+            section["truncated"] = True
+            truncated = True
+            continue
+        key = _entity_row(unique_id, appliance_id)
+        bucket.append(key)
+        # Qualified with the domain OUTSIDE by_domain, which is the only structure
+        # carrying it implicitly. Home Assistant scopes unique_id uniqueness to the
+        # domain and this integration relies on that: a wine cooler holds both a
+        # `light` switch and a `light` binary sensor, and the purifier's panel light
+        # became a select keeping the light's unique_id. Bare suffixes would let one
+        # overwrite the other in these maps, silently dropping a finding, and would
+        # leave the reader unable to tell which of the two a finding is about.
+        # It LOOKS like an entity_id and is not one: the right-hand side is the
+        # code-authored unique_id suffix, never the nickname-derived object_id.
+        tagged = f"{domain}.{key}"
+        disabled_by = _enum_text(getattr(row, "disabled_by", None))
+        hidden_by = _enum_text(getattr(row, "hidden_by", None))
+        if disabled_by:
+            section.setdefault("disabled", {})[tagged] = disabled_by
+            continue
+        if hidden_by:
+            section.setdefault("hidden", {})[tagged] = hidden_by
+        if not callable(state_get):
+            continue
+        if _is_restored(state_get, entity_id):
+            section.setdefault("not_created", []).append(tagged)
+
+    totals: dict = {}
+    for section in per_appliance.values():
+        for domain, keys in section["by_domain"].items():
+            totals[domain] = totals.get(domain, 0) + len(keys)
+        for domain in section["by_domain"]:
+            section["by_domain"][domain] = sorted(section["by_domain"][domain])
+        for field in ("disabled", "hidden", "not_created"):
+            if field in section and isinstance(section[field], list):
+                section[field] = sorted(section[field])
+
+    platforms = {
+        "status": status,
+        "appliance_totals": totals,
+        "account": account,
+        "account_not_created": account_not_created,
+        "unattributed": unattributed,
+    }
+    if truncated:
+        platforms["truncated"] = True
+    return per_appliance, platforms
+
+
+def _enum_text(value) -> str | None:
+    """A registry flag as plain text: these are enums whose `.value` is the token."""
+    if value is None:
+        return None
+    inner = getattr(value, "value", value)
+    return str(inner)
+
+
+def _is_restored(state_get, entity_id: str) -> bool:
+    """True when the registry remembers the entity but nothing created it now.
+
+    Home Assistant writes a placeholder state carrying ``restored: True`` for a
+    registered entity no platform added, so the two cases (no state at all, and a
+    restored one) are the same finding.
+    """
+    try:
+        state = state_get(entity_id)
+    except Exception:  # noqa: BLE001 - a dump must degrade, never raise
+        return False
+    if state is None:
+        return True
+    attributes = getattr(state, "attributes", None)
+    if isinstance(attributes, Mapping):
+        return bool(attributes.get("restored"))
+    return False
 
 
 def _coordinator(hass: HomeAssistant, entry: ConfigEntry):
@@ -444,6 +877,13 @@ def _last_error(hass: HomeAssistant, entry: ConfigEntry) -> dict | None:
         "phase": getattr(client, "last_error_phase", None),
         "had_refresh_token": bool(getattr(client, "_refresh_token", "")),
     }
+    # Per-phase duration+outcome of the failed attempt (issue #76): without it a report
+    # cannot say WHICH phase burned the time, so no hypothesis about a timeout is
+    # falsifiable. Same leak-proof shape as the block above: phase names from a closed
+    # vocabulary, rounded seconds, and an outcome in {ok, error, timeout}.
+    ledger = getattr(client, "last_phase_ledger", None)
+    if ledger:
+        out["phase_ledger"] = ledger
     # 2FA summary only when the failure is in the MFA band (160-169) -- challenge_kind is
     # the enum "email"/None and can_resend is a bool; the MfaContext secrets are NEVER here.
     mfa = getattr(client, "last_mfa_summary", None)
@@ -467,12 +907,21 @@ async def async_get_config_entry_diagnostics(
         coordinator is not None,
     )
 
-    appliances: list[dict] = []
     coord_data = getattr(coordinator, "data", None)
-    if isinstance(coord_data, Mapping):
-        for appliance_id, data in coord_data.items():
-            if isinstance(data, Mapping):
-                appliances.append(_appliance_block(appliance_id, data))
+    coord_data = coord_data if isinstance(coord_data, Mapping) else {}
+    inventory, platforms = _entity_inventory(
+        _registry_entries(hass, entry),
+        list(coord_data),
+        getattr(entry, "entry_id", "") or "",
+        _states_getter(hass),
+    )
+
+    appliances: list[dict] = []
+    for appliance_id, data in coord_data.items():
+        if isinstance(data, Mapping):
+            appliances.append(
+                _appliance_block(appliance_id, data, inventory.get(appliance_id))
+            )
 
     return {
         "entry": {
@@ -484,6 +933,12 @@ async def async_get_config_entry_diagnostics(
             "options": dict(entry.options),
         },
         "last_error": _last_error(hass, entry),
+        # Entry-wide, next to last_error rather than inside an appliance: a failed
+        # setup leaves no appliances at all, and this is exactly the dump where the
+        # question "did anything get created" needs an answer. Closed-domain
+        # primitives only (platform domains, counts, a status token), so like
+        # last_error it is leak-proof by construction and skips _redact.
+        "platforms": platforms,
         "appliances": appliances,
     }
 
@@ -513,4 +968,17 @@ async def async_get_device_diagnostics(
     data = coord_data.get(appliance_id)
     if not isinstance(data, Mapping):
         return {}
-    return {"appliance": _appliance_block(appliance_id, data)}
+    # The inventory is built over EVERY appliance id, not just this one: attribution
+    # is by unique_id prefix and those prefixes nest, so hiding the siblings would
+    # let a longer id's rows fall into this block.
+    inventory, _platforms = _entity_inventory(
+        _registry_entries(hass, entry),
+        list(coord_data),
+        getattr(entry, "entry_id", "") or "",
+        _states_getter(hass),
+    )
+    return {
+        "appliance": _appliance_block(
+            appliance_id, data, inventory.get(appliance_id)
+        )
+    }
