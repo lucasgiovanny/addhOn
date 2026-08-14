@@ -883,6 +883,46 @@ class HeatPumpEnergyCountersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(values["compressor_energy_month"])
         self.assertIsNone(values["compressor_energy_year"])
 
+    async def test_total_energy_sums_both_sources_across_the_year_window(self) -> None:
+        # The dump device is in its first year: total == this year's Cp + Ec.
+        self.assertEqual((await self._values(dict(self.DUMP)))["total_energy"], 19.0)
+        # With history in the older slots the whole window counts, not just parts[-1]:
+        # Cp 3+7+0+0+11 = 21, Ec 1+0+2+0+8 = 11.
+        aged = dict(self.DUMP,
+                    energyConsumptionYearCp="3;7;0;0;11",
+                    energyConsumptionYearEc="1;0;2;0;8")
+        self.assertEqual((await self._values(aged))["total_energy"], 32.0)
+
+    async def test_total_energy_covers_a_single_source_device(self) -> None:
+        # Only Cp reported: the total is the compressor alone...
+        only_cp = {k: v for k, v in self.DUMP.items() if k != "energyConsumptionYearEc"}
+        self.assertEqual((await self._values(only_cp))["total_energy"], 11.0)
+        # ...and only Ec still gates the sensor in through the fallback attr.
+        only_ec = {k: v for k, v in self.DUMP.items() if k != "energyConsumptionYearCp"}
+        self.assertEqual((await self._values(only_ec))["total_energy"], 8.0)
+
+    async def test_total_energy_goes_unknown_when_either_series_is_corrupt(self) -> None:
+        # A partial (one-source) reading would look like a meter reset to
+        # TOTAL_INCREASING statistics and double-count the missing half on recovery,
+        # so a present-but-corrupt series must take the WHOLE total to unknown.
+        broken = dict(self.DUMP, energyConsumptionYearEc="not;a;series")
+        self.assertIsNone((await self._values(broken))["total_energy"])
+
+    async def test_total_energy_is_an_enabled_energy_dashboard_source(self) -> None:
+        from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+
+        added = {e.entity_description.key: e
+                 for e in await _build_sensors("HW", dict(self.DUMP))}
+        total = added["total_energy"]
+        self.assertEqual(total.entity_description.device_class, SensorDeviceClass.ENERGY)
+        self.assertEqual(total.entity_description.state_class,
+                         SensorStateClass.TOTAL_INCREASING)
+        # Unlike the per-source counters, the lifetime total registers ENABLED:
+        # it is the one counter the Energy dashboard asks for.
+        self.assertTrue(total._attr_entity_registry_enabled_default)
+        self.assertFalse(
+            added["compressor_energy_month"]._attr_entity_registry_enabled_default)
+
 
 class HeatPumpHeatingStatusSensorsTest(unittest.IsolatedAsyncioTestCase):
     """`heating_status` / `heat_source`: what the appliance is DOING, as entities.

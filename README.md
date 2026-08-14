@@ -127,6 +127,18 @@ history: the more-info chart is single-entity by construction and plots only the
 and target temperature — hence the sensors. The exact combination of simultaneously
 running sources stays visible in the per-source `binary_sensor` entities.
 
+For the **Energy dashboard**, pick `sensor.<device>_total_energy`: the device's lifetime
+electricity (compressor + electric backup heater in one `total_increasing` kWh counter,
+read from the appliance's own multi-year history, so it starts at the real total rather
+than zero). The per-source month/year counters exist too but register disabled — enable
+them from the entity registry when the split matters. Two caveats inherited from the
+appliance: the counters are whole kWh device-side, so the dashboard's hourly attribution
+is a staircase (roughly one 1 kWh step per day on a heat pump water heater), and the
+cloud history is a 5-year window, so on a device older than that "lifetime" means the
+last five years. The heat-output counters are thermal, not electricity — they carry no
+energy device class on purpose, so the dashboard will not offer them and the total is
+never inflated by them.
+
 ### Tested on real hardware
 
 - **AC Unit:** Haier AS35PBPHRA-PRE

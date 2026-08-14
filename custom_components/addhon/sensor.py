@@ -933,18 +933,57 @@ def _hw_sum_year(parts: list[str], get_attr: Callable[[str], object]) -> float:
     return sum(_hw_slot(part) for part in parts)
 
 
+def _hw_total_energy(_raw, get_attr: Callable[[str], object]) -> float | None:
+    """Lifetime electricity: BOTH sources (Cp + Ec) summed across the Year window.
+
+    The Year series is the only place previous calendar years live (the Month series
+    holds just the current year's 12 slots), so a device total MUST read it -- the one
+    sensor that does. It still ticks up live, not once a year: the ground-truthed
+    invariant (HP250M7C-F9 dump) is that the Year series' last element equals the
+    month-slot sum, i.e. the running year to date.
+
+    Why the SUM of all 5 slots and not parts[-1] + history bookkeeping: summing is the
+    shape that fails safe against the unverified 1-January behavior (every dump so far
+    is mid-year). A window that never slides just freezes the total (a flat line;
+    statistics pause, nothing inflates), and a slide costs nothing while the oldest
+    slot is zero. The one bad case -- a slide dropping a NON-ZERO oldest year, possible
+    from year 6 on -- would read as a meter reset and inflate that year's statistics
+    once; revisit when a multi-year January dump exists.
+
+    A present-but-corrupt series takes the WHOLE reading to unknown rather than
+    reporting the surviving source alone: a one-poll dip to half the total would read
+    as a meter reset to TOTAL_INCREASING statistics and, on recovery, count the missing
+    half a second time in the Energy dashboard.
+    """
+    total = 0.0
+    seen = False
+    for attr in ("energyConsumptionYearCp", "energyConsumptionYearEc"):
+        raw = get_attr(attr)
+        if raw is None:
+            continue
+        try:
+            total += sum(_hw_slot(part) for part in str(raw).split(";"))
+        except (TypeError, ValueError):
+            return None
+        seen = True
+    return total if seen else None
+
+
 # Heat pump water heater (HW): shares the WH temperature set, plus the
 # HW-specific telemetry ground-truthed on a real HP250M7C-F9 (full schema dump):
-# hot-water gauge, tank volume, and the current-month/year-to-date energy split
-# by source (Cp = compressor, Ec = electric backup heater) with the accumulated
-# heat output. BOTH periods read the Month series -- the Year series is never read
-# (see _hw_sum_year). The 7-slot Day series stays unexposed: the device does report
+# hot-water gauge, tank volume, the lifetime electricity total, and the
+# current-month/year-to-date energy split by source (Cp = compressor, Ec = electric
+# backup heater) with the accumulated heat output. The period counters read the Month
+# series (see _hw_sum_year); the Year series backs only the lifetime total
+# (see _hw_total_energy). The 7-slot Day series stays unexposed: the device does report
 # `weekDay` (7 == Sunday on the 2026-07-26 dump, so the index is weekDay - 1), but
 # the counters are whole kWh and this device burns ~0.5 kWh/day, so a daily slot
 # only ever reads 0 or 1 -- Home Assistant derives better statistics from the month
-# counter on its own. Everything is capability-gated; the energy counters and errors
-# register disabled so the default device page stays small (live-user feedback),
-# enable them from the entity registry for the Energy dashboard.
+# counter on its own. Everything is capability-gated; the per-source energy counters
+# and errors register disabled so the default device page stays small (live-user
+# feedback), enable them from the entity registry when the split matters. The lifetime
+# total_energy registers ENABLED: it is the one counter the Energy dashboard asks for,
+# and hiding it behind the entity registry is where users give up.
 #
 # RESOLUTION CAVEAT: the counters are integer kWh device-side, so the monthly total
 # is sound but the hour-by-hour attribution in the Energy dashboard is a staircase
@@ -979,6 +1018,21 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
         native_unit_of_measurement=UnitOfVolume.LITERS,
         gated=True,
         enabled_default=False,
+    ),
+    # Lifetime electricity as ONE counter (compressor + electric heater), the sensor
+    # to pick as an Energy-dashboard consumption source. Gated on EITHER Year series:
+    # a single-source device still gets its total. Reuses the WM `total_energy`
+    # translation ("Total energy used"), so no new strings.
+    HonSensorEntityDescription(
+        key="total_energy",
+        attr_key="energyConsumptionYearCp",
+        attr_fallbacks=("energyConsumptionYearEc",),
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=_hw_total_energy,
+        value_fn_needs_attrs=True,
+        gated=True,
     ),
     _g_hw_energy("compressor_energy_month", "energyConsumptionMonthCp", _hw_pick_month,
                  enabled_default=False),
