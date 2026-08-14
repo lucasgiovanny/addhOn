@@ -374,6 +374,24 @@ class AcClimateWritePathTest(unittest.IsolatedAsyncioTestCase):
         # engine Range setter validates it against the device step/grid.
         self.assertEqual({"tempSel": "23.5"}, settings.sent)
 
+    async def test_set_temperature_snapped_onto_the_device_grid(self) -> None:
+        # HA does not enforce the step: its dial derives the next setpoint from the
+        # entity STATE, so an off-grid shadow reading would make every press send an
+        # off-grid value the Range setter refuses (same bug as the water heater's).
+        entity, settings, _ = _climate({"tempSel": RangeParam("20", mn=16, mx=30, step=1)})
+        await entity.async_set_temperature(temperature=23.2)
+        self.assertEqual({"tempSel": "23"}, settings.sent)
+
+    async def test_set_temperature_keeps_a_half_degree_on_a_half_degree_grid(self) -> None:
+        entity, settings, _ = _climate({"tempSel": RangeParam("20", mn=16, mx=30, step=0.5)})
+        await entity.async_set_temperature(temperature=23.4)
+        self.assertEqual({"tempSel": "23.5"}, settings.sent)
+
+    async def test_set_temperature_clamped_to_the_device_bounds(self) -> None:
+        entity, settings, _ = _climate({"tempSel": RangeParam("20", mn=16, mx=30, step=1)})
+        await entity.async_set_temperature(temperature=45)
+        self.assertEqual({"tempSel": "30"}, settings.sent)
+
     async def test_temp_range_read_from_device(self) -> None:
         entity, _, _ = _climate(
             {"tempSel": RangeParam("20", mn=18, mx=28, step=0.5)}

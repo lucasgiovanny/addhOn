@@ -18,6 +18,7 @@ everywhere (a missing parameter does not generate an entity).
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from decimal import Decimal
 import logging
 
 from homeassistant.exceptions import HomeAssistantError
@@ -95,6 +96,76 @@ def param_range(param) -> tuple[float, float, float] | None:
     if step <= 0:  # non-positive increment: inconsistent range for a numeric control
         return None
     return lo, hi, step
+
+
+def snap_to_range(
+    value: float, rng: tuple[float, float, float] | None, param=None
+) -> float:
+    """`value` clamped into [min, max] AND snapped onto the parameter's min/step grid.
+
+    Home Assistant's temperature controls do NOT enforce the step: the more-info dial
+    seeds itself from the entity state and adds/subtracts the step to it, so a device
+    that reports an OFF-GRID setpoint in its cloud shadow (a real HP250M7C-F9 reported
+    tempSel 59.2 on a range[35,75,1]) makes every +/- press produce an off-grid request
+    (60.2, 61.2, ...). The engine's range setter rightly rejects those, and the user only
+    sees "Allowed: min 35 max 75 step 1 But was: 60.2" -- the setpoint never moves.
+
+    So the write path snaps: the user asked for the neighbouring setpoint, and the nearest
+    grid point IS that setpoint. Snapping lives HERE, on the way out of the entity, never
+    in the setter: every write path relies on the setter's ValueError to trigger the
+    parameter rollback (see async_send_command), so the setter must keep rejecting.
+
+    `param` is the resolved runtime parameter, when the caller has it: a HonParameterRange
+    carries `snap_to_grid`, the SAME grid math (epsilon, floored top index) the engine
+    validates with, so acceptance and snapping cannot disagree. It is called on the
+    already-clamped value because it rejects (by contract) anything out of [min, max].
+    A parameter without it -- a duck-typed range -- takes the arithmetic path below.
+
+    `rng` MUST be the range the DEVICE declares (param_range), never a UI fallback: with
+    no declared grid there is nothing to snap to, and rounding onto a guessed one would
+    destroy a value the device would have accepted (a half degree on a plain, unvalidated
+    parameter). `None` therefore returns the value unchanged.
+    """
+    wanted = float(value)
+    if rng is None:
+        return wanted
+    lo, hi, step = rng
+    clamped = min(max(wanted, lo), hi)
+    snapper = getattr(param, "snap_to_grid", None)
+    if callable(snapper):
+        try:
+            return _clean_grid_value(float(snapper(clamped)), lo, step)
+        except (TypeError, ValueError):
+            pass  # duck-typed parameter or stale bounds: fall through to the arithmetic
+    if step <= 0:  # no grid to snap to (malformed increment): clamping is all we can do
+        return clamped
+    # Mirrors HonParameterRange.snap_to_grid: nearest index, top index FLOORED so the
+    # snapped value can never exceed max, same magnitude-scaled epsilon capped to step/4.
+    eps = min(1e-9 * max(1.0, abs(lo), abs(hi), abs(step)), step / 4)
+    max_index = max(0, int((hi - lo + eps) / step))
+    index = min(max_index, max(0, round((clamped - lo) / step)))
+    return _clean_grid_value(min(hi, lo + index * step), lo, step)
+
+
+def _clean_grid_value(value: float, lo: float, step: float) -> float:
+    """Grid point rounded to its OWN precision, killing `lo + n*step` float drift.
+
+    A grid point carries at most max(decimals(lo), decimals(step)) decimals, so rounding
+    there is exact -- it never collapses two distinct points. Without it the serialized
+    string can read "16.299999999999999", which the setter still accepts (its epsilon
+    tolerates the drift) but which reaches the cloud verbatim.
+    """
+    ndigits = max(_decimals(lo), _decimals(step))
+    return round(value, ndigits)
+
+
+def _decimals(number: float) -> int:
+    """Fractional-digit count of a float (0.1 -> 1, 1.0 -> 0), via its shortest repr."""
+    try:
+        exponent = Decimal(str(float(number))).normalize().as_tuple().exponent
+    except (ArithmeticError, TypeError, ValueError):
+        return 0
+    return -exponent if isinstance(exponent, int) and exponent < 0 else 0
 
 
 async def async_send_command(

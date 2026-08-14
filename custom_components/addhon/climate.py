@@ -48,7 +48,7 @@ from .ac_command import (
     settings_param,
     with_self_clean_off,
 )
-from .hon_commands import async_send_command, param_range, param_values
+from .hon_commands import async_send_command, param_range, param_values, snap_to_range
 from .program_options import async_send_program, startprogram_command
 
 # startProgram/stopProgram are the two program-based AC write commands (see
@@ -179,9 +179,16 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
         return modes or list(AC_FAN_MAP_REVERSE.keys())
 
     @property
+    def _device_temp_range(self) -> tuple[float, float, float] | None:
+        """(min, max, step) as the DEVICE declares it, or None when tempSel carries no
+        range metadata. Only this grid may snap a setpoint on the write path -- never the
+        fallback below, which is a UI guess (see hon_commands.snap_to_range)."""
+        return param_range(self._temp_param) if self._temp_param is not None else None
+
+    @property
     def _live_temp_range(self) -> tuple[float, float, float]:
-        """(min, max, step) read from the runtime tempSel parameter, fallback to snapshot."""
-        return param_range(self._temp_param) or self._temp_fallback_range
+        """(min, max, step) for the UI: the runtime tempSel range, fallback to snapshot."""
+        return self._device_temp_range or self._temp_fallback_range
 
     @property
     def min_temp(self) -> float:
@@ -521,11 +528,17 @@ class HaierClimateEntity(HonBaseEntity, ClimateEntity):
                 translation_key="appliance_or_client_unavailable",
             )
         try:
+            # Snap onto the device's real min/max/step grid first: HA does not enforce
+            # the step, and its dial derives the next setpoint from the entity STATE, so
+            # an off-grid shadow reading turns every press into a request the Range setter
+            # refuses ("Allowed: ... step 1 But was: 23.2"), leaving the setpoint stuck.
+            # Same fix as water_heater.py, same shared helper.
+            value = snap_to_range(float(temp), self._device_temp_range, self._temp_param)
             # Do NOT int()-truncate: an integer value stays a clean int string
             # ("23"), a fractional one keeps its decimals ("23.5") and the engine
             # Range setter validates it against the device's real step/grid
             # (mirrors number.py; the old int() silently dropped the half degree).
-            send_value = str(int(temp)) if float(temp).is_integer() else str(temp)
+            send_value = str(int(value)) if value.is_integer() else str(value)
             _LOGGER.debug("Climate debug: set_temperature %s -> tempSel=%s", temp, send_value)
             await self._send_command_in_executor(client, appliance, {"tempSel": send_value})
             await self._async_request_command_refresh()

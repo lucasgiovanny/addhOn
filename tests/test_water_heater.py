@@ -562,6 +562,61 @@ class WriteTest(unittest.TestCase):
         self.assertEqual(commands["startProgram"].parameters["tempSel"].value, 62)
         self.assertEqual(commands["settings"].send_calls, 0)
 
+    def test_off_grid_setpoint_is_snapped_to_the_device_grid(self) -> None:
+        # The bug this guards: HA does not enforce the step. Its dial seeds itself from
+        # the entity state and adds the step to it, so a shadow reporting an off-grid
+        # setpoint (live HP250M7C-F9: tempSel 59.2 on range[35,75,1]) made every press
+        # send 60.2 / 61.2, which the Range setter refuses -- the setpoint never moved.
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        added, commands = _one(client=FakeClient())
+        asyncio.run(added[0].async_set_temperature(**{ATTR_TEMPERATURE: 60.2}))
+        self.assertEqual(commands["startProgram"].send_calls, 1)
+        # Nearest grid point, as a clean int (never "60.2", never "60.0").
+        self.assertEqual(commands["startProgram"].parameters["tempSel"].value, 60)
+        self.assertEqual(commands["startProgram"].sent["tempSel"], 60)
+
+    def test_setpoint_snaps_up_when_nearer_the_next_grid_point(self) -> None:
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        added, commands = _one(client=FakeClient())
+        asyncio.run(added[0].async_set_temperature(**{ATTR_TEMPERATURE: 60.8}))
+        self.assertEqual(commands["startProgram"].parameters["tempSel"].value, 61)
+
+    def test_setpoint_snaps_onto_a_fractional_step(self) -> None:
+        # A half-degree grid must keep the half degree (no int() rounding).
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        commands = _hw_commands()
+        commands["startProgram"].parameters["tempSel"] = RangeParam(55, 35, 75, 0.5)
+        added, commands = _one(commands=commands, client=FakeClient())
+        asyncio.run(added[0].async_set_temperature(**{ATTR_TEMPERATURE: 60.4}))
+        self.assertEqual(commands["startProgram"].parameters["tempSel"].value, 60.5)
+
+    def test_setpoint_is_clamped_to_the_device_bounds(self) -> None:
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        added, commands = _one(client=FakeClient())
+        asyncio.run(added[0].async_set_temperature(**{ATTR_TEMPERATURE: 120.0}))
+        self.assertEqual(commands["startProgram"].parameters["tempSel"].value, 75)
+        asyncio.run(added[0].async_set_temperature(**{ATTR_TEMPERATURE: 10.0}))
+        self.assertEqual(commands["startProgram"].parameters["tempSel"].value, 35)
+
+    def test_setpoint_is_not_snapped_without_a_device_range(self) -> None:
+        # tempSel with NO min/max/step: there is no declared grid, so the value goes out
+        # untouched (snapping onto the UI fallback could drop a value the device accepts).
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        class PlainParam:
+            def __init__(self, value) -> None:
+                self.value = value
+
+        commands = _hw_commands()
+        commands["startProgram"].parameters["tempSel"] = PlainParam(55)
+        added, commands = _one(commands=commands, client=FakeClient())
+        asyncio.run(added[0].async_set_temperature(**{ATTR_TEMPERATURE: 60.2}))
+        self.assertEqual(commands["startProgram"].parameters["tempSel"].value, "60.2")
+
     def test_set_operation_mode_sends_the_program(self) -> None:
         added, commands = _one(client=FakeClient())
         asyncio.run(added[0].async_set_operation_mode("electric"))

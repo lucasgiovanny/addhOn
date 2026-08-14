@@ -53,7 +53,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .base_entity import HonBaseEntity, coordinator_data_map
 from .const import APPLIANCE_HW, APPLIANCE_WH, DOMAIN
 from .debug_utils import command_names, redact_id
-from .hon_commands import async_send_command, find_settings_param, param_range
+from .hon_commands import (
+    async_send_command,
+    find_settings_param,
+    param_range,
+    snap_to_range,
+)
 from .hw_values import (
     HW_POWER_ATTR,
     HW_WATER_LEVEL_ATTR,
@@ -262,24 +267,34 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
     # --- temperature -------------------------------------------------------------
 
     @property
-    def _live_temp_range(self) -> tuple[float, float, float]:
-        """(min, max, step) read from the CURRENT runtime parameter.
+    def _live_temp_param(self):
+        """The CURRENT runtime tempSel parameter, or None.
 
         Re-resolved on every access rather than read off the __init__ snapshot: selecting
         a program REPLACES appliance.commands["startProgram"] with the chosen category's
         own command object (see async_send_program), so the snapshot would keep reporting
-        the pre-swap category's bounds. Falls back to the snapshot, then to the static
-        range, so a device that errored on load still offers a sane control.
+        the pre-swap category's parameter. Falls back to the snapshot.
         """
-        param = None
         resolved = find_settings_param(self._appliance, HW_TEMP_PARAM, HW_TEMP_COMMANDS)
         if resolved is not None:
-            param = resolved[1]
-        elif self._temp_param is not None:
-            param = self._temp_param
-        if param is None:
-            return self._temp_fallback_range
-        return param_range(param) or self._temp_fallback_range
+            return resolved[1]
+        return self._temp_param
+
+    @property
+    def _device_temp_range(self) -> tuple[float, float, float] | None:
+        """(min, max, step) as the DEVICE declares it, or None when tempSel carries no
+        range metadata. Kept apart from _live_temp_range on purpose: the write path may
+        only snap a setpoint onto a grid the device actually declared, never onto the
+        fallback below (a UI guess -- rounding to it could drop a value the device would
+        have accepted)."""
+        param = self._live_temp_param
+        return param_range(param) if param is not None else None
+
+    @property
+    def _live_temp_range(self) -> tuple[float, float, float]:
+        """(min, max, step) for the UI: the device's own range, else the static fallback,
+        so a device that errored on load still offers a sane control."""
+        return self._device_temp_range or self._temp_fallback_range
 
     @property
     def min_temp(self) -> float:
@@ -361,12 +376,27 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         value = kwargs.get(ATTR_TEMPERATURE)
         if value is None or self._temp_command is None:
             return
+        # Snap onto the device's own min/max/step grid FIRST. HA does not enforce the
+        # step: its dial adds the step to the entity state, so a shadow that reports an
+        # off-grid setpoint (a live HP250M7C-F9 reported tempSel 59.2 on range[35,75,1])
+        # turns every press into an off-grid request the range setter refuses, leaving
+        # the user with "Allowed: min 35 max 75 step 1 But was: 60.2" and a setpoint that
+        # never moves. The nearest grid point is the setpoint the user asked for.
+        requested = float(value)
+        number = snap_to_range(requested, self._device_temp_range, self._live_temp_param)
+        if number != requested:
+            _LOGGER.debug(
+                "WaterHeater debug: setpoint %s snapped to %s on range %s id=%s",
+                requested,
+                number,
+                self._device_temp_range,
+                redact_id(self._appliance_id),
+            )
         # ALWAYS send a string, and a clean one: the client's str_to_float does
         # int(string) and catches only ValueError, so a fractional float (55.5) would be
         # truncated to 55 WITHOUT error, while "55.5" stays 55.5 and the range setter
         # validates the step. An integer serializes as "55", never "55.0" (an enum/range
         # setter rejects the latter).
-        number = float(value)
         send_value = str(int(number)) if number.is_integer() else str(number)
         await self._async_send(
             {HW_TEMP_PARAM: send_value},

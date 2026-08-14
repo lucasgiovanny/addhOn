@@ -90,6 +90,17 @@ stay alongside it — they write the same parameters and cover what the `water_h
 domain has no slot for (boost, silent mode, child lock, sterilization, per-mode
 setpoints).
 
+The target temperature is **snapped onto the device's own min/max/step grid** before it
+is sent, on both the `water_heater` and the `climate` (AC) entity. Home Assistant does
+not enforce the step: its temperature dial derives the next setpoint from the entity
+state, so a device whose cloud shadow reports an off-grid value (a real HP250M7C-F9
+reported `tempSel 59.2` on a `35-75 step 1` range) turned every `+`/`-` press into a
+value the appliance refuses — `Command failed: Allowed: min 35 max 75 step 1 But was:
+60.2` — and the setpoint never moved. The request is now clamped to the device's bounds
+and rounded to the nearest value it accepts. This applies only where the device actually
+declares a range: with no declared grid the value is sent unchanged, so a half degree is
+never rounded away on a parameter the appliance would have taken.
+
 The operating modes are reported under Home Assistant's **standard** `water_heater`
 state names, because the frontend's mode picker resolves its icons from a fixed map of
 those names: the device's `auto` is `heat_pump`, `elec` is `electric`, `eco` is already
