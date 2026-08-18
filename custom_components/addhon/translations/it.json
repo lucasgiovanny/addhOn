@@ -784,6 +784,14 @@
         "name": "Accensione"
       }
     },
+    "date": {
+      "vacation_start_date": {
+        "name": "Inizio vacanza"
+      },
+      "vacation_end_date": {
+        "name": "Fine vacanza"
+      }
+    },
     "number": {
       "target_temp_zone1": {
         "name": "Temperatura Zona 1"
@@ -1006,11 +1014,11 @@
     }
   },
   "exceptions": {
-    "aroma_custom_not_active": {
-      "message": "Le durate dell'aroma si possono cambiare solo mentre la modalità aroma personalizzata è in corso."
-    },
     "appliance_or_client_unavailable": {
       "message": "L'apparecchio o il client non è disponibile."
+    },
+    "aroma_custom_not_active": {
+      "message": "Le durate dell'aroma si possono cambiare solo mentre la modalità aroma personalizzata è in corso."
     },
     "command_error": {
       "message": "Comando non riuscito: {error}"
@@ -1036,14 +1044,17 @@
     "refresh_after_command_failed_error": {
       "message": "Aggiornamento dopo il comando non riuscito: {error}"
     },
+    "speed_not_supported": {
+      "message": "Questo purificatore funziona a modalità discrete e non ha una velocità della ventola. Imposta una modalità preimpostata invece di una percentuale."
+    },
     "swing_not_supported": {
       "message": "Questo apparecchio non supporta l'oscillazione verticale."
     },
     "swing_position_not_allowed": {
       "message": "Posizione oscillazione {position} non ammessa (ammesse: {allowed})."
     },
-    "speed_not_supported": {
-      "message": "Questo purificatore funziona a modalità discrete e non ha una velocità della ventola. Imposta una modalità preimpostata invece di una percentuale."
+    "vacation_dates_inverted": {
+      "message": "Finestra vacanza non valida: l'inizio {start} è dopo la fine {end}."
     }
   }
 }

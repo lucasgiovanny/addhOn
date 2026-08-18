@@ -107,6 +107,16 @@ those names: the device's `auto` is `heat_pump`, `elec` is `electric`, `eco` is 
 standard. Holiday (`vac`) has no standard equivalent, so it keeps the device code and is
 additionally exposed as the away-mode toggle.
 
+The hOn app's **scheduled vacation window** is exposed as two `date` entities —
+*Vacation start* and *Vacation end* (`vacStartDate` / `vacEndDate`, written through the
+same `grSetVacDate` settings operation the app uses). They sync both ways: a window set
+in the app shows up in Home Assistant on the next poll, and a date set here reaches the
+device and the app. The device enters the holiday program by itself inside the window —
+distinct from the away toggle above, which forces holiday *immediately*. An inverted
+window (start after end) is refused with a clear error before anything is sent. Like
+every control, the entities are capability-gated: a water heater whose schema does not
+carry the two dates simply gets no date entities.
+
 What the appliance is *doing* is exposed two ways, from one shared derivation, because
 neither surface alone covers both uses:
 

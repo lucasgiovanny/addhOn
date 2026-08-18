@@ -361,6 +361,7 @@ def _mapped_sets(app_type) -> tuple[set[str], set[str]]:
     try:
         from .air_purifier import AP_ENTITY_PARAMS
         from .binary_sensor import BINARY_SENSORS, _CONNECTIVITY, _UNIVERSAL_GATED
+        from .date import DATES
         from .number import NUMBERS
         from .sensor import SENSORS
         from .switch import _SETTINGS_SWITCHES
@@ -380,6 +381,10 @@ def _mapped_sets(app_type) -> tuple[set[str], set[str]]:
         mapped_attrs.add(desc.attr_key)
 
     for desc in NUMBERS.get(app_type, ()):
+        mapped_params.add(desc.param)
+    # Vacation-window dates (HW/WH): read as attributes AND written as settings params.
+    for desc in DATES.get(app_type, ()):
+        mapped_attrs.add(desc.param)
         mapped_params.add(desc.param)
     # Settings-command switches (AC toggles + wine-cooler light) map their write param.
     for desc in _SETTINGS_SWITCHES.get(app_type, ()):

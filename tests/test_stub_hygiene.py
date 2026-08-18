@@ -38,6 +38,8 @@ SHARED_STUBS = frozenset(
         "ColorMode",
         "CoordinatorEntity",
         "DataUpdateCoordinator",
+        "DateEntity",
+        "DateEntityDescription",
         "DeviceEntryType",
         "DeviceInfo",
         "FanEntity",

@@ -140,8 +140,8 @@ def _install_shared_entity_stubs() -> None:
 
 
 def _install_entity_platform_stubs() -> None:
-    """Shared entity-platform stubs: `binary_sensor`, `fan`, `light`, `number`,
-    `select`, `sensor` and `switch`.
+    """Shared entity-platform stubs: `binary_sensor`, `date`, `fan`, `light`,
+    `number`, `select`, `sensor` and `switch`.
 
     Installed here rather than per test module: each of these is imported by
     several test modules, and a partial per-file stub winning the first-wins
@@ -345,6 +345,23 @@ def _install_entity_platform_stubs() -> None:
     binary_sensor.BinarySensorDeviceClass = getattr(
         binary_sensor, "BinarySensorDeviceClass", BinarySensorDeviceClass
     )
+
+    date_mod = _ensure_module("homeassistant.components.date")
+    components.date = date_mod
+
+    @dataclasses.dataclass(frozen=True, kw_only=True)
+    class DateEntityDescription:
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: object | None = None
+        entity_category: object | None = None
+
+    date_mod.DateEntityDescription = getattr(
+        date_mod, "DateEntityDescription", DateEntityDescription
+    )
+    date_mod.DateEntity = getattr(date_mod, "DateEntity", type("DateEntity", (), {}))
 
     number = _ensure_module("homeassistant.components.number")
     components.number = number

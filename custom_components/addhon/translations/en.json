@@ -784,6 +784,14 @@
         "name": "Power"
       }
     },
+    "date": {
+      "vacation_start_date": {
+        "name": "Vacation start"
+      },
+      "vacation_end_date": {
+        "name": "Vacation end"
+      }
+    },
     "number": {
       "target_temp_zone1": {
         "name": "Zone 1 temperature"
@@ -1036,14 +1044,17 @@
     "refresh_after_command_failed_error": {
       "message": "Refresh after the command failed: {error}"
     },
+    "speed_not_supported": {
+      "message": "This purifier runs in discrete modes and has no fan speed. Set a preset mode instead of a percentage."
+    },
     "swing_not_supported": {
       "message": "This device does not support vertical swing."
     },
     "swing_position_not_allowed": {
       "message": "Swing position {position} is not allowed (allowed: {allowed})."
     },
-    "speed_not_supported": {
-      "message": "This purifier runs in discrete modes and has no fan speed. Set a preset mode instead of a percentage."
+    "vacation_dates_inverted": {
+      "message": "Invalid vacation window: start {start} is after end {end}."
     }
   }
 }

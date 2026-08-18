@@ -784,6 +784,14 @@
         "name": "Ligar/desligar"
       }
     },
+    "date": {
+      "vacation_start_date": {
+        "name": "Início das férias"
+      },
+      "vacation_end_date": {
+        "name": "Fim das férias"
+      }
+    },
     "number": {
       "target_temp_zone1": {
         "name": "Temperatura da zona 1"
@@ -1036,14 +1044,17 @@
     "refresh_after_command_failed_error": {
       "message": "A atualização após o comando falhou: {error}"
     },
+    "speed_not_supported": {
+      "message": "Este purificador funciona em modos discretos e não tem velocidade de ventilação. Defina um modo predefinido em vez de uma porcentagem."
+    },
     "swing_not_supported": {
       "message": "Este dispositivo não suporta oscilação vertical."
     },
     "swing_position_not_allowed": {
       "message": "A posição de oscilação {position} não é permitida (permitidas: {allowed})."
     },
-    "speed_not_supported": {
-      "message": "Este purificador funciona em modos discretos e não tem velocidade de ventilação. Defina um modo predefinido em vez de uma porcentagem."
+    "vacation_dates_inverted": {
+      "message": "Período de férias inválido: o início {start} é posterior ao fim {end}."
     }
   }
 }

@@ -138,6 +138,21 @@ def _install_stubs() -> None:
         "HEAT": "heat",
     }))
 
+    # date platform
+    date_mod = _mod("homeassistant.components.date")
+
+    @dataclasses.dataclass(frozen=True, kw_only=True)
+    class DateEntityDescription:
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: object | None = None
+        entity_category: object | None = None
+
+    date_mod.DateEntityDescription = getattr(date_mod, "DateEntityDescription", DateEntityDescription)
+    date_mod.DateEntity = getattr(date_mod, "DateEntity", type("DateEntity", (), {}))
+
     # number platform
     number_mod = _mod("homeassistant.components.number")
 
@@ -203,6 +218,7 @@ def _install_stubs() -> None:
     helpers.device_registry = dr
     components.sensor = sensor_mod
     components.binary_sensor = binary_mod
+    components.date = date_mod
     components.number = number_mod
     components.water_heater = wh_mod
 
@@ -217,6 +233,7 @@ def _tk(description) -> str:
 def _collect_code_keys() -> dict[str, set[str]]:
     from custom_components.addhon import (
         binary_sensor,
+        date,
         fan,
         number,
         select,
@@ -277,6 +294,8 @@ def _collect_code_keys() -> dict[str, set[str]]:
         | {d.translation_key for d in select._AC_DIRECTION_SELECTS}
     )
     used["button"] = {"start_program", "stop_program", "force_refresh", "reset_debug"}
+    # Vacation-window dates (HW/WH): translation_key defaults from description.key.
+    used["date"] = {_tk(d) for descs in date.DATES.values() for d in descs}
     # Water heater (HW/WH): one fixed-key entity. Its `name` comes from the device
     # (_attr_name = None), so the JSON block carries only the operation-mode states.
     used["water_heater"] = {water_heater.HonWaterHeater._attr_translation_key}
