@@ -60,10 +60,12 @@ from .hon_commands import (
     snap_to_range,
 )
 from .hw_values import (
+    HW_MACH_MODE_ATTR,
     HW_POWER_ATTR,
     HW_WATER_LEVEL_ATTR,
     hw_action,
     hw_heat_source,
+    hw_vacation_active,
     hw_water_level,
 )
 from .program_options import (
@@ -115,6 +117,11 @@ HW_MODE_TO_HA: dict[str, str] = {
 # HA models "away" as its own orthogonal toggle, so it is exposed BOTH ways: as an
 # operation-mode option and as the away switch. Both read and write the same program, so
 # they can never disagree.
+#
+# The program is NOT the only way the device holidays: a window scheduled by dates in
+# the app (grSetVacDate, see date.py) leaves the program on whatever it was and flips
+# machMode to the vacation hold instead (see hw_values). The read side therefore also
+# honours machMode, or an actively-holidaying device would report Auto / away off.
 HW_AWAY_CODE = "vac"
 
 # Volatile per-coordinator store: the operating mode active before away was switched on,
@@ -456,11 +463,25 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         return by_lower.get(token) or by_lower.get(token.rsplit(".", 1)[-1])
 
     @property
+    def _vacation_hold(self) -> bool:
+        """True while the device REPORTS the vacation machMode (scheduled window
+        running). Distinct from the vac PROGRAM: a window scheduled by dates never
+        touches the program (live-verified on the HP250M7C-F9, see hw_values)."""
+        return hw_vacation_active(self._get_attr(HW_MACH_MODE_ATTR)) is True
+
+    @property
     def current_operation(self) -> str | None:
         # Power wins: a device that is off is off, whichever program it would resume.
         if self._on_off_command is not None and self._is_off:
             return STATE_OFF
         if self._mode_codes:
+            # An active vacation hold outranks the selected program: the device is
+            # holidaying whatever the program says it will run afterwards. Reported
+            # as the vac option (a member of operation_list) so the mode picker
+            # keeps a valid selection; gated on _away_code so a model without a vac
+            # program can never report an option it does not offer.
+            if self._away_code is not None and self._vacation_hold:
+                return self._code_to_ha.get(self._away_code, self._away_code)
             # Reported under HA's standard name so the frontend's built-in mode icons
             # apply; _live_mode stays in device codes for the send path.
             mode = self._live_mode
@@ -534,9 +555,12 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
 
     @property
     def is_away_mode_on(self) -> bool | None:
-        """True while the holiday program is active; None when the mode is unknown."""
+        """True while the device holidays -- the vac PROGRAM or the machMode HOLD of a
+        window scheduled by dates; None when neither reading is available."""
         if self._away_code is None:
             return None
+        if self._vacation_hold:
+            return True
         mode = self._live_mode
         if mode is None:
             return None
@@ -554,10 +578,22 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         await self._async_apply_mode(self._away_code)
 
     async def async_turn_away_mode_off(self) -> None:
+        # Starting a normal program is the one exit this integration knows. For the vac
+        # PROGRAM that is the app's own flow; for a machMode hold (window scheduled by
+        # dates) it is a best effort -- the window stays configured on the device, which
+        # may re-enter the hold while the dates remain current. Moving/clearing the
+        # window is what the date entities are for.
         if not self._normal_codes:
             return
         stored = self._coordinator_store(HW_LAST_MODE_STORE).get(self._appliance_id)
-        target = stored if stored in self._normal_codes else self._normal_codes[0]
+        current = self._live_mode
+        if current in self._normal_codes:
+            # machMode hold: the program never left its normal setting, so re-starting
+            # THAT program is the exit that changes nothing else. (With the vac
+            # PROGRAM active, current is the vac code and this branch never matches.)
+            target = current
+        else:
+            target = stored if stored in self._normal_codes else self._normal_codes[0]
         _LOGGER.debug(
             "WaterHeater debug: away off -> '%s' (stored=%r) id=%s",
             target,

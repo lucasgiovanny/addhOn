@@ -675,6 +675,9 @@
       },
       "off_peak_signal": {
         "name": "Sinal de tarifa fora de ponta"
+      },
+      "vacation_active": {
+        "name": "Férias ativas"
       }
     },
     "switch": {

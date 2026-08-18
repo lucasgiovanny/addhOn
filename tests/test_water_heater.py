@@ -678,5 +678,61 @@ class AwayModeTest(unittest.TestCase):
         self.assertEqual(commands["startProgram"].parameters["program"].value, "auto")
 
 
+class ScheduledVacationHoldTest(unittest.TestCase):
+    """A window scheduled by dates (grSetVacDate) never touches the program: on the
+    real HP250M7C-F9 machMode flipped 1 -> 4 the day the window started while
+    startProgram.program stayed "auto" (two live dumps around 2026-08-18). The read
+    side must therefore report holiday from machMode, not only from the vac program.
+    """
+
+    def test_machmode_hold_reports_away_on(self) -> None:
+        added, _ = _one(attributes=_attrs(machMode="4"))
+        self.assertIs(added[0].is_away_mode_on, True)
+
+    def test_machmode_hold_outranks_the_program_in_the_state(self) -> None:
+        # The shadow program stays "eco": the state must say vac anyway -- the
+        # device is holidaying whatever it will run afterwards.
+        added, _ = _one(attributes=_attrs(machMode="4"))
+        self.assertEqual(added[0].current_operation, "vac")
+
+    def test_normal_machmode_changes_nothing(self) -> None:
+        added, _ = _one(attributes=_attrs(machMode="1"))
+        self.assertIs(added[0].is_away_mode_on, False)
+        self.assertEqual(added[0].current_operation, "eco")
+
+    def test_power_off_still_wins_over_the_hold(self) -> None:
+        added, _ = _one(attributes=_attrs(machMode="4", onOffStatus="0"))
+        self.assertEqual(added[0].current_operation, "off")
+        self.assertIs(added[0].is_away_mode_on, True)
+
+    def test_away_off_from_a_hold_restarts_the_untouched_program(self) -> None:
+        # The program never left "eco", so the exit that changes nothing else is
+        # re-starting THAT program -- not the first normal code.
+        added, commands = _one(attributes=_attrs(machMode="4"), client=FakeClient())
+        asyncio.run(added[0].async_turn_away_mode_off())
+        self.assertEqual(commands["startProgram"].parameters["program"].value, "eco")
+
+    def test_binary_sensor_shares_the_derivation(self) -> None:
+        # The `vacation_active` binary reads the SAME attribute through the SAME
+        # hw_values helper as the entity, so the two surfaces can never disagree.
+        from custom_components.addhon import binary_sensor
+        from custom_components.addhon.hw_values import (
+            HW_MACH_MODE_ATTR,
+            hw_vacation_active,
+        )
+
+        desc = next(
+            d
+            for d in binary_sensor._HEAT_PUMP_BINARY
+            if d.key == "vacation_active"
+        )
+        self.assertEqual(desc.attr_key, HW_MACH_MODE_ATTR)
+        self.assertIs(desc.value_fn, hw_vacation_active)
+        self.assertIs(hw_vacation_active("4"), True)
+        self.assertIs(hw_vacation_active(4), True)
+        self.assertIs(hw_vacation_active("1"), False)
+        self.assertIsNone(hw_vacation_active(None))
+
+
 if __name__ == "__main__":
     unittest.main()

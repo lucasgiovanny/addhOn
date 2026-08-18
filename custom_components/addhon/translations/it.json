@@ -675,6 +675,9 @@
       },
       "off_peak_signal": {
         "name": "Segnale fascia economica"
+      },
+      "vacation_active": {
+        "name": "Vacanza attiva"
       }
     },
     "switch": {

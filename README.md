@@ -112,7 +112,11 @@ The hOn app's **scheduled vacation window** is exposed as two `date` entities �
 same `grSetVacDate` settings operation the app uses). They sync both ways: a window set
 in the app shows up in Home Assistant on the next poll, and a date set here reaches the
 device and the app. The device enters the holiday program by itself inside the window —
-distinct from the away toggle above, which forces holiday *immediately*. An inverted
+distinct from the away toggle above, which forces holiday *immediately*. While the
+window runs, the device reports it through `machMode` (live-verified: the program stays
+untouched), so the `water_heater` entity shows Holiday / away **on** during it, and a
+`binary_sensor.<device>_vacation_active` exposes the same signal for automations —
+both read one shared derivation and can never disagree. An inverted
 window (start after end) is refused with a clear error before anything is sent. Like
 every control, the entities are capability-gated: a water heater whose schema does not
 carry the two dates simply gets no date entities.

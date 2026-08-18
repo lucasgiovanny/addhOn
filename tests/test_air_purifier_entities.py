@@ -558,13 +558,20 @@ class AirPurifierBinaryTableTest(unittest.TestCase):
         self.assertIs(is_engaged, eco.value_fn)
 
     def test_the_value_fn_field_defaults_off_everywhere_else(self) -> None:
-        """New optional field: no existing binary sensor changes behavior."""
+        """Optional field: a non-AP binary uses it only where a SHARED derivation
+        exists (the HW vacation hold reads machMode through hw_values, the same
+        helper the water_heater entity uses -- see test_water_heater's drift guard).
+        Everything else must keep the plain on_value comparison."""
         from custom_components.addhon.binary_sensor import BINARY_SENSORS
 
+        shared_derivations = {("HW", "vacation_active")}
         for app_type, descriptions in BINARY_SENSORS.items():
             if app_type == APPLIANCE_AP:
                 continue
             for description in descriptions:
+                if (app_type, description.key) in shared_derivations:
+                    self.assertIsNotNone(description.value_fn, description.key)
+                    continue
                 self.assertIsNone(description.value_fn, description.key)
 
 

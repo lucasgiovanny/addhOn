@@ -54,6 +54,7 @@ from .const import (
 )
 from .air_purifier import co_alarm, has_problem, is_engaged
 from .debug_utils import redact_id
+from .hw_values import HW_MACH_MODE_ATTR, hw_vacation_active
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -326,6 +327,17 @@ _WATER_HEATER_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
 # Only the two main heat sources register enabled; the rest is advanced
 # telemetry the average dashboard does not need.
 _HEAT_PUMP_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
+    # ON while the device actually holidays (machMode vacation hold, shared derivation
+    # with the water_heater entity via hw_values -- they can never disagree). This is
+    # what a window scheduled by dates in the app looks like from outside: the program
+    # stays put, only machMode flips. No device_class: it is a mode indicator, not a
+    # running/problem signal.
+    HonBinarySensorEntityDescription(
+        key="vacation_active",
+        attr_key=HW_MACH_MODE_ATTR,
+        icon="mdi:palm-tree",
+        value_fn=hw_vacation_active,
+    ),
     HonBinarySensorEntityDescription(
         key="compressor_running",
         attr_key="compressorHeatingCurrentStatus",

@@ -675,6 +675,9 @@
       },
       "off_peak_signal": {
         "name": "Off-peak signal"
+      },
+      "vacation_active": {
+        "name": "Vacation active"
       }
     },
     "switch": {

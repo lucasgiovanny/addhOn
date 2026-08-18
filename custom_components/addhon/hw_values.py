@@ -32,6 +32,26 @@ def hw_water_level(raw) -> float | None:
     return min(100.0, round(value * 100.0 / HW_WATER_LEVEL_FULL, 1))
 
 
+# --- scheduled vacation ------------------------------------------------------
+#
+# Ground truth: two diagnostics dumps of the real HP250M7C-F9 around a scheduled
+# vacation window (grSetVacDate 2026-08-18 -> 2026-08-22). With the window still in
+# the future machMode read 1; the day the window started it flipped to 4 -- while
+# startProgram.program stayed "auto" (the scheduled holiday never touches the
+# program) and the official app showed vacation ON. machMode is therefore the only
+# signal that the device is ACTUALLY holidaying; the program enum only says what it
+# will run when it is not.
+HW_MACH_MODE_ATTR = "machMode"
+HW_VACATION_MACH_MODE = "4"
+
+
+def hw_vacation_active(raw) -> bool | None:
+    """True while machMode reports the vacation hold; None when unreported."""
+    if raw is None:
+        return None
+    return str(raw).strip() == HW_VACATION_MACH_MODE
+
+
 # --- what the appliance is DOING right now -----------------------------------
 #
 # The heat sources the appliance reports as currently running, ground-truthed on the real
