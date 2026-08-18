@@ -143,6 +143,37 @@ class LegacyCleanupTest(unittest.TestCase):
         self.assertNotIn("foo_power", blob)
         self.assertNotIn("ID_power", blob)
 
+    def test_hw_duplicate_surfaces_removed(self) -> None:
+        # v5.21.0: the water_heater entity is the single control surface; the
+        # parallel mode select and main-setpoint number are purged on HW devices.
+        entries = [
+            FakeRegEntry("select.boiler_mode", "hwid_hw_mode"),
+            FakeRegEntry("number.boiler_target_temperature", "hwid_target_temp"),
+        ]
+        removed = _run(entries, coord_data={"hwid": {"type": "HW"}})
+        self.assertEqual(
+            sorted(removed),
+            ["number.boiler_target_temperature", "select.boiler_mode"],
+        )
+
+    def test_wine_cooler_target_temp_number_kept(self) -> None:
+        # The WC number shares the '_target_temp' suffix; the type scoping must
+        # protect it (and any oven '<id>_target_temp') from the HW purge.
+        removed = _run(
+            [FakeRegEntry("number.cellar_target_temperature", "wcid_target_temp")],
+            coord_data={"wcid": {"type": "WC"}},
+        )
+        self.assertEqual(removed, [])
+
+    def test_hw_purge_is_domain_scoped(self) -> None:
+        # A sensor whose unique_id happens to end in '_target_temp' on an HW
+        # device is not one of the retired surfaces.
+        removed = _run(
+            [FakeRegEntry("sensor.boiler_target_temp", "hwid_target_temp")],
+            coord_data={"hwid": {"type": "HW"}},
+        )
+        self.assertEqual(removed, [])
+
     def test_td_orphan_removal_log_redacts_identity(self) -> None:
         with self.assertLogs("custom_components.addhon", level="INFO") as logs:
             removed = _run(

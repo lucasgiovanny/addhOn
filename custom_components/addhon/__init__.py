@@ -24,7 +24,9 @@ except ImportError:  # pragma: no cover - only under the test stub
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    APPLIANCE_HW,
     APPLIANCE_TD,
+    APPLIANCE_WH,
     ATTR_LEVEL,
     CONF_ENABLE_DEBUG,
     CONF_ENABLE_EXPERIMENTAL,
@@ -352,6 +354,16 @@ _TD_REMOVED_SUFFIXES = (
     "_loading_percentage",
 )
 
+# Water heater (HW/WH) duplicate control surfaces retired in v5.21.0: the mode
+# select and the main-setpoint number both read and wrote the same parameters as
+# the water_heater entity, which is now the single control. (domain, suffix)
+# pairs, matched ONLY on devices of these types: the wine cooler and the oven
+# keep their own legitimate '<id>_target_temp' numbers.
+_HW_REMOVED = (
+    ("select", "_hw_mode"),
+    ("number", "_target_temp"),
+)
+
 
 def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove from the registry the legacy entities no longer provided by the integration.
@@ -368,6 +380,11 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
       select with the same unique_id in a different domain. Scoped to the light
       domain for that reason: removing by unique_id alone would delete the
       replacement along with the entity it replaces.
+    - The water heater's duplicate control surfaces (v5.21.0): the '<id>_hw_mode'
+      SELECT and the '<id>_target_temp' NUMBER, superseded by the water_heater
+      entity. Domain- AND type-scoped (HW/WH only, cross-checked with the
+      coordinator): the wine cooler and the oven keep their own legitimate
+      '<id>_target_temp' numbers.
 
     Without this cleanup there would be orphan 'unavailable' entities with the '?' badge.
     """
@@ -385,6 +402,17 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
         f"{appliance_id}{suffix}"
         for appliance_id in td_ids
         for suffix in _TD_REMOVED_SUFFIXES
+    }
+    hw_ids = {
+        appliance_id
+        for appliance_id, device in (coord_data or {}).items()
+        if isinstance(device, dict)
+        and device.get("type") in (APPLIANCE_HW, APPLIANCE_WH)
+    }
+    hw_orphans = {
+        (domain, f"{appliance_id}{suffix}")
+        for appliance_id in hw_ids
+        for domain, suffix in _HW_REMOVED
     }
 
     registry = er.async_get(hass)
@@ -410,6 +438,13 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
             removed += 1
             _LOGGER.info(
                 "Removed invalid consumption entity for tumble dryer: id=%s",
+                redact_id(reg_entry.unique_id),
+            )
+        elif (domain, unique_id) in hw_orphans:
+            registry.async_remove(reg_entry.entity_id)
+            removed += 1
+            _LOGGER.info(
+                "Removed retired water-heater control surface: id=%s",
                 redact_id(reg_entry.unique_id),
             )
     _LOGGER.debug(

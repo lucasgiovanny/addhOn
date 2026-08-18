@@ -74,7 +74,6 @@ from .const import (
 )
 from .debug_utils import redact_id
 from .hon_commands import (
-    SETTINGS_COMMANDS,
     async_send_command,
     command_param,
     find_settings_param,
@@ -107,13 +106,6 @@ class HonNumberEntityDescription(NumberEntityDescription):
     # our own field, not the upstream description flag, so the tables stay importable
     # under the test stubs.
     enabled_default: bool = True
-    # Commands searched (in order) for the writable parameter. The default is the
-    # settings/setParameters pair; the HW main setpoint overrides this to
-    # startProgram: on that device the settings command is a recovered app
-    # operation (operationName fixed to the LAST thing the app did, e.g.
-    # grSetVacDate), so a tempSel sent through it is silently ignored, while the
-    # app itself writes mode+temperature via startProgram.
-    command_names: tuple[str, ...] = SETTINGS_COMMANDS
 
 
 def _temp(key: str, param: str, translation_key=None) -> HonNumberEntityDescription:
@@ -166,15 +158,18 @@ _OVEN_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
 )
 
 # Heat pump water heater (HW): writable temperature setpoints from the settings
-# command of a real HP250M7C-F9 (full schema dump: tempSel range[35,75,1], the
-# others range[55,75,1]). tempSel is the main target; hc/pv/sg are per-mode
-# targets (heater+compressor boost, photovoltaic surplus, smart grid) the
-# official app does not surface, so they register disabled by default;
-# sterilizationTempSel is the anti-legionella target. Ranges are read live from
-# the device schema; the fallback mirrors the dump.
+# command of a real HP250M7C-F9 (full schema dump: range[55,75,1]). The MAIN
+# target (tempSel) is deliberately NOT here: it is the water_heater entity's
+# temperature control (which writes it via startProgram, the app's own flow --
+# a tempSel sent through the HW settings command is silently ignored), and the
+# parallel number was retired in v5.21.0 as a duplicate surface (registry
+# cleanup in __init__._remove_legacy_entities). hc/pv/sg are per-mode targets
+# (heater+compressor boost, photovoltaic surplus, smart grid) the official app
+# does not surface, so they register disabled by default; sterilizationTempSel
+# is the anti-legionella target. Ranges are read live from the device schema;
+# the fallback mirrors the dump.
 def _hw_temp(key: str, param: str, *, enabled_default: bool = True,
              fallback_min: float = 35.0,
-             command_names: tuple[str, ...] = SETTINGS_COMMANDS,
              ) -> HonNumberEntityDescription:
     return HonNumberEntityDescription(
         key=key,
@@ -187,15 +182,10 @@ def _hw_temp(key: str, param: str, *, enabled_default: bool = True,
         fallback_max=75.0,
         fallback_step=1.0,
         enabled_default=enabled_default,
-        command_names=command_names,
     )
 
 
 _HEAT_PUMP_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
-    # The main target writes via startProgram (mode + temperature, the app's own
-    # flow): a tempSel sent through the HW settings command is silently ignored
-    # (live-verified: the device reverted the setpoint on the next poll).
-    _hw_temp("target_temp", "tempSel", command_names=("startProgram",)),
     _hw_temp("target_temp_hc", "hcTempSel", enabled_default=False, fallback_min=55.0),
     _hw_temp("target_temp_pv", "pvTempSel", enabled_default=False, fallback_min=55.0),
     _hw_temp("target_temp_sg", "sgTempSel", enabled_default=False, fallback_min=55.0),
@@ -430,9 +420,7 @@ async def async_setup_entry(
             continue
         created: list[str] = []
         for description in NUMBERS.get(app_type, ()):
-            found = find_settings_param(
-                appliance, description.param, description.command_names
-            )
+            found = find_settings_param(appliance, description.param)
             if found is None:
                 continue
             command_name, param = found

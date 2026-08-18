@@ -949,15 +949,6 @@
           "position_6": "Posizione 6",
           "swing": "Oscillazione"
         }
-      },
-      "hw_mode": {
-        "name": "Modalità",
-        "state": {
-          "auto": "Auto",
-          "eco": "Eco",
-          "elec": "Elettrico",
-          "vac": "Vacanza"
-        }
       }
     },
     "water_heater": {

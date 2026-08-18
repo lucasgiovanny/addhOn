@@ -279,14 +279,14 @@ def _collect_code_keys() -> dict[str, set[str]]:
         | {d.key for d in switch._AIR_PURIFIER_SWITCHES}
         | {"pause", "debug_logging", "mqtt_realtime_debug"}
     )
-    # Program select (fixed key) + the REF program/mode select (#40) + the HW
-    # operating-mode select + the program-option selects (#35) + the AC
-    # fan-direction selects (#37).
+    # Program select (fixed key) + the REF program/mode select (#40) + the
+    # program-option selects (#35) + the AC fan-direction selects (#37). The HW
+    # operating-mode select was retired in v5.21.0 (the water_heater entity is
+    # the single mode surface).
     used["select"] = (
         {
             "program",
             "ref_program",
-            "hw_mode",
             select.HonAirPurifierAromaSelect._attr_translation_key,
             select.HonAirPurifierPanelLightSelect._attr_translation_key,
         }

@@ -61,7 +61,9 @@ from homeassistant.core import HomeAssistant
 from .const import (
     APPLIANCE_AC,
     APPLIANCE_AP,
+    APPLIANCE_HW,
     APPLIANCE_WASH_GROUP,
+    APPLIANCE_WH,
     DOMAIN,
     PROGRAM_PARAM_NAMES,
 )
@@ -386,6 +388,12 @@ def _mapped_sets(app_type) -> tuple[set[str], set[str]]:
     for desc in DATES.get(app_type, ()):
         mapped_attrs.add(desc.param)
         mapped_params.add(desc.param)
+    if app_type in (APPLIANCE_HW, APPLIANCE_WH):
+        # Controlled by the water_heater ENTITY (target temperature + power), not by a
+        # number/switch row the registry walk above could see. Without this, retiring
+        # the duplicate target_temp number (v5.21.0) would falsely re-list tempSel as
+        # an unmapped control.
+        mapped_params.update(("tempSel", "onOffStatus"))
     # Settings-command switches (AC toggles + wine-cooler light) map their write param.
     for desc in _SETTINGS_SWITCHES.get(app_type, ()):
         mapped_params.add(desc.param)

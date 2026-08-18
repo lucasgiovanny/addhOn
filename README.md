@@ -85,10 +85,12 @@ controls where they have been mapped.
 Heat pump water heaters also get a native **`water_heater` entity** (target
 temperature, operating mode, power and holiday/away mode in a single card). It is
 capability-gated on the device's live schema, so a plain water heater that exposes a
-writable setpoint gets one too. The individual `number` / `select` / `switch` controls
-stay alongside it — they write the same parameters and cover what the `water_heater`
-domain has no slot for (boost, silent mode, child lock, sterilization, per-mode
-setpoints).
+writable setpoint gets one too. It is the **single control surface** for the setpoint
+and the mode: the parallel *Target temperature* number and *Mode* select were retired
+in v5.21.0 as duplicates (their orphaned registry entries are cleaned up on setup).
+The remaining `number` / `switch` controls stay because they cover what the
+`water_heater` domain has no slot for (boost, silent mode, child lock, sterilization,
+per-mode setpoints).
 
 The target temperature is **snapped onto the device's own min/max/step grid** before it
 is sent, on both the `water_heater` and the `climate` (AC) entity. Home Assistant does

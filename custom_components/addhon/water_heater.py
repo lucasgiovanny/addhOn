@@ -29,12 +29,12 @@ WRITE PATHS (ground-truthed on a real HP250M7C-F9, see number.py / select.py):
 - the operating mode is a startProgram PROGRAM, sent via async_send_program (swap-aware);
 - on/off is a plain 0/1 parameter of the settings command.
 
-COEXISTENCE by design: the HW `number.target_temp`, `select.hw_mode` and
-`switch.on_off` entities stay. They read and write the SAME parameters through the same
-senders, so they cannot drift from this entity (both go through the coordinator), and
-they remain the convenient handle for templates/automations plus the only surface for
-the controls the water_heater domain has no slot for (boost, silent, child lock,
-sterilization, per-mode setpoints).
+SINGLE SURFACE since v5.21.0: this entity is the ONLY handle for the main setpoint and
+the operating mode. The parallel `number.target_temp` and `select.hw_mode` read and
+wrote the same parameters and were retired as duplicates (their registry entries are
+cleaned up by __init__._remove_legacy_entities). The remaining number/switch entities
+stay because they cover what the water_heater domain has NO slot for (boost, silent,
+child lock, sterilization, per-mode setpoints) -- not because they duplicate this one.
 """
 from __future__ import annotations
 
@@ -446,8 +446,7 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
 
         Reads the poll-refreshed cloud shadow first and falls back to the value the
         command carries (recovered at command load). Double-gated against the offered
-        codes: an unrecognized reading reports unknown rather than a guessed mode. Same
-        contract as the HW mode select.
+        codes: an unrecognized reading reports unknown rather than a guessed mode.
         """
         if not self._mode_codes or self._program_param_name is None:
             return None
