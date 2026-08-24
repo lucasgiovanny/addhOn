@@ -919,6 +919,162 @@ class DiagnosticsDeviceTest(unittest.TestCase):
         self.assertEqual({"generated_at": FROZEN_TEXT}, result)
 
 
+class AccountDeviceDiagnosticsTest(unittest.TestCase):
+    """The synthetic per-account service device carries a "Download diagnostics"
+    button of its own, and its identifier -- `entry_id` + ACCOUNT_DEVICE_SUFFIX -- is
+    never a key of `coordinator.data`, which is indexed by appliance id. Before the
+    account route that lookup could only miss, so the button could only ever hand
+    back the degraded dated stub. That is what the ADDHON-210 reporter downloaded and
+    sent us, instead of the self-contained dump 5.17.0 shipped for exactly that case:
+    with zero appliances the service device is the ONLY device that exists, so its
+    broken button was the only one there was to press.
+    """
+
+    @staticmethod
+    def _account_device(entry):
+        """The real service device, built by the function that BUILDS it.
+
+        Spelling `f"{entry_id}_diagnostics"` again here would make this a one-sided
+        pin that keeps passing after the suffix moves; reading it out of
+        `account_device_info` means a rename has to fail here instead of silently
+        re-breaking the button. Same two-sided pin as
+        `test_legacy_cleanup.py`'s account-device guard.
+        """
+        from custom_components.addhon.base_entity import account_device_info
+
+        identifiers = set(account_device_info(entry)["identifiers"])
+        # Anti-vacuity: a device with no identifiers resolves no appliance_id and
+        # would reach a degraded dump for an unrelated reason.
+        assert len(identifiers) == 1, identifiers
+        return FakeDevice(identifiers=identifiers)
+
+    def test_the_account_device_returns_the_entry_dump_itself(self):
+        # Not "a dump with the same keys": the SAME document. One clock, one shape,
+        # one set of privacy guarantees to argue about -- the reason this route
+        # delegates instead of assembling a second, subtly different, top-level
+        # object that would drift out of step with the first.
+        entry = FakeEntry()
+        with _FrozenClock(FROZEN):
+            result = _run(
+                diagnostics.async_get_device_diagnostics(
+                    FakeHass(_build_coordinator()), entry, self._account_device(entry)
+                )
+            )
+            expected = _run(
+                diagnostics.async_get_config_entry_diagnostics(
+                    FakeHass(_build_coordinator()), FakeEntry()
+                )
+            )
+        self.assertEqual(
+            [
+                "generated_at",
+                "entry",
+                "last_error",
+                "platforms",
+                "last_poll",
+                "last_fetch",
+                "appliances",
+            ],
+            list(result),
+        )
+        self.assertEqual(expected, result)
+
+    def test_the_account_device_dump_is_read_from_one_instant(self):
+        # The device path reads `_utcnow` before its own degraded returns. On this
+        # route that read would be a second one, discarded, while the document
+        # carries the entry dump's instant -- harmless today, but it is the shape
+        # that lets two ages in one document disagree tomorrow.
+        entry = FakeEntry()
+        with _FrozenClock(FROZEN) as clock:
+            result = _run(
+                diagnostics.async_get_device_diagnostics(
+                    FakeHass(_build_coordinator()), entry, self._account_device(entry)
+                )
+            )
+        self.assertEqual(FROZEN_TEXT, result["generated_at"])
+        self.assertEqual(1, clock.calls)
+
+    def test_an_account_dump_with_no_appliances_still_carries_the_evidence(self):
+        # THE ADDHON-210 CASE, verbatim: the cloud answered, the walk found nothing,
+        # `coordinator.data` is `{}`. What the reporter needed to send is exactly
+        # what a `{"generated_at": ...}` stub cannot say -- how the one inventory
+        # call went (`last_fetch`), what the poll counted (`last_poll`), which
+        # platforms forwarded (`platforms`) and whether an error was recorded
+        # (`last_error`). An empty `appliances` list is the SYMPTOM, not the dump
+        # failing to build.
+        entry = FakeEntry()
+        result = _run(
+            diagnostics.async_get_device_diagnostics(
+                FakeHass(FakeCoordinator({})), entry, self._account_device(entry)
+            )
+        )
+        self.assertEqual([], result["appliances"])
+        for key in ("entry", "last_error", "platforms", "last_poll", "last_fetch"):
+            self.assertIn(key, result)
+
+    def test_an_appliance_id_merely_ending_in_the_suffix_stays_an_appliance(self):
+        # The guard against the shortcut this file refuses everywhere:
+        # `ident[1].endswith(ACCOUNT_DEVICE_SUFFIX)` would answer an APPLIANCE
+        # question with the account dump for any cloud id that happens to end that
+        # way. The comparison is against the id built from THIS entry, and nothing
+        # else.
+        entry = FakeEntry()
+        decoy_id = f"x{entry.entry_id}{const.ACCOUNT_DEVICE_SUFFIX}"
+        # Anti-vacuity: the decoy must really be the near-miss it claims to be.
+        self.assertTrue(decoy_id.endswith(const.ACCOUNT_DEVICE_SUFFIX))
+        self.assertNotEqual(
+            f"{entry.entry_id}{const.ACCOUNT_DEVICE_SUFFIX}", decoy_id
+        )
+        coord = _build_coordinator()
+        coord.data[decoy_id] = coord.data.pop(WD_ID)
+        result = _run(
+            diagnostics.async_get_device_diagnostics(
+                FakeHass(coord), entry, FakeDevice(identifiers={(DOMAIN, decoy_id)})
+            )
+        )
+        self.assertEqual(["generated_at", "appliance"], list(result))
+        self.assertEqual("WD", result["appliance"]["type"])
+
+    def test_an_entry_with_no_id_does_not_take_the_account_route(self):
+        # With an empty `entry_id` the expected identifier collapses to the bare
+        # suffix, which is a perfectly plausible appliance id. The route is skipped
+        # rather than guessed at, and the previous behaviour stands.
+        entry = FakeEntry(entry_id="")
+        device = FakeDevice(identifiers={(DOMAIN, const.ACCOUNT_DEVICE_SUFFIX)})
+        with _FrozenClock(FROZEN):
+            result = _run(
+                diagnostics.async_get_device_diagnostics(
+                    FakeHass(_build_coordinator()), entry, device
+                )
+            )
+        self.assertEqual({"generated_at": FROZEN_TEXT}, result)
+
+    def test_no_raw_identity_reaches_the_account_dump(self):
+        # Same whole-document scan as `AttributeTimestampPrivacyTest`, run through
+        # the new route: delegating must not become a way of reaching the cloud
+        # values WITHOUT the validations, so the claim "byte for byte the entry
+        # dump" is checked on the property that matters rather than assumed from
+        # the call site.
+        entry = FakeEntry()
+        encoded = json.dumps(
+            _run(
+                diagnostics.async_get_device_diagnostics(
+                    FakeHass(_build_coordinator()), entry, self._account_device(entry)
+                )
+            )
+        )
+        for identity in (
+            "PLAINTEXT-SERIAL",
+            "SN-PLAINTEXT",
+            "AA:BB:CC:DD:EE:FF",
+            "11:22:33:44:55:66",
+            "phone-install-xyz",
+            "user@example.com",
+            "hunter2",
+        ):
+            self.assertNotIn(identity, encoded)
+
+
 # The bare attributes CUSTOM entity classes consume. They have no description
 # table, so no walk can derive them: `HonMeanWaterConsumption` needs both
 # `totalWaterUsed` and `totalWashCycle`, `HonWashingMachinePauseSwitch` reads
@@ -1002,6 +1158,60 @@ def _probe_outcome_tokens() -> set[str]:
     )
 
 
+_API_SOURCE = (
+    REPO_ROOT / "custom_components" / "addhon" / "client" / "transport" / "api.py"
+)
+
+
+def _api_account_tokens() -> tuple:
+    """The `ACCOUNT_TOKENS` tuple `transport/api.py` declares.
+
+    Parsed, never imported, the same idiom `_session_drop_reasons` applies to
+    session.py: api.py reaches `connection.py` and through it `aiohttp`, which the
+    stubs in this file deliberately do not provide, so the module whose next verdict
+    this guard exists to catch is precisely the one it must not fail to read.
+    """
+    for node in ast.walk(ast.parse(_API_SOURCE.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+        if "ACCOUNT_TOKENS" in names and isinstance(node.value, ast.Tuple):
+            return tuple(
+                element.value
+                for element in node.value.elts
+                if isinstance(element, ast.Constant)
+            )
+    raise AssertionError(
+        "transport/api.py no longer declares ACCOUNT_TOKENS as a tuple literal: point "
+        "this guard at the new form -- do not delete it."
+    )
+
+
+def _account_match_verdicts() -> set[str]:
+    """Every string `account_match` can RETURN, read from its body.
+
+    The second half of the pin, and the one a tuple constant cannot give on its own:
+    `ACCOUNT_TOKENS` is a promise about what the function emits, and nothing but the
+    function's own returns can check it. Read with `ast` rather than by calling the
+    function over a table of responses, for the reason `_probe_outcome_tokens` states:
+    a table proves the tokens it triggers are known, never that no OTHER token exists.
+    """
+    for node in ast.walk(ast.parse(_API_SOURCE.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.FunctionDef) and node.name == "account_match":
+            return {
+                statement.value.value
+                for statement in ast.walk(node)
+                if isinstance(statement, ast.Return)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            }
+    raise AssertionError(
+        "transport/api.py::account_match was not found, so the verdicts it can produce "
+        "could not be read. If it was renamed, point this guard at the new name -- do "
+        "not delete it."
+    )
+
+
 class DiagnosticsDriftGuardTest(unittest.TestCase):
     def test_custom_mapped_attrs_are_not_reported_unmapped(self):
         """The behavioural half of the pin above: the EFFECT the comment there claims,
@@ -1073,6 +1283,51 @@ class DiagnosticsDriftGuardTest(unittest.TestCase):
         # which is the one reading the block cannot afford for its main field.
         self.assertEqual(
             _probe_outcome_tokens() | {"raised"}, set(diagnostics._FETCH_OUTCOMES)
+        )
+
+    def test_account_verdicts_track_the_writer(self):
+        # A THREE-WAY pin, because two of the three can drift on their own.
+        # `account_match` is the producer, `ACCOUNT_TOKENS` is the promise it makes to
+        # the outside, and `_FETCH_ACCOUNTS` is what this file allows into a document.
+        # A verdict added to the function and not to the reader is printed as "other",
+        # and "other" as the answer to "whose appliances are these" is the one reading
+        # nobody can act on -- it is indistinguishable from a value this build refused.
+        declared = _api_account_tokens()
+        self.assertEqual(set(declared), _account_match_verdicts())
+        self.assertEqual(set(declared), set(diagnostics._FETCH_ACCOUNTS))
+        # The tuple has no duplicates: a repeated token would make the two set
+        # comparisons above agree while the declaration itself was wrong.
+        self.assertEqual(len(declared), len(set(declared)))
+
+    def test_the_census_keys_and_the_block_keys_are_the_same_set(self):
+        """Every key the WRITER puts in the census is a key the block declares.
+
+        The structural half of `test_the_census_the_probe_builds_survives_into_the_dump`
+        below, which checks two responses. This checks the key set itself, so a field
+        added to the probe and forgotten in `_fetch_empty` -- or renamed on one side --
+        fails here instead of quietly rendering as a missing key in half the states.
+
+        The five keys the census does NOT carry are named rather than subtracted
+        blindly: `age_s` is computed by the reader, and the four counters are what
+        SETUP made of the list rather than what the CALL returned, so they arrive from
+        the client and not from this mapping.
+        """
+        from custom_components.addhon.client.transport import parse
+
+        census = {
+            "at": None,
+            "status": None,
+            "code": None,
+            **parse.probe_appliance_list(
+                {"modules": {"applianceList": {"payload": {"appliances": []}}}}
+            ),
+            "account": "no_appliances",
+        }
+        block = diagnostics._fetch_empty()
+        self.assertLessEqual(set(census), set(block))
+        self.assertEqual(
+            {"age_s", "expanded", "built", "skipped", "degraded"},
+            set(block) - set(census),
         )
 
     def test_ac_climate_params_pinned(self):
@@ -1729,6 +1984,136 @@ class LastFetchDiagnosticsTest(unittest.TestCase):
         self.assertEqual(0, blocks[1]["count"])
         # The sibling key beside the level we stopped at was chosen by the cloud.
         self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(blocks))
+
+    def test_a_failed_module_is_not_an_empty_account(self) -> None:
+        """The second acceptance test, on the level above the walk.
+
+        The field report reached us as an empty list under a 200 with a well-formed
+        envelope, and `outcome: "ok", count: 0` already reads that as "the cloud sent
+        nothing, so the bug is not ours". That reading is only sound if the cloud also
+        DECLARED the call a success -- and the module envelope carries its own
+        `success` beside the payload, which neither this integration nor the official
+        app has ever read. With it false the app shows zero appliances too, and every
+        other field in this block is identical to a legitimately empty account.
+        """
+        empty = self._fetch(
+            {"status": 200, "outcome": "ok", "count": 0,
+             "envelope_ok": True, "module_ok": True, "auth_keys": 0,
+             "account": "no_appliances"}
+        )
+        failed = self._fetch(
+            {"status": 200, "outcome": "ok", "count": 0,
+             "envelope_ok": True, "module_ok": False, "auth_keys": 0,
+             "account": "no_appliances"}
+        )
+        self.assertNotEqual(empty, failed)
+        self.assertIs(True, empty["module_ok"])
+        self.assertIs(False, failed["module_ok"])
+        # The rest of the block is word for word the same, which is the point: nothing
+        # else in the document could have separated these two dumps.
+        for key in ("outcome", "count", "status", "envelope_ok", "account"):
+            with self.subTest(key=key):
+                self.assertEqual(empty[key], failed[key])
+
+    def test_a_session_that_resolved_to_another_account_is_visible(self) -> None:
+        # The third state the block could not name. All three of these carry
+        # `outcome: "ok"`, and two of them carry `count: 0`; before `account` the dump
+        # answered "the cloud sent an empty list" to all three and stopped.
+        empty = self._fetch({"outcome": "ok", "count": 0, "account": "no_appliances"})
+        blind = self._fetch({"outcome": "ok", "count": 0, "account": "no_claim"})
+        theirs = self._fetch({"outcome": "ok", "count": 2, "account": "mismatch"})
+        self.assertEqual("no_appliances", empty["account"])
+        self.assertEqual("no_claim", blind["account"])
+        self.assertEqual("mismatch", theirs["account"])
+        self.assertNotEqual(empty, blind)
+
+    def test_a_success_that_is_not_a_boolean_is_never_coerced(self) -> None:
+        # `_closed_bool` is the mirror of `_bounded_int`: that one refuses a bool
+        # because isinstance(True, int) is True, this one refuses an INT because `1` is
+        # not the same statement as `true`. Coercing with `bool(value)` would let the
+        # field answer the very question it exists to establish -- and would render
+        # every non-empty string the cloud sent as a declared success.
+        for junk in ("true", "false", "", 1, 0, [], {}, [1], object()):
+            with self.subTest(junk=type(junk).__name__):
+                fetch = self._fetch({"envelope_ok": junk, "module_ok": junk})
+                self.assertIsNone(fetch["envelope_ok"])
+                self.assertIsNone(fetch["module_ok"])
+        # ...and a real boolean still comes through, both ways, so the assertions above
+        # are not passing merely because the fields are always null.
+        for value in (True, False):
+            with self.subTest(value=value):
+                fetch = self._fetch({"envelope_ok": value, "module_ok": value})
+                self.assertIs(value, fetch["envelope_ok"])
+                self.assertIs(value, fetch["module_ok"])
+
+    def test_an_auth_key_count_is_a_count_and_nothing_else(self) -> None:
+        # `auth_keys` is the size of an object whose values include a bearer token, so
+        # the count is the entire permitted output. A string that fell through would be
+        # a key name or a token, i.e. the one thing this field is designed not to be.
+        for junk in ("2", True, -1, diagnostics._FETCH_MAX_INT + 1,
+                     ["cognitoTokenNew"], {"cognitoTokenNew": "SECRET"}):
+            with self.subTest(junk=type(junk).__name__):
+                self.assertIsNone(self._fetch({"auth_keys": junk})["auth_keys"])
+        # 0 is the healthy baseline and must survive as a value, not be treated as
+        # "nothing to report": it is what makes any other number a signal.
+        self.assertEqual(0, self._fetch({"outcome": "ok", "auth_keys": 0})["auth_keys"])
+        self.assertEqual(3, self._fetch({"outcome": "ok", "auth_keys": 3})["auth_keys"])
+
+    def test_an_unknown_account_verdict_collapses_to_other(self) -> None:
+        # An identifier is exactly the shape a wrong writer would put here, so the
+        # reader keeps the finding and loses the value -- the same rule `outcome` and
+        # `node_type` already follow.
+        for junk in ("ACCOUNT-0012345", "user@example.com", "3C:71:BF:AA:BB:CC"):
+            with self.subTest(junk=junk):
+                self.assertEqual("other", self._fetch({"account": junk})["account"])
+        blob = json.dumps(self._dump(_FetchClient({
+            "account": "3C:71:BF:AA:BB:CC", "auth_keys": "cognitoTokenNew",
+            "envelope_ok": "user@example.com",
+        })))
+        for leak in ("3C:71:BF:AA:BB:CC", "cognitoTokenNew", "user@example.com"):
+            self.assertNotIn(leak, blob, leak)
+
+    def test_the_healthy_and_the_reporter_envelope_are_told_apart(self) -> None:
+        """The two responses of the investigation, through the real writer.
+
+        `healthy()` is the live 2026-08-24 capture and `reporter()` is the ADDHON-210
+        envelope: identical at both levels their log records, which is what closed the
+        "the API changed" hypothesis. Everything the dump could say about them used to
+        be identical too. Built by the WRITER rather than hand-written, so the pin
+        covers the whole path and not this file's idea of it.
+        """
+        from custom_components.addhon.client.transport.parse import probe_appliance_list
+        from _envelopes import healthy, reporter
+
+        blocks = {
+            name: self._fetch(
+                {"at": FROZEN, "status": 200, "code": None,
+                 **probe_appliance_list(body), "account": account}
+            )
+            for name, body, account in (
+                ("healthy", healthy(), "match"),
+                ("reporter", reporter(), "no_appliances"),
+            )
+        }
+        self.assertNotEqual(blocks["healthy"], blocks["reporter"])
+        # The calibration: every field of the healthy capture, as observed on the wire.
+        self.assertEqual("ok", blocks["healthy"]["outcome"])
+        self.assertEqual(1, blocks["healthy"]["count"])
+        self.assertIs(True, blocks["healthy"]["envelope_ok"])
+        self.assertIs(True, blocks["healthy"]["module_ok"])
+        self.assertEqual(0, blocks["healthy"]["auth_keys"])
+        self.assertEqual("match", blocks["healthy"]["account"])
+        # ...and the reporter's, which is now a finished diagnosis rather than a
+        # shrug: the cloud declared success at both levels, the session resolved to
+        # the account we authenticated as, and that account owns nothing.
+        self.assertEqual(0, blocks["reporter"]["count"])
+        self.assertIs(True, blocks["reporter"]["module_ok"])
+        self.assertEqual("no_appliances", blocks["reporter"]["account"])
+        # The capture carries a MAC, a serial and a nickname on its one appliance.
+        blob = json.dumps(blocks)
+        for leak in ("AA:BB:CC:DD:EE:FF", "PLAINTEXT-SERIAL", "Kitchen Fridge",
+                     "ACCOUNT-OURS", "user#eu-west-1"):
+            self.assertNotIn(leak, blob, leak)
 
     def test_a_dropped_inventory_is_not_an_empty_account(self) -> None:
         # State (D): the cloud sent two appliances and this setup dropped both at the
@@ -7105,6 +7490,62 @@ class SetupFailureRecordTest(unittest.TestCase):
         )["last_fetch"]
         self.assertEqual((2, 2, 0), (block["count"], block["expanded"], block["built"]))
         self.assertEqual({"mac_empty": 2}, block["skipped"])
+
+    def test_the_envelope_and_the_identity_check_survive_a_failed_setup(self) -> None:
+        """A failed setup must not be LESS diagnosable than a successful one.
+
+        `_setup_failure_record` flattens the census with `**dict(census)`, so a field
+        added to the writer reaches hass.data without a second edit -- which is a
+        property worth asserting rather than assuming: the day someone replaces that
+        spread with an explicit key list (the shape the four counters beside it are
+        already written in) the new fields vanish from exactly the dump that is hardest
+        to reproduce. The record path is also the one a reporter downloads most often,
+        because Home Assistant is usually still retrying when they go looking.
+        """
+        init = _addhon_init()
+        client = _FailedClient()
+        client.last_appliance_fetch = {
+            "outcome": "ok", "count": 0, "status": 200,
+            "envelope_ok": True, "module_ok": False, "auth_keys": 2,
+            "account": "mismatch",
+        }
+        hass = FakeHass(_build_coordinator())
+        init._store_setup_failure(hass, FakeEntry(), client)
+        stored = hass.data[DOMAIN]["e1"]["setup_failure"]["fetch"]
+        for key in ("envelope_ok", "module_ok", "auth_keys", "account"):
+            with self.subTest(key=key):
+                self.assertIn(key, stored)
+        block = _run(
+            diagnostics.async_get_config_entry_diagnostics(hass, FakeEntry())
+        )["last_fetch"]
+        self.assertEqual("recorded", block["state"])
+        self.assertIs(True, block["envelope_ok"])
+        self.assertIs(False, block["module_ok"])
+        self.assertEqual(2, block["auth_keys"])
+        self.assertEqual("mismatch", block["account"])
+
+    def test_the_recorded_new_fields_are_validated_like_the_live_ones(self) -> None:
+        # The record has been through hass.data, so it is the LESS trusted of the two
+        # sources and must not be the one that gets the shorter check. Same hostile
+        # values, same refusals as on the live path.
+        block = self._dump_record(
+            self._record(
+                fetch={
+                    "outcome": "ok",
+                    "envelope_ok": "true",
+                    "module_ok": 1,
+                    "auth_keys": "cognitoTokenNew",
+                    "account": "ACCOUNT-0012345",
+                }
+            )
+        )["last_fetch"]
+        self.assertIsNone(block["envelope_ok"])
+        self.assertIsNone(block["module_ok"])
+        self.assertIsNone(block["auth_keys"])
+        # A token the reader does not know keeps the finding and loses the value.
+        self.assertEqual("other", block["account"])
+        self.assertNotIn("ACCOUNT-0012345", json.dumps(block))
+        self.assertNotIn("cognitoTokenNew", json.dumps(block))
 
     def test_a_record_without_a_census_still_reads_client_absent(self) -> None:
         # The failure happened before the call, so there is nothing to say about it.

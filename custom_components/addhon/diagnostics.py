@@ -60,6 +60,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    ACCOUNT_DEVICE_SUFFIX,
     APPLIANCE_AC,
     APPLIANCE_AP,
     APPLIANCE_FR,
@@ -2828,6 +2829,15 @@ _FETCH_OUTCOMES = frozenset(
 _FETCH_NODE_TYPES = frozenset(
     {"dict", "list", "str", "int", "float", "bool", "NoneType", "other"}
 )
+# The verdicts of the identity self-check `api.account_match` makes: does the account
+# our id_token names still own the appliances the cloud answered with. Duplicated and
+# drift-tested against `api.ACCOUNT_TOKENS` exactly like the sets above -- and here the
+# duplication matters more than anywhere else in the block, because a verdict this
+# build has not heard of would print as "other", which for an identity question is the
+# one answer a reader cannot act on.
+_FETCH_ACCOUNTS = frozenset(
+    {"match", "mismatch", "mixed", "no_appliances", "no_claim", "unknown"}
+)
 # The reasons a setup may drop an appliance the cloud returned. The counts arrive from
 # the session, which declares the same tokens as `SETUP_DROP_REASONS` and is pinned
 # against this tuple by a drift guard; a reason this build does not know is a reason
@@ -2872,6 +2882,25 @@ def _bounded_int(value, low: int, high: int) -> int | None:
     """An int inside [low, high], else None. `bool` is refused on purpose:
     isinstance(True, int) is True and would render this field as `true`."""
     return value if type(value) is int and low <= value <= high else None
+
+
+def _closed_bool(value) -> bool | None:
+    """`True`, `False` or None -- never the object the writer handed over.
+
+    The mirror image of `_bounded_int` beside it: that one refuses a bool because
+    isinstance(True, int) is True, this one refuses an INT because `1` is not the same
+    statement as `true`. The fields it guards report what the CLOUD said about its own
+    call, so `1`, `"true"` and `"success"` must all come out as null -- "this build
+    could not tell" -- rather than be coerced into the very answer the field exists to
+    establish. `bool(value)` here would make every non-empty string in the document
+    read as a cloud that declared success.
+
+    `type(value) is bool` also makes the output provably one of two singletons of this
+    process: `bool` cannot be subclassed in CPython, so unlike `_closed_token` there is
+    no `__eq__` trick to close and no "other" bucket to keep -- the value is a literal
+    or it is nothing.
+    """
+    return value if type(value) is bool else None
 
 
 def _label_token(value) -> str | None:
@@ -2949,6 +2978,7 @@ def _fetch_empty() -> dict:
     return {
         "at": None, "age_s": None, "status": None, "code": None, "outcome": None,
         "stopped_at": None, "node_type": None, "siblings": None, "count": None,
+        "envelope_ok": None, "module_ok": None, "auth_keys": None, "account": None,
         "expanded": None, "built": None, "skipped": {}, "degraded": {},
     }
 
@@ -2974,10 +3004,16 @@ def _last_fetch(hass: HomeAssistant, entry: ConfigEntry, *, now: datetime) -> di
 
     Leak-proof by construction on the strongest terms in the file: every KEY is a
     literal written above, and every VALUE is either an int this function range-checks,
-    an instant `_stamp_text` validates against `_ISO_RE`, a token `_closed_token` looks
-    up in a frozenset written above, or a label `_label_token` shape-checks. Not one
-    string from the cloud, from the session or from the client is copied into the
-    document -- so `_redact` is not merely skipped here, it would have nothing to do.
+    a boolean `_closed_bool` refuses to coerce, an instant `_stamp_text` validates
+    against `_ISO_RE`, a token `_closed_token` looks up in a frozenset written above,
+    or a label `_label_token` shape-checks. Not one string from the cloud, from the
+    session or from the client is copied into the document -- so `_redact` is not
+    merely skipped here, it would have nothing to do.
+
+    That rule is what shapes `account`, the block's identity self-check: the two
+    account ids it rests on are compared in the transport (`api.account_match`) and
+    only the VERDICT crosses into this file. Same for `auth_keys`, which is a count of
+    the keys in an object whose values include a bearer token, and never their names.
 
     Deliberate divergence from `_last_poll` next door, which passes the census through
     as `dict(census)` and rests entirely on its writer. This one does not trust its
@@ -3075,6 +3111,31 @@ def _fetch_block(raw: Mapping, counters: Mapping, *, now: datetime) -> dict:
         "node_type": _closed_token(raw.get("node_type"), _FETCH_NODE_TYPES),
         "siblings": _bounded_int(raw.get("siblings"), 0, _FETCH_MAX_INT),
         "count": _bounded_int(raw.get("count"), 0, _FETCH_MAX_INT),
+        # The envelope ABOVE the walk, and the question `count: 0` cannot answer on its
+        # own. A `success: false` at either level is a state in which the official app
+        # shows zero appliances too -- neither it nor this integration has ever read
+        # them -- and in which every other field of this block looks exactly like a
+        # legitimately empty account. `null` at either means the cloud sent something
+        # that was not a boolean, which is itself worth seeing.
+        "envelope_ok": _closed_bool(raw.get("envelope_ok")),
+        "module_ok": _closed_bool(raw.get("module_ok")),
+        # How many keys `modules.applianceList.authInfo` carried, never which. That
+        # object is how the cloud hands back a replacement cognito token, and on a
+        # healthy session it is verifiably empty -- so 0 is the baseline and any other
+        # number is a signal. A count is an int and an int carries no identity; a key
+        # NAME here would be a value chosen by the cloud, and one of the values behind
+        # those names is a bearer token.
+        "auth_keys": _bounded_int(raw.get("auth_keys"), 0, _FETCH_MAX_INT),
+        # Whose appliances the cloud answered with, as a verdict and never as an id.
+        # See `api.account_match`: the comparison happens in the transport and only the
+        # token crosses into this document.
+        #
+        # `mismatch` and `mixed` are NOT faults to triage on their own: family sharing
+        # puts appliances a member does not own into that member's own list, so a group
+        # member reads `mismatch` on a perfectly healthy install. The verdict states an
+        # account BOUNDARY; only the reported symptom says whether crossing it is the
+        # bug. `no_appliances` is the one that carries a complaint by itself.
+        "account": _closed_token(raw.get("account"), _FETCH_ACCOUNTS),
         "expanded": _bounded_int(counters.get("expanded"), 0, _FETCH_MAX_INT),
         "built": _bounded_int(counters.get("built"), 0, _FETCH_MAX_INT),
         "skipped": _skip_census(counters.get("skipped")),
@@ -3173,15 +3234,11 @@ async def async_get_device_diagnostics(
     ``device.identifiers`` is a set of ``(domain, id)`` tuples; base_entity.device_info
     registers ``{(DOMAIN, appliance_id)}``, so the appliance_id is recovered directly.
     The raw identifier (which may BE the serial) is never echoed into the output.
-    """
-    # Read BEFORE the two early returns below, not after. A device dump that
-    # resolves no appliance is precisely the one that gets pasted into an issue
-    # as 'the download gave me nothing', and an undated empty object cannot
-    # even be placed in time relative to the entry dump beside it.
-    now = _utcnow()
-    coordinator = _coordinator(hass, entry)
-    coord_data = getattr(coordinator, "data", None)
 
+    One device per entry is NOT an appliance: the synthetic per-account service
+    device that carries the debug controls. Asked for its diagnostics, this
+    returns the account's own dump -- see the route below.
+    """
     appliance_id = next(
         (
             ident[1]
@@ -3190,13 +3247,55 @@ async def async_get_device_diagnostics(
         ),
         None,
     )
+    # The account's service device asks an ACCOUNT question, so it gets the
+    # account's answer. Its identifier is `{entry_id}{ACCOUNT_DEVICE_SUFFIX}`
+    # (base_entity.device_info), which is never a key of `coordinator.data` --
+    # that mapping is indexed by appliance id. Without this route the lookup
+    # below could only miss, so every user pressing "Download diagnostics" on
+    # that device got the degraded dated stub; and in the one install that has
+    # ZERO appliances the service device is the only device that exists, so the
+    # only such button reachable is the one that could never answer. That is how
+    # the ADDHON-210 report arrived as `{"generated_at": ...}` instead of the
+    # self-contained dump 5.17.0 shipped for exactly that case.
+    #
+    # Delegating returns the entry dump byte for byte rather than a bespoke
+    # subset. That is deliberate on two counts: it introduces no new class of
+    # value and therefore no new privacy surface (`entry` still goes through
+    # _redact_title/_redact_email/_entry_options, `appliances` through
+    # _appliance_block + _redact, and the leak-proof-by-construction keys stay
+    # the same ones), and it leaves ONE top-level key set to maintain instead of
+    # a second shape that would drift out of step with the first -- the drift
+    # `_fetch_empty` exists to prevent.
+    entry_id = getattr(entry, "entry_id", "") or ""
+    # Exact equality, never `endswith`: a suffix test would swallow an appliance
+    # whose own id happens to end in `_diagnostics` and answer an appliance
+    # question with the account dump. Guarded on a non-empty entry_id because
+    # without one the expected identifier collapses to the bare suffix, which is
+    # a plausible id in its own right; with no entry to compare against the old
+    # behaviour stands.
+    if entry_id and appliance_id == f"{entry_id}{ACCOUNT_DEVICE_SUFFIX}":
+        return await async_get_config_entry_diagnostics(hass, entry)
+
+    # Read BEFORE the two early returns below, not after. A device dump that
+    # resolves no appliance is precisely the one that gets pasted into an issue
+    # as 'the download gave me nothing', and an undated empty object cannot
+    # even be placed in time relative to the entry dump beside it. Read AFTER
+    # the account route above so that every path reads the clock exactly once:
+    # the delegated dump takes its own single instant.
+    now = _utcnow()
+    coordinator = _coordinator(hass, entry)
+    coord_data = getattr(coordinator, "data", None)
+
     # Both degraded paths still return a DATED document rather than a bare {}.
     # They are the two dumps most likely to be attached to an issue, because
     # they are what a user gets when the thing they are reporting is that
     # nothing works, and 'the file was empty' is a materially different report
     # from 'the file said it was taken at 07:09 and had nothing in it'. Like
     # the entry dump's own `generated_at`, these bypass `_redact` and are
-    # leak-proof by construction rather than by masking.
+    # leak-proof by construction rather than by masking. What reaches them is
+    # now only what they were meant for -- a device whose identifier this
+    # integration does not own, or an appliance device the coordinator has
+    # nothing for -- because the account device is answered above.
     if appliance_id is None or not isinstance(coord_data, Mapping):
         return {"generated_at": _stamp_text(now)}
     data = coord_data.get(appliance_id)
