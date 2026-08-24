@@ -940,6 +940,68 @@ _CUSTOM_ENTITY_ATTRS: dict[str, frozenset[str]] = {
 }
 
 
+def _session_drop_reasons() -> tuple | None:
+    """The `SETUP_DROP_REASONS` tuple `client/session.py` declares, or None.
+
+    Parsed, never imported, the same idiom `_options_flow_conf_names` above applies to
+    config_flow and for the same kind of reason: session.py imports `aiohttp` at module
+    level and the stubs in this file do not provide it, so the module whose next drop
+    reason this guard exists to catch is precisely the one it must not fail to read.
+
+    None when the constant is not declared yet: the setup census that fills these
+    counts lands in a later commit, and this guard arms itself the moment it does
+    rather than being written from memory afterwards.
+    """
+    source = (
+        REPO_ROOT / "custom_components" / "addhon" / "client" / "session.py"
+    ).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+        if "SETUP_DROP_REASONS" in names and isinstance(node.value, ast.Tuple):
+            return tuple(
+                element.value
+                for element in node.value.elts
+                if isinstance(element, ast.Constant)
+            )
+    return None
+
+
+def _probe_outcome_tokens() -> set[str]:
+    """Every string `probe_appliance_list` can put under "outcome", read from its body.
+
+    Read with `ast` rather than by calling the probe over a table of responses: a table
+    proves that the tokens it triggers are known, never that no OTHER token exists in
+    the function. This guard is about the tokens nobody thought to trigger.
+    """
+    source = (
+        REPO_ROOT
+        / "custom_components"
+        / "addhon"
+        / "client"
+        / "transport"
+        / "parse.py"
+    ).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == "probe_appliance_list":
+            return {
+                value.value
+                for mapping in ast.walk(node)
+                if isinstance(mapping, ast.Dict)
+                for key, value in zip(mapping.keys, mapping.values)
+                if isinstance(key, ast.Constant)
+                and key.value == "outcome"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            }
+    raise AssertionError(
+        "parse.probe_appliance_list was not found, so the outcome tokens it can "
+        "produce could not be read. If it was renamed, point this guard at the new "
+        "name -- do not delete it."
+    )
+
+
 class DiagnosticsDriftGuardTest(unittest.TestCase):
     def test_custom_mapped_attrs_are_not_reported_unmapped(self):
         """The behavioural half of the pin above: the EFFECT the comment there claims,
@@ -966,6 +1028,52 @@ class DiagnosticsDriftGuardTest(unittest.TestCase):
                 self.assertNotIn(
                     attr, cov["attributes_unmapped"], f"{app_type}.{attr}"
                 )
+
+    def test_stop_tokens_track_the_parser_path(self):
+        """`stopped_at` may only name a segment the parser actually walks.
+
+        The token set is duplicated in diagnostics.py rather than imported (the HA
+        layer imports no transport internals anywhere else in this file), and this is
+        what makes the duplication safe: a level added to or renamed in the response
+        path has to be reflected here, or the dump would answer "other" for the very
+        level it was added to report.
+        """
+        from custom_components.addhon.client.transport import parse
+
+        self.assertEqual(set(parse.APPLIANCE_LIST_PATH), set(diagnostics._FETCH_STOPS))
+
+    def test_node_type_tokens_track_the_probe(self):
+        # "other" exists only on the reader side: the probe emits it too, but the
+        # reader must also be able to say it about a token the probe never wrote.
+        from custom_components.addhon.client.transport import parse
+
+        self.assertEqual(
+            set(parse._NODE_TYPES) | {"other"}, set(diagnostics._FETCH_NODE_TYPES)
+        )
+
+    def test_skip_reason_tokens_track_the_session(self):
+        # An ASSERT, not a skip. The hatch this replaces was written while the setup
+        # census was still a separate commit, so `None` meant "not landed yet"; the
+        # constant has landed, and from here `None` can only mean the one thing this
+        # guard exists to catch -- session.py stopped declaring SETUP_DROP_REASONS in
+        # a form the parser recognises. A skip would report success for exactly that.
+        # Same standard as `_probe_outcome_tokens` beside it, which raises.
+        declared = _session_drop_reasons()
+        self.assertIsNotNone(
+            declared,
+            "client/session.py no longer declares SETUP_DROP_REASONS as a tuple "
+            "literal: point this guard at the new form -- do not delete it.",
+        )
+        self.assertEqual(declared, diagnostics._FETCH_SKIP_REASONS)
+
+    def test_fetch_outcomes_track_the_writers(self):
+        # Two writers fill `outcome`: the probe, and the except branch of
+        # load_appliances, which is the only producer of "raised". The reader's domain
+        # must be exactly their union -- a token missing here is printed as "other",
+        # which is the one reading the block cannot afford for its main field.
+        self.assertEqual(
+            _probe_outcome_tokens() | {"raised"}, set(diagnostics._FETCH_OUTCOMES)
+        )
 
     def test_ac_climate_params_pinned(self):
         self.assertEqual(
@@ -1182,7 +1290,9 @@ class LastErrorDiagnosticsTest(unittest.TestCase):
         # A 5.9.3 field dump read `"last_error": null, "appliances": []` and was
         # triaged as an account owning no appliances; it was a failed setup, whose
         # client never reached hass.data. `null` must not be the answer to a
-        # question nobody could ask.
+        # question nobody could ask. A failed setup now leaves a record and reads
+        # `setup_failed` instead; this marker covers what is left, an entry with no
+        # session and nothing said about why.
         result = _run(diagnostics.async_get_config_entry_diagnostics(FakeHass(_build_coordinator()), FakeEntry()))
         self.assertEqual({"status": "client_absent"}, result["last_error"])
         # And it must not be readable as a recorded failure: a consumer keying on
@@ -1209,12 +1319,14 @@ class LastErrorDiagnosticsTest(unittest.TestCase):
         self.assertNotEqual(healthy["last_error"], failed_setup["last_error"])
 
     def test_last_error_folds_missing_entry_data_into_the_same_marker(self) -> None:
-        # "No entry data for this entry" and "entry data without a client" are ONE
-        # state on purpose (diagnostics.py `_last_error`): __init__ writes the bucket
-        # with the client inside it and pops it whole, so the two cannot be reached
-        # separately, and a second token would be a distinction nothing writes. This
-        # pins the fold: an entry absent from hass.data reports the same marker as
-        # the client-less bucket above.
+        # "No entry data for this entry" and "a bucket with neither a client nor a
+        # failure record" are ONE state on purpose (diagnostics.py `_last_error`).
+        # They were once the same for a stronger reason -- nothing could produce the
+        # second -- and `_store_setup_failure` has since made a client-less bucket a
+        # real state, but a client-less bucket with NOTHING in it still is not, and
+        # inventing a token for it would send a triager hunting a distinction nothing
+        # writes. This pins the fold: an entry absent from hass.data reports the same
+        # marker as the record-less bucket above.
         hass = FakeHass(_build_coordinator(), entry_id="other-entry")
         result = _run(diagnostics.async_get_config_entry_diagnostics(hass, FakeEntry()))
         self.assertEqual({"status": "client_absent"}, result["last_error"])
@@ -1445,6 +1557,537 @@ class LastPollCensusDiagnosticsTest(unittest.TestCase):
         blob = json.dumps(result)  # also proves the block is serializable as it stands
         for leak in ("Kitchen Washer", "AA:BB:CC:DD:EE:FF", "decode error for"):
             self.assertNotIn(leak, blob, leak)
+
+
+class _FetchClient:
+    """The client double `_build_last_fetch` reads.
+
+    It carries only the five names the block asks for, and every one of them is
+    optional: the reader reaches them through `getattr(..., None)` precisely because a
+    client between two sessions, or a double in a test, is not obliged to have them.
+    """
+
+    def __init__(self, census=None, **attrs) -> None:
+        self.last_appliance_fetch = census
+        for name, value in attrs.items():
+            setattr(self, name, value)
+
+
+class _RaisingFetchClient:
+    """A client whose `setup_drops` raises, the way a property reading a session
+    being torn down on the hOn loop thread can."""
+
+    last_appliance_fetch = {"outcome": "ok", "count": 0}
+
+    @property
+    def setup_drops(self):
+        raise RuntimeError("session torn down mid-dump")
+
+
+class LastFetchDiagnosticsTest(unittest.TestCase):
+    """The dump names the level at which the appliance-list walk stopped.
+
+    The field case: the cloud answered with `result` keys ['executionTime', 'modules',
+    'success'] and `modules` keys ['applianceList'], the hOn app showed two appliances
+    for the account, and the dump read `"appliances": []` with `"last_error": null`.
+    That file is compatible with six different states, and the maintainer could not
+    answer the only question that matters -- whose bug it is -- from it. `last_fetch`
+    is what separates them, and every value in it is a token of a frozenset written in
+    diagnostics.py, a range-checked int, a shape-checked catalog label or an instant
+    `_stamp_text` validated: never a string chosen by the cloud.
+    """
+
+    def _dump(self, client=None, coordinator=None):
+        hass = FakeHass(coordinator if coordinator is not None else FakeCoordinator({}))
+        if client is not None:
+            hass.data[DOMAIN]["e1"]["client"] = client
+        return _run(diagnostics.async_get_config_entry_diagnostics(hass, FakeEntry()))
+
+    def _fetch(self, census=None, **attrs):
+        return self._dump(_FetchClient(census, **attrs))["last_fetch"]
+
+    def test_last_fetch_is_never_null(self) -> None:
+        # `null` is the reading this block exists to abolish: it is what a dump says
+        # today for "no session", "no fetch" and "a fetch this reader could not read"
+        # alike. Every harness in this file must produce a dict with a state token.
+        dumps = [
+            self._dump(),
+            self._dump(_FetchClient()),
+            self._dump(_FetchClient({"outcome": "ok", "count": 0})),
+            self._dump(_FetchClient("not-a-mapping")),
+            self._dump(_RaisingFetchClient()),
+            _entry_diag()[0],
+        ]
+        for result in dumps:
+            with self.subTest(state=result["last_fetch"].get("state")):
+                self.assertIsInstance(result["last_fetch"], dict)
+                self.assertIn(result["last_fetch"]["state"], diagnostics._FETCH_STATES)
+
+    def test_no_client_reads_client_absent(self) -> None:
+        # The whole suite runs on a bucket holding only {"coordinator": ...}: no
+        # client to ask, and no record of a failure either. Saying so is a different
+        # statement from "the client was asked and had nothing" -- and, since
+        # `_store_setup_failure` exists, a different one from "the setup failed, and
+        # here is what the call returned before it did" (SetupFailureRecordTest).
+        fetch = self._dump()["last_fetch"]
+        self.assertEqual("client_absent", fetch["state"])
+        for key, value in fetch.items():
+            if key == "state":
+                continue
+            with self.subTest(key=key):
+                self.assertEqual({} if key in ("skipped", "degraded") else None, value)
+
+    def test_a_client_without_a_census_reads_never_ran(self) -> None:
+        fetch = self._fetch(None)
+        self.assertEqual("never_ran", fetch["state"])
+        self.assertIsNone(fetch["outcome"])
+
+    def test_the_key_set_is_the_same_in_every_state(self) -> None:
+        # A field-by-field diff between two downloads of the same issue is only
+        # meaningful if the key set is stable: a block that drops keys when it has
+        # nothing to say turns "this got worse" into "this file is shaped differently".
+        blocks = {
+            "recorded": self._fetch({"outcome": "ok", "count": 0}),
+            "never_ran": self._fetch(None),
+            "client_absent": self._dump()["last_fetch"],
+            "unreadable": self._dump(_RaisingFetchClient())["last_fetch"],
+        }
+        for state, block in blocks.items():
+            with self.subTest(state=state):
+                self.assertEqual(state, block["state"])
+        key_sets = {frozenset(block) for block in blocks.values()}
+        self.assertEqual(1, len(key_sets), key_sets)
+        self.assertEqual(set(diagnostics._FETCH_STATES), set(blocks))
+        # The empty halves are built PER CALL, not spread from a module constant.
+        # `{**CONST}` is a shallow copy, so a constant would hand every block in the
+        # process the same two dicts -- aliased to the constant itself -- and one
+        # in-place write anywhere downstream would then appear in every later dump of
+        # every config entry. The key set is what the constant existed to stabilise,
+        # and it is asserted above, so nothing is lost by unsharing the values.
+        for left, right in (("never_ran", "client_absent"), ("client_absent", "unreadable")):
+            for key in ("skipped", "degraded"):
+                with self.subTest(pair=(left, right), key=key):
+                    self.assertIsNot(blocks[left][key], blocks[right][key])
+        blocks["never_ran"]["skipped"]["written_by_a_downstream_caller"] = 1
+        self.assertEqual({}, self._fetch(None)["skipped"])
+
+    def test_an_empty_payload_and_a_schema_drift_no_longer_look_alike(self) -> None:
+        # THE acceptance test. Both dumps carry `"appliances": []` and a null
+        # `last_error` -- the exact file the field report arrived as -- and until now
+        # nothing else in the document differed at all.
+        empty = self._fetch({"status": 200, "outcome": "ok", "count": 0})
+        drift = self._fetch(
+            {
+                "status": 200,
+                "outcome": "missing_key",
+                "stopped_at": "payload",
+                "node_type": "dict",
+                "siblings": 2,
+                "count": None,
+            }
+        )
+        self.assertNotEqual(empty, drift)
+        # The cloud answered, and it answered with nothing: the bug is not ours.
+        self.assertEqual("ok", empty["outcome"])
+        self.assertEqual(0, empty["count"])
+        # The cloud answered with something our walk could not follow, and the block
+        # says at which level to look.
+        self.assertEqual("missing_key", drift["outcome"])
+        self.assertEqual("payload", drift["stopped_at"])
+        self.assertEqual(2, drift["siblings"])
+        self.assertIsNone(drift["count"])
+
+    def test_the_census_the_probe_builds_survives_into_the_dump(self) -> None:
+        # Built by the WRITER rather than hand-written, so this pins the whole path:
+        # every key `probe_appliance_list` emits is a key this reader looks up, and a
+        # rename on either side would silently turn the block's main field into
+        # `null` while both halves kept their own tests green.
+        from custom_components.addhon.client.transport.parse import probe_appliance_list
+
+        # The envelope the field report actually carried: `result` keys
+        # ['executionTime', 'modules', 'success'], `modules` keys ['applianceList'].
+        # What sat under `applianceList` is exactly what no dump could say, which is
+        # why the walk has to report the level it stopped at.
+        drifted = {
+            "executionTime": 1.2,
+            "modules": {"applianceList": {"AA:BB:CC:DD:EE:FF": 1}},
+            "success": True,
+        }
+        empty = {"modules": {"applianceList": {"payload": {"appliances": []}}}}
+        blocks = [
+            self._fetch(
+                {"at": FROZEN, "status": 200, "code": None, **probe_appliance_list(body)}
+            )
+            for body in (drifted, empty)
+        ]
+        self.assertNotEqual(blocks[0], blocks[1])
+        self.assertEqual("missing_key", blocks[0]["outcome"])
+        self.assertEqual("payload", blocks[0]["stopped_at"])
+        self.assertEqual(1, blocks[0]["siblings"])
+        self.assertIsNone(blocks[0]["count"])
+        self.assertEqual("ok", blocks[1]["outcome"])
+        self.assertEqual(0, blocks[1]["count"])
+        # The sibling key beside the level we stopped at was chosen by the cloud.
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(blocks))
+
+    def test_a_dropped_inventory_is_not_an_empty_account(self) -> None:
+        # State (D): the cloud sent two appliances and this setup dropped both at the
+        # empty-MAC guard, which is the one drop in session.py that does not even log.
+        fetch = self._fetch(
+            {"status": 200, "outcome": "ok", "count": 2},
+            setup_expanded=2,
+            appliance_count=0,
+            setup_drops={"mac_empty": 2},
+        )
+        self.assertEqual(2, fetch["count"])
+        self.assertEqual(2, fetch["expanded"])
+        self.assertEqual(0, fetch["built"])
+        self.assertEqual({"mac_empty": 2}, fetch["skipped"])
+
+    def test_a_moved_endpoint_is_visible_as_a_status(self) -> None:
+        # State (C): a 4xx with a JSON body is delivered as a success by
+        # connection.py, so without the status it is indistinguishable from drift.
+        fetch = self._fetch(
+            {"status": 404, "outcome": "missing_key", "stopped_at": "modules"}
+        )
+        self.assertEqual(404, fetch["status"])
+        self.assertEqual("modules", fetch["stopped_at"])
+
+    def test_a_raised_fetch_is_visible_as_an_outcome(self) -> None:
+        # State (E): the POST never reached a body. Recorded on the error path, which
+        # is the half a census written after the call could never carry.
+        fetch = self._fetch(
+            {"status": None, "code": "ADDHON-470", "outcome": "raised"}
+        )
+        self.assertEqual("recorded", fetch["state"])
+        self.assertEqual("raised", fetch["outcome"])
+        self.assertEqual("ADDHON-470", fetch["code"])
+        self.assertIsNone(fetch["status"])
+
+    def test_a_zoned_account_reconciles(self) -> None:
+        # State (H): one cloud entry with `zone: 2` is expanded into three appliance
+        # objects, so `expanded > count` is a SANE reading and the block must be able
+        # to show it rather than look like an inconsistency.
+        fetch = self._fetch(
+            {"status": 200, "outcome": "ok", "count": 1},
+            setup_expanded=3,
+            appliance_count=3,
+        )
+        self.assertEqual(1, fetch["count"])
+        self.assertEqual(3, fetch["expanded"])
+        self.assertEqual(3, fetch["built"])
+
+    def test_unknown_tokens_collapse_to_other(self) -> None:
+        # The leak test on the reader side. Every token field is looked up in a
+        # frozenset written in diagnostics.py; a value from anywhere else is reported
+        # as "other", which keeps the finding ("the writer said something this build
+        # does not know") and loses the value.
+        fetch = self._fetch(
+            {
+                "outcome": "3C:71:BF:AA:BB:CC",
+                "stopped_at": "user@example.com",
+                "node_type": "Kitchen Washer",
+            }
+        )
+        self.assertEqual("other", fetch["outcome"])
+        self.assertEqual("other", fetch["stopped_at"])
+        self.assertEqual("other", fetch["node_type"])
+        blob = json.dumps(self._dump(_FetchClient({
+            "outcome": "3C:71:BF:AA:BB:CC",
+            "stopped_at": "user@example.com",
+            "node_type": "Kitchen Washer",
+        })))
+        for leak in ("3C:71:BF:AA:BB:CC", "user@example.com", "Kitchen Washer"):
+            self.assertNotIn(leak, blob, leak)
+
+    def test_a_str_subclass_token_cannot_smuggle_text(self) -> None:
+        # `isinstance` admits subclasses, and a str subclass may define __eq__/__hash__
+        # so that it IS "ok" for every membership test while its characters are a MAC.
+        # `_closed_token` compares with `type(value) is str` for exactly this, and the
+        # JSON encoder writes characters, not equality classes.
+        class Tok(str):
+            def __eq__(self, other):
+                return other == "ok" or str.__eq__(self, other)
+
+            def __ne__(self, other):
+                return not self.__eq__(other)
+
+            def __hash__(self):
+                return hash("ok")
+
+        smuggler = Tok("AA:BB:CC:DD:EE:FF")
+        # The premise of the test: this object passes the membership test the naive
+        # implementation would have used.
+        self.assertIn(smuggler, diagnostics._FETCH_OUTCOMES)
+        result = self._dump(_FetchClient({"outcome": smuggler}))
+        self.assertEqual("other", result["last_fetch"]["outcome"])
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(result))
+
+    def test_an_unknown_code_label_is_dropped(self) -> None:
+        # A catalog label cannot be enumerated here without duplicating error_codes.py,
+        # so it is bounded by shape. Anything that is not "ADDHON-" plus exactly three
+        # digits is not a label this build can vouch for.
+        for junk in ("not-a-label", "ADDHON-99", "ADDHON-4700"):
+            with self.subTest(code=junk):
+                self.assertIsNone(self._fetch({"code": junk})["code"])
+
+    def test_unknown_skip_reasons_are_not_copied(self) -> None:
+        # `_skip_census` iterates the ALLOWLIST, never the mapping it received: a key
+        # chosen by the writer is a key `_redact` would publish, because `_redact`
+        # masks by key name and has never heard of this one.
+        fetch = self._fetch(
+            {"outcome": "ok", "count": 2},
+            setup_drops={"AA:BB:CC:DD:EE:FF": 1, "mac_empty": 2},
+        )
+        self.assertEqual({"mac_empty": 2}, fetch["skipped"])
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(fetch))
+
+    def test_unknown_degraded_keys_are_not_copied(self) -> None:
+        # The session keys its degradation ledger by f"{mac}#{zone}"; the reduction to
+        # labels happens on the session side, and this is the second wall: a key that
+        # is not a label is dropped whole, value included.
+        fetch = self._fetch(
+            {"outcome": "ok", "count": 2},
+            degraded_census={"AA:BB:CC#0": 3, "ADDHON-230": 2},
+        )
+        self.assertEqual({"ADDHON-230": 2}, fetch["degraded"])
+        self.assertNotIn("AA:BB:CC#0", json.dumps(fetch))
+
+    def test_a_skip_count_that_is_not_a_count_is_dropped(self) -> None:
+        # The two tests above put their hostile string in the KEY, which the allowlist
+        # refuses without ever looking at the value. This is the other half: a KNOWN
+        # key whose VALUE is text. `_skip_census` runs `_bounded_int` on it for
+        # exactly this reason -- the census arrives through a `getattr` on
+        # `_hon_instance`, which in a test, or beside a session double, is any object
+        # at all -- and without this the check is invisible to the suite and the next
+        # simplification writes `out[reason] = raw.get(reason)`.
+        fetch = self._fetch(
+            {"outcome": "ok", "count": 2},
+            setup_drops={"mac_empty": "AA:BB:CC:DD:EE:FF"},
+        )
+        self.assertEqual({}, fetch["skipped"])
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(fetch))
+        # A bool is refused too: isinstance(True, int) is True, and `"mac_empty": true`
+        # is a reader's problem forever.
+        boolean = self._fetch({"outcome": "ok"}, setup_drops={"mac_empty": True})
+        self.assertEqual({}, boolean["skipped"])
+
+    def test_a_degraded_count_that_is_not_a_count_drops_the_whole_row(self) -> None:
+        # Keys and values move together or not at all: a valid label with a text count
+        # takes the label out with it, rather than publishing the label beside a
+        # value this reader could not vouch for.
+        fetch = self._fetch(
+            {"outcome": "ok", "count": 2},
+            degraded_census={"ADDHON-230": "AA:BB:CC:DD:EE:FF"},
+        )
+        self.assertEqual({}, fetch["degraded"])
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(fetch))
+
+    def test_the_three_setup_counters_are_range_checked_like_the_others(self) -> None:
+        # `count` and `status` have junk-value tests; `siblings`, `expanded` and
+        # `built` had none, so their `_bounded_int` calls could be deleted with the
+        # suite green -- and three of the block's fourteen fields would then publish
+        # whatever the writer returned. Same table, same three refusals.
+        self.assertIsNone(self._fetch({"outcome": "ok", "siblings": True})["siblings"])
+        self.assertIsNone(self._fetch({"outcome": "ok", "siblings": "2"})["siblings"])
+        self.assertIsNone(self._fetch({"outcome": "ok", "siblings": -1})["siblings"])
+        for junk in ("3", True, -1, diagnostics._FETCH_MAX_INT + 1):
+            with self.subTest(junk=junk):
+                self.assertIsNone(
+                    self._fetch({"outcome": "ok"}, setup_expanded=junk)["expanded"]
+                )
+                self.assertIsNone(
+                    self._fetch({"outcome": "ok"}, appliance_count=junk)["built"]
+                )
+        # ...and a legitimate value still passes, so the assertions above are not
+        # passing merely because the fields are always null.
+        healthy = self._fetch({"outcome": "ok"}, setup_expanded=3, appliance_count=2)
+        self.assertEqual(3, healthy["expanded"])
+        self.assertEqual(2, healthy["built"])
+
+    def test_a_huge_degraded_map_is_capped(self) -> None:
+        # 20 as a LITERAL, not as `diagnostics._FETCH_MAX_LABEL_ROWS`: an expected
+        # value borrowed from the code under test pins the existence of a cap and
+        # never its value, so widening the constant to 1000 would leave this green
+        # while the block grew fifty times. The input is 100 valid labels, so the
+        # answer is exact and the number a reviewer wants to see is in the test.
+        census = {f"ADDHON-{200 + i}": 1 for i in range(100)}
+        fetch = self._fetch({"outcome": "ok", "count": 1}, degraded_census=census)
+        self.assertEqual(20, len(fetch["degraded"]))
+        self.assertEqual(20, diagnostics._FETCH_MAX_LABEL_ROWS)
+
+    def test_out_of_range_status_is_refused(self) -> None:
+        # `True` is in the list on purpose: isinstance(True, int) is True, and a
+        # `"status": true` in the document would be a reader's problem forever.
+        for junk in (99, 600, "200", True):
+            with self.subTest(status=junk):
+                self.assertIsNone(self._fetch({"status": junk})["status"])
+
+    def test_a_boolean_count_is_not_an_int(self) -> None:
+        self.assertIsNone(self._fetch({"outcome": "ok", "count": True})["count"])
+
+    def test_a_string_instant_is_never_echoed(self) -> None:
+        # `_stamp_text` promises its output was built by datetime.isoformat. A cloud
+        # string that merely looks like an instant would break that promise while
+        # looking identical in the file.
+        fetch = self._fetch({"at": "2026-08-21T04:11:07"})
+        self.assertIsNone(fetch["at"])
+        self.assertIsNone(fetch["age_s"])
+        self.assertNotIn("2026-08-21T04:11:07", json.dumps(fetch))
+
+    def test_a_naive_instant_yields_neither_a_stamp_nor_an_age(self) -> None:
+        # `_as_utc(..., assume_naive_utc=False)` returns None for a naive datetime, so
+        # both halves blank together. The writer always stamps
+        # `datetime.now(timezone.utc)`, so a naive value can only come from a foreign
+        # object, and refusing it is the right answer.
+        fetch = self._fetch({"at": datetime(2026, 8, 21, 4, 11, 7)})
+        self.assertIsNone(fetch["at"])
+        self.assertIsNone(fetch["age_s"])
+
+    def test_at_and_age_move_together(self) -> None:
+        # Both halves hang off ONE `moment`, so an instant `_as_utc` refuses blanks
+        # BOTH: that is the coupling that matters, because it is what stops a value
+        # this reader could not validate from being half-published.
+        with _FrozenClock(FROZEN):
+            for at in (
+                FROZEN - timedelta(seconds=30),
+                datetime(2026, 8, 21, 4, 11, 7),
+                "2026-08-21T04:11:07",
+                object(),
+            ):
+                with self.subTest(at=type(at).__name__):
+                    fetch = self._fetch({"at": at})
+                    self.assertEqual(fetch["at"] is None, fetch["age_s"] is None)
+
+    def test_an_out_of_range_age_keeps_the_instant_that_explains_it(self) -> None:
+        # The FIRST of the two ways the halves part, and the reason the coupling is
+        # not stated as an invariant. A host that stamped the fetch before NTP
+        # corrected its clock -- Home Assistant on a Pi with no RTC, a container
+        # started before sync -- writes an instant `_as_utc` accepts and `_stamp_text`
+        # renders, whose age then falls outside +/-10 years and is refused.
+        #
+        # `at` MUST survive that: it is the only field in the document that explains
+        # why every other age in the same dump looks absurd. Blanking it to satisfy a
+        # tidier-sounding invariant would delete the finding.
+        before_ntp = datetime(1970, 1, 1, 0, 0, 11, tzinfo=timezone.utc)
+        with _FrozenClock(FROZEN):
+            skewed = self._fetch({"outcome": "ok", "count": 0, "at": before_ntp})
+        self.assertEqual("1970-01-01T00:00:11+00:00", skewed["at"])
+        self.assertEqual(before_ntp.isoformat(), skewed["at"])
+        self.assertIsNone(skewed["age_s"])
+
+    def test_a_hostile_isoformat_loses_the_stamp_and_keeps_the_age(self) -> None:
+        # The SECOND way they part, and the test that pins `at` to `_stamp_text`
+        # rather than to `datetime.isoformat`. `_as_utc` accepts a datetime SUBCLASS
+        # (it is a datetime), `_age_seconds` computes a real age from it, and
+        # `_stamp_text` is the only thing standing between an overridden
+        # `isoformat()` and the file: it re-validates the rendered text against
+        # `_ISO_RE` and a 40-character cap.
+        #
+        # Every other test in this class is satisfied by a bare `moment.isoformat()`
+        # -- the string cases never reach the render at all, because `_as_utc`
+        # refused them first -- so without this one the validator is dead weight as
+        # far as the suite can tell, and the next simplification deletes it.
+        class _HostileStamp(datetime):
+            def isoformat(self, *args, **kwargs):
+                return "AA:BB:CC:DD:EE:FF"
+
+        moment = _HostileStamp(2026, 8, 13, 7, 9, 10, tzinfo=timezone.utc)
+        with _FrozenClock(FROZEN):
+            result = self._dump(_FetchClient({"outcome": "ok", "count": 0, "at": moment}))
+        fetch = result["last_fetch"]
+        self.assertIsNone(fetch["at"])
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(result))
+        # The age survives because it is COMPUTED, not echoed, and `generated_at` in
+        # the same document lets a reader place it.
+        self.assertEqual(30, fetch["age_s"])
+
+    def test_an_absurd_age_is_refused(self) -> None:
+        with _FrozenClock(FROZEN):
+            ancient = self._fetch({"at": FROZEN - timedelta(days=365 * 50)})
+            recent = self._fetch({"at": FROZEN - timedelta(days=365 * 5)})
+            ahead = self._fetch({"at": FROZEN + timedelta(days=365 * 5)})
+        self.assertIsNone(ancient["age_s"])
+        self.assertGreater(recent["age_s"], 0)
+        self.assertLessEqual(recent["age_s"], diagnostics._FETCH_MAX_AGE_S)
+        # A NEGATIVE age is a finding, not nonsense: it says the reporter's clock and
+        # the one that stamped the fetch disagree. The bound must not erase it.
+        self.assertLess(ahead["age_s"], 0)
+
+    def test_last_fetch_does_not_read_the_clock_again(self) -> None:
+        # `now` is passed in, like every other age in the document, so the whole dump
+        # still describes one instant.
+        moment = FROZEN - timedelta(seconds=51_840)
+        with _FrozenClock(FROZEN) as clock:
+            fetch = self._fetch({"at": moment})
+        self.assertEqual(1, clock.calls)
+        self.assertEqual(moment.isoformat(), fetch["at"])
+        self.assertEqual(51_840, fetch["age_s"])
+
+    def test_last_fetch_sits_between_last_poll_and_appliances(self) -> None:
+        # The placement IS the content of the change: the two blocks answer the same
+        # family of question ("what did the cloud give us") and a reader who found
+        # `last_poll` must fall over this one without being told it exists.
+        result = self._dump(_FetchClient({"outcome": "ok", "count": 0}))
+        self.assertEqual(["last_poll", "last_fetch", "appliances"], list(result)[-3:])
+        # And it did not take over the first key, which `generated_at` owns.
+        self.assertEqual("generated_at", next(iter(result)))
+
+    def test_a_populated_fetch_block_carries_no_identity(self) -> None:
+        # The end-to-end leak check, over the FINISHED document rather than the block:
+        # `last_fetch` skips `_redact` by design, exactly like `last_poll` beside it,
+        # so what protects it has to be visible here.
+        census = {
+            "at": FROZEN,
+            "status": 200,
+            "code": "decode error for Kitchen Washer at AA:BB:CC:DD:EE:FF",
+            "outcome": "ok",
+            "stopped_at": "PLAINTEXT-SERIAL",
+            "node_type": "user@example.com",
+            "count": 2,
+        }
+        with _FrozenClock(FROZEN):
+            result = self._dump(
+                _FetchClient(
+                    census,
+                    setup_expanded=2,
+                    appliance_count=0,
+                    setup_drops={"AA:BB:CC:DD:EE:FF": 1, "mac_empty": 2},
+                    degraded_census={"AA:BB:CC:DD:EE:FF#0": 1, "ADDHON-230": 2},
+                ),
+                _build_coordinator(),
+            )
+        blob = json.dumps(result)
+        for leak in (
+            "Kitchen Washer",
+            "AA:BB:CC:DD:EE:FF",
+            "PLAINTEXT-SERIAL",
+            "user@example.com",
+            "decode error for",
+        ):
+            self.assertNotIn(leak, blob, leak)
+        # ...and the block still said everything it was asked to say.
+        self.assertEqual(2, result["last_fetch"]["count"])
+        self.assertEqual({"mac_empty": 2}, result["last_fetch"]["skipped"])
+        self.assertEqual({"ADDHON-230": 2}, result["last_fetch"]["degraded"])
+
+    def test_a_foreign_client_object_yields_never_ran(self) -> None:
+        # Everything that is not a Mapping is the same state: nothing was recorded on
+        # this client. The reader does not try to interpret it further.
+        for census in ("x", [], None, 3):
+            with self.subTest(census=census):
+                self.assertEqual("never_ran", self._fetch(census)["state"])
+
+    def test_a_raising_client_property_degrades_the_block_not_the_dump(self) -> None:
+        # setup() runs on the dedicated hOn loop thread while a Download Diagnostics
+        # runs on HA's event loop, so any accessor here can raise on a session being
+        # torn down. A convenience field must never take the whole download with it --
+        # the download is the artefact the whole exercise exists to make producible.
+        result = self._dump(_RaisingFetchClient(), _build_coordinator())
+        self.assertEqual("unreadable", result["last_fetch"]["state"])
+        self.assertEqual(2, len(result["appliances"]))
+        self.assertIn("generated_at", result)
+        self.assertIn("platforms", result)
 
 
 # --- Task 10: air purifier coverage and passive future-capability capture -----
@@ -6065,6 +6708,371 @@ class TheNestedParametersContainerIsAlwaysAPlainDictTest(unittest.TestCase):
                     type(landed) is dict or not isinstance(landed, Mapping),
                     f"a {type(landed).__name__} reached the dead fallback",
                 )
+
+
+class _FailedCode:
+    """The `error_codes` singleton `HonClient.last_error_code` holds after a failure."""
+
+    label = "ADDHON-400"
+    reason_en = "Validation failed"
+
+
+class _FailedClient:
+    """A client as `_store_setup_failure` finds it: the session already gone (so the
+    live census reads None) and the snapshot `setup_sync` took in its place."""
+
+    last_error_code = _FailedCode
+    last_error_phase = "load_appliances/auth"
+    last_phase_ledger = [{"phase": "auth", "seconds": 2.1, "outcome": "error"}]
+    last_appliance_fetch = None
+    last_setup_fetch = {"outcome": "raised", "code": "ADDHON-470", "status": None}
+    setup_expanded = 0
+    appliance_count = 0
+    setup_drops = {}
+    degraded_census = {}
+
+
+def _addhon_init():
+    """The integration package, which owns the writer half of the record."""
+    return importlib.import_module("custom_components.addhon")
+
+
+class SetupFailureRecordTest(unittest.TestCase):
+    """A dump taken after a FAILED setup says why it failed.
+
+    Until the record existed both failure branches of `async_setup_entry` popped the
+    entry bucket whole, so `last_error` read `{"status": "client_absent"}` -- the same
+    answer a dump gives while Home Assistant is still retrying -- and `last_fetch` read
+    `client_absent` too. Everything built to explain a failed setup (the per-phase
+    ledger of #76, the appliance-list census) was unreachable in the one dump a
+    reporter can produce for it.
+    """
+
+    def _hass_with_record(self, record):
+        hass = FakeHass(_build_coordinator())
+        hass.data[DOMAIN]["e1"] = {"setup_failure": record}
+        return hass
+
+    def _dump_record(self, record):
+        return _run(
+            diagnostics.async_get_config_entry_diagnostics(
+                self._hass_with_record(record), FakeEntry()
+            )
+        )
+
+    def _record(self, **over):
+        record = {
+            "code": "ADDHON-400",
+            "phase": "load_appliances/auth",
+            "phase_ledger": [{"phase": "auth", "seconds": 2.1, "outcome": "error"}],
+            "fetch": None,
+            "at": datetime(2026, 8, 24, 9, 0, 0, tzinfo=timezone.utc),
+        }
+        record.update(over)
+        return record
+
+    # -- the writer -------------------------------------------------------------
+
+    def test_a_failed_setup_replaces_the_bucket_instead_of_popping_it(self) -> None:
+        # REPLACES, not merges: a coordinator and a client the setup could not finish
+        # handing over must not survive it. The record is the only key left.
+        init = _addhon_init()
+        hass = FakeHass(_build_coordinator())
+        hass.data[DOMAIN]["e1"]["client"] = _FailedClient()
+        init._store_setup_failure(hass, FakeEntry(), _FailedClient())
+        bucket = hass.data[DOMAIN]["e1"]
+        self.assertEqual({"setup_failure"}, set(bucket))
+        self.assertEqual("ADDHON-400", bucket["setup_failure"]["code"])
+        self.assertEqual("load_appliances/auth", bucket["setup_failure"]["phase"])
+
+    def test_the_record_stores_the_label_and_never_the_code_object(self) -> None:
+        # The reason is resolved from the catalog at READ time, so the sentence in the
+        # dump comes from error_codes.py in the running version. A record that carried
+        # the object (or its text) would put a value from another process's catalog --
+        # or from whatever a future writer decides to store -- into the document.
+        init = _addhon_init()
+        hass = FakeHass(_build_coordinator())
+        init._store_setup_failure(hass, FakeEntry(), _FailedClient())
+        record = hass.data[DOMAIN]["e1"]["setup_failure"]
+        self.assertEqual("ADDHON-400", record["code"])
+        self.assertNotIn("reason", record)
+        self.assertIsInstance(record["at"], datetime)
+        self.assertIsNotNone(record["at"].tzinfo)
+
+    def test_the_record_falls_back_to_the_snapshot_when_the_session_is_gone(self) -> None:
+        # THE reason `last_setup_fetch` exists. A failure raised inside setup_sync has
+        # already closed the session there, so the live property reads None and the
+        # census of the call would be gone -- with it, the only evidence of a POST that
+        # never reached a body.
+        init = _addhon_init()
+        hass = FakeHass(_build_coordinator())
+        init._store_setup_failure(hass, FakeEntry(), _FailedClient())
+        fetch = hass.data[DOMAIN]["e1"]["setup_failure"]["fetch"]
+        self.assertEqual("raised", fetch["outcome"])
+        self.assertEqual("ADDHON-470", fetch["code"])
+        # The four counters are flattened in beside it, so the reader has one source.
+        for key in ("expanded", "built", "skipped", "degraded"):
+            self.assertIn(key, fetch)
+
+    def test_a_live_census_wins_over_the_snapshot(self) -> None:
+        # A setup that failed AFTER the client came up (the first coordinator refresh
+        # raising ConfigEntryNotReady) still has its session: the live census describes
+        # the same call and is the fresher of the two.
+        init = _addhon_init()
+        client = _FailedClient()
+        client.last_appliance_fetch = {"outcome": "ok", "count": 2}
+        hass = FakeHass(_build_coordinator())
+        init._store_setup_failure(hass, FakeEntry(), client)
+        self.assertEqual(
+            "ok", hass.data[DOMAIN]["e1"]["setup_failure"]["fetch"]["outcome"]
+        )
+
+    def test_a_raising_property_does_not_keep_the_setup_from_closing(self) -> None:
+        # `getattr(x, name, default)` swallows a MISSING attribute, never an exception
+        # raised INSIDE a property body -- and `setup_drops` ends in
+        # `dict(self._setup_drops)` on a session setup may still be appending to from
+        # the hOn loop thread (client/session.py:625-632, the same hazard
+        # `_RaisingFetchClient` above stands in for). Unguarded, that raise propagates
+        # out of the `except` handler in async_setup_entry, `_async_close_client` never
+        # runs, and the dedicated loop thread and the aiohttp session leak.
+        init = _addhon_init()
+
+        class Hostile(_FailedClient):
+            @property
+            def setup_drops(self):
+                raise RuntimeError("session torn down on the hOn loop thread")
+
+        hass = FakeHass(_build_coordinator())
+        hass.data[DOMAIN]["e1"]["client"] = object()
+        init._store_setup_failure(hass, FakeEntry(), Hostile())
+        # No raise -- and the bucket is still CLEARED, because a coordinator or a
+        # client that outlived a failed setup is the one outcome worse than a missing
+        # record. Empty, not half-filled: `last_error` then answers `client_absent`,
+        # which is exactly true.
+        self.assertEqual({}, hass.data[DOMAIN]["e1"])
+        result = _run(
+            diagnostics.async_get_config_entry_diagnostics(hass, FakeEntry())
+        )
+        self.assertEqual({"status": "client_absent"}, result["last_error"])
+
+    def test_removing_the_entry_drops_the_record(self) -> None:
+        # The only hook that can: an entry whose setup never succeeded is never
+        # unloaded, so without async_remove_entry the record outlives the entry and
+        # keeps hass.data[DOMAIN] non-empty -- which is what async_unload_entry reads
+        # to decide the global debug services can go.
+        init = _addhon_init()
+        hass = self._hass_with_record(self._record())
+        _run(init.async_remove_entry(hass, FakeEntry()))
+        self.assertNotIn("e1", hass.data[DOMAIN])
+
+    def test_both_failure_branches_record_before_closing_the_client(self) -> None:
+        # Source-level, because async_setup_entry is not behaviourally testable in this
+        # harness (it runs the executor login, the first refresh and the platform
+        # forwarding). Order is the whole point: _async_close_client nulls the session
+        # `last_appliance_fetch` reads through, so a record built after it would have
+        # lost the live census in exactly the case that has one.
+        source = (
+            Path(diagnostics.__file__).resolve().parent / "__init__.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        setup = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+        )
+        handlers = [h for h in ast.walk(setup) if isinstance(h, ast.ExceptHandler)]
+        recording = [
+            h for h in handlers
+            if any(
+                isinstance(call.func, ast.Name) and call.func.id == "_store_setup_failure"
+                for call in ast.walk(h) if isinstance(call, ast.Call)
+            )
+        ]
+        self.assertEqual(2, len(recording), "both failure branches must record")
+        for handler in recording:
+            # By LINE, not by the order ast.walk happens to yield: walk is breadth
+            # first, so an index into its output says nothing about which call runs
+            # first, and an assertion built on it passes whichever way the two are
+            # written. Verified by mutation: swapping the two statements leaves a
+            # walk-order assertion green and fails this one.
+            lines: dict[str, list[int]] = {"_store_setup_failure": [], "_async_close_client": []}
+            for node in ast.walk(handler):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    if node.func.id in lines:
+                        lines[node.func.id].append(node.lineno)
+            # max/min, not a single lineno each: ast.walk is breadth first, so a name
+            # appearing twice in one handler would resolve to whichever the traversal
+            # yielded last. This asserts the strongest reading -- EVERY record build
+            # precedes EVERY close -- and cannot be satisfied by traversal luck.
+            self.assertLess(
+                max(lines["_store_setup_failure"]),
+                min(lines["_async_close_client"]),
+                "the record must be built while the session is still there",
+            )
+            # And the pop it replaced must be gone: a pop after the write would delete
+            # the record, a pop before it would be dead code that reads as a live rule.
+            self.assertNotIn(
+                "pop",
+                [
+                    node.func.attr
+                    for node in ast.walk(handler)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                ],
+            )
+
+    # -- the reader -------------------------------------------------------------
+
+    def test_last_error_reports_the_failure_instead_of_client_absent(self) -> None:
+        result = self._dump_record(self._record())["last_error"]
+        self.assertEqual("setup_failed", result["status"])
+        self.assertEqual("ADDHON-400", result["code"])
+        self.assertEqual("2026-08-24T09:00:00+00:00", result["at"])
+        self.assertEqual(
+            [{"phase": "auth", "seconds": 2.1, "outcome": "error"}],
+            result["phase_ledger"],
+        )
+
+    def test_the_reason_is_looked_up_and_never_read_from_the_record(self) -> None:
+        # The record is written by us, but it has been through hass.data: a writer in a
+        # future version (or a test double, or an older record left by an install that
+        # has since been upgraded) is not a source this file publishes text from.
+        from custom_components.addhon import error_codes as ec
+
+        result = self._dump_record(
+            self._record(reason="3C:71:BF:AA:BB:CC belongs to user@example.com")
+        )["last_error"]
+        self.assertEqual(ec.NETWORK_TIMEOUT.reason_en, result["reason"])
+        self.assertNotIn("3C:71", json.dumps(result))
+
+    def test_an_unknown_label_reports_no_reason_rather_than_a_guess(self) -> None:
+        # 998 is registered by nothing (999 IS: it is UNKNOWN), so this is a label
+        # whose shape passes and whose meaning this version does not have -- a record
+        # written by a newer install, read after a downgrade.
+        result = self._dump_record(self._record(code="ADDHON-998"))["last_error"]
+        self.assertEqual("ADDHON-998", result["code"])
+        self.assertIsNone(result["reason"])
+
+    def test_a_hostile_label_and_a_hostile_phase_are_refused(self) -> None:
+        result = self._dump_record(
+            self._record(code="3C:71:BF:AA:BB:CC", phase="user@example.com")
+        )["last_error"]
+        self.assertIsNone(result["code"])
+        self.assertIsNone(result["reason"])
+        self.assertIsNone(result["phase"])
+        self.assertNotIn("3C:71", json.dumps(result))
+        self.assertNotIn("example.com", json.dumps(result))
+
+    def test_a_str_subclass_cannot_smuggle_text_through_the_phase(self) -> None:
+        # The B1 guard, on the field this change adds: `isinstance` admits a str
+        # SUBCLASS, which can match the regex and still render something else.
+        class Sneaky(str):
+            def __str__(self) -> str:  # pragma: no cover - only reached if the guard fails
+                return "3C:71:BF:AA:BB:CC"
+
+        result = self._dump_record(self._record(phase=Sneaky("authenticate")))["last_error"]
+        self.assertIsNone(result["phase"])
+
+    def test_a_naive_stamp_is_refused(self) -> None:
+        result = self._dump_record(
+            self._record(at=datetime(2026, 8, 24, 9, 0, 0))
+        )["last_error"]
+        self.assertIsNone(result["at"])
+
+    def test_a_foreign_ledger_shape_is_dropped_not_published(self) -> None:
+        result = self._dump_record(self._record(phase_ledger="user@example.com"))["last_error"]
+        self.assertNotIn("phase_ledger", result)
+
+    def test_last_fetch_reads_the_recorded_census(self) -> None:
+        # THE acceptance test of this change, and the state the previous one wrote but
+        # could not show: a POST that never reached a body. The census used to die with
+        # the session the raise tore down.
+        block = self._dump_record(
+            self._record(
+                fetch={
+                    "outcome": "raised",
+                    "code": "ADDHON-470",
+                    "status": None,
+                    "expanded": 0,
+                    "built": 0,
+                    "skipped": {},
+                    "degraded": {},
+                }
+            )
+        )["last_fetch"]
+        self.assertEqual("recorded", block["state"])
+        self.assertEqual("raised", block["outcome"])
+        self.assertEqual("ADDHON-470", block["code"])
+
+    def test_the_counters_of_a_failed_setup_survive_it(self) -> None:
+        # The inventory arrived, setup dropped all of it, and then setup failed. Before
+        # the record this dump was indistinguishable from an account owning nothing.
+        block = self._dump_record(
+            self._record(
+                fetch={
+                    "outcome": "ok",
+                    "count": 2,
+                    "status": 200,
+                    "expanded": 2,
+                    "built": 0,
+                    "skipped": {"mac_empty": 2},
+                    "degraded": {},
+                }
+            )
+        )["last_fetch"]
+        self.assertEqual((2, 2, 0), (block["count"], block["expanded"], block["built"]))
+        self.assertEqual({"mac_empty": 2}, block["skipped"])
+
+    def test_a_record_without_a_census_still_reads_client_absent(self) -> None:
+        # The failure happened before the call, so there is nothing to say about it.
+        # `last_error` speaks for that dump; this block must not invent a census.
+        block = self._dump_record(self._record())["last_fetch"]
+        self.assertEqual("client_absent", block["state"])
+        self.assertIsNone(block["outcome"])
+
+    def test_the_recorded_block_keeps_the_key_set(self) -> None:
+        # Same rule as the four states above it: a field-by-field diff between two
+        # downloads of the same issue is only meaningful if the key set is stable.
+        from_record = self._dump_record(
+            self._record(fetch={"outcome": "ok", "count": 0})
+        )["last_fetch"]
+        hass = FakeHass(_build_coordinator())
+        hass.data[DOMAIN]["e1"]["client"] = _FetchClient({"outcome": "ok", "count": 0})
+        from_client = _run(
+            diagnostics.async_get_config_entry_diagnostics(hass, FakeEntry())
+        )["last_fetch"]
+        self.assertEqual(set(from_client), set(from_record))
+        self.assertEqual("recorded", from_record["state"])
+
+    def test_the_record_is_validated_like_a_live_client_not_trusted(self) -> None:
+        # The record has been through hass.data, so it is the LESS trusted of the two
+        # sources -- it must not be the one that gets the shorter check. Every hostile
+        # value below is refused by the same guard the live path uses.
+        block = self._dump_record(
+            self._record(
+                fetch={
+                    "outcome": "user@example.com",
+                    "stopped_at": "3C:71:BF:AA:BB:CC",
+                    "node_type": "Kitchen_Washer_3C71BFAABBCC",
+                    "code": "not-a-label",
+                    "status": 99999,
+                    "count": -1,
+                    "skipped": {"3C:71:BF:AA:BB:CC": 1},
+                    "degraded": {"user@example.com": 1},
+                }
+            )
+        )["last_fetch"]
+        # Two refusals, deliberately different. A token this reader does not know
+        # renders as "other" -- the finding survives, the value does not (_closed_token)
+        # -- while a label, a status and a count that fail their check go to null.
+        for key in ("outcome", "stopped_at", "node_type"):
+            with self.subTest(key=key):
+                self.assertEqual("other", block[key])
+        for key in ("code", "status", "count"):
+            with self.subTest(key=key):
+                self.assertIsNone(block[key])
+        self.assertEqual({}, block["skipped"])
+        self.assertEqual({}, block["degraded"])
+        self.assertNotIn("3C:71", json.dumps(block))
+        self.assertNotIn("example.com", json.dumps(block))
 
 
 if __name__ == "__main__":

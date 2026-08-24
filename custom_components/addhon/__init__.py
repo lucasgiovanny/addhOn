@@ -3,7 +3,8 @@
 
 import asyncio
 import logging
-from datetime import timedelta
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import NoReturn
 
 from homeassistant.config_entries import ConfigEntry
@@ -293,6 +294,106 @@ async def _async_close_client(client) -> None:
         await client.async_close()
     except Exception as err:
         _LOGGER.warning("Error closing HonClient: %s", err)
+
+
+def _store_setup_failure(hass: HomeAssistant, entry: ConfigEntry, client) -> None:
+    """Leave behind WHY this setup failed, in place of the bucket it never filled.
+
+    Until this existed the two failure branches of async_setup_entry popped the entry
+    bucket whole, so a diagnostics download taken after a failed setup found no client
+    to ask and reported `{"status": "client_absent"}` -- true, and useless: it is the
+    same answer a dump gives while Home Assistant is still retrying, and it says
+    nothing about the classified code, the phase that burned the time, or the
+    appliance-list call. That is the state a reporter downloads a dump in most often,
+    and the artefacts built to explain it (the per-phase ledger of #76, the fetch
+    census) were unreachable in exactly that dump.
+
+    The bucket is REPLACED, never merged: whatever platforms and the coordinator were
+    handed must not survive a failed setup, and the record is the only key left. It is
+    overwritten by the next attempt (async_setup_entry stores the live bucket as one
+    literal) and removed by async_unload_entry / async_remove_entry, so the record
+    describes the LAST attempt and only while the entry has no working session.
+
+    Called BEFORE _async_close_client on both branches, because closing the client
+    nulls the session `last_appliance_fetch` reads through -- the census would be gone
+    by the time this ran after it. `last_setup_fetch` covers the other half: a failure
+    raised INSIDE setup_sync has already closed the session there, and that path
+    snapshots the census before it does (hon_client.py, the except of setup_sync).
+
+    Every value stored here is one this integration already emits in the dump through
+    `_last_error`: an ADDHON label, a phase token, the phase ledger, the census
+    primitives. No new class of value reaches hass.data, and diagnostics still
+    validates each one on the way out rather than trusting this record.
+
+    The reads are GUARDED, and the guard is not symmetry with `diagnostics._last_fetch`
+    -- it costs more here. `getattr(x, name, default)` swallows a MISSING attribute, not
+    an exception raised inside a property body, and `_setup_failure_record` reads four
+    HonClient properties that delegate to `_hon_instance` (`setup_drops` ends in
+    `dict(self._setup_drops)` on a session that setup may still be appending to from the
+    hOn loop thread -- `client/session.py:625-632`, and `_RaisingFetchClient` in the
+    diagnostics tests exists for exactly that). Unguarded, one such raise leaves this
+    helper propagating out of the `except` handler that called it, so
+    `_async_close_client` never runs and the dedicated loop thread and the owned
+    aiohttp session leak -- and in the CancelledError branch it would replace a
+    cancellation with an unrelated error. A dump that cannot say why setup failed is a
+    worse dump; a client nobody closed is a worse process.
+
+    On that path the bucket is still cleared and left EMPTY rather than filled with a
+    half-read record: `_last_error` then answers `client_absent`, which is exactly true
+    (there is no client, and nothing could be read about why).
+    """
+    record: dict | None = None
+    try:
+        record = _setup_failure_record(client)
+    except Exception:  # noqa: BLE001 - a diagnostics record must never block teardown
+        _LOGGER.debug(
+            "Setup debug: could not record the setup failure for entry=%s",
+            entry.entry_id,
+            exc_info=True,
+        )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = (
+        {"setup_failure": record} if record is not None else {}
+    )
+    _LOGGER.debug(
+        "Setup debug: recorded setup failure for entry=%s code=%s phase=%s fetch=%s",
+        entry.entry_id,
+        (record or {}).get("code"),
+        (record or {}).get("phase"),
+        ((record or {}).get("fetch") or {}).get("outcome"),
+    )
+
+
+def _setup_failure_record(client) -> dict:
+    """The record itself. Split from the guard above so that guard is the whole
+    degradation story: four property reads that may raise, none of them allowed to
+    keep a failed setup from closing its client."""
+    code = getattr(client, "last_error_code", None)
+    census = getattr(client, "last_appliance_fetch", None) or getattr(
+        client, "last_setup_fetch", None
+    )
+    fetch: dict | None = None
+    if isinstance(census, Mapping):
+        # The four counters live on the client, not in the census: they are what SETUP
+        # made of the list, while the census is what the CALL returned. Flattened into
+        # one mapping here so the reader in diagnostics has a single source for the
+        # block whether it is reading a live client or this record.
+        fetch = {
+            **dict(census),
+            "expanded": getattr(client, "setup_expanded", None),
+            "built": getattr(client, "appliance_count", None),
+            "skipped": getattr(client, "setup_drops", None),
+            "degraded": getattr(client, "degraded_census", None),
+        }
+    return {
+        # The LABEL only, never the code object: diagnostics resolves the reason from
+        # the catalog at read time, so the text in the dump comes from error_codes.py
+        # in the running version and cannot be a string that rode in here.
+        "code": getattr(code, "label", None),
+        "phase": getattr(client, "last_error_phase", None),
+        "phase_ledger": getattr(client, "last_phase_ledger", None) or None,
+        "fetch": fetch,
+        "at": datetime.now(timezone.utc),
+    }
 
 
 @callback
@@ -659,7 +760,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await unload_platforms(entry, PLATFORMS)
                 except Exception as err:
                     _LOGGER.warning("Error unloading platforms after cancelled setup: %s", err)
-            hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        _store_setup_failure(hass, entry, hon_client)
         await _async_close_client(hon_client)
         raise
     except Exception:
@@ -670,7 +771,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await unload_platforms(entry, PLATFORMS)
                 except Exception as err:
                     _LOGGER.warning("Error unloading platforms after failed setup: %s", err)
-            hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        _store_setup_failure(hass, entry, hon_client)
         await _async_close_client(hon_client)
         raise
 
@@ -702,3 +803,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass.services.async_remove(DOMAIN, service)
                     _LOGGER.debug("Unload debug: removed service %s", service)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the setup-failure record when the entry itself is deleted.
+
+    The only hook that can. An entry whose setup never succeeded is never unloaded --
+    Home Assistant calls async_unload_entry for LOADED entries -- so without this the
+    record written by _store_setup_failure would outlive the entry it describes for the
+    rest of the process, and `hass.data[DOMAIN]` would stay non-empty, which is what
+    async_unload_entry reads to decide whether the last entry just went away and the
+    global debug services can go with it.
+
+    No client to close here: a failed setup left none, and a loaded entry has already
+    been through async_unload_entry by the time Home Assistant removes it.
+    """
+    removed = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    _LOGGER.debug(
+        "Remove debug: entry=%s dropped_record=%s",
+        entry.entry_id,
+        removed is not None,
+    )

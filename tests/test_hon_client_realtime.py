@@ -15,6 +15,7 @@ import asyncio
 import sys
 import threading
 import time
+import ast
 import types
 import unittest
 from pathlib import Path
@@ -1187,6 +1188,155 @@ class RealtimeWiringSourceGuard(unittest.TestCase):
         src = (self._COMPONENT / "hon_client.py").read_text(encoding="utf-8")
         self.assertIn("def subscribe_updates", src)
         self.assertIn("def build_realtime_snapshot", src)
+
+
+class LastFetchAccessorTest(unittest.TestCase):
+    """`HonClient.last_appliance_fetch` reads the LIVE session, never a mirror.
+
+    The census belongs to the transport api of the session that performed the fetch
+    (`NativeHon.last_appliance_fetch` -> `HonApi.last_appliance_fetch`). Mirroring it
+    into a field of the client would need a clear in setup_sync and a second write on
+    the MFA-resume path; forgetting either is how a dump ends up describing a session
+    the client has already thrown away, which is worse than reporting nothing.
+
+    `appliance_count`, `setup_expanded`, `setup_drops` and `degraded_census` beside
+    it are the setup census and are asserted here for the same reason and in the
+    same three shapes: they read through the same `_hon_instance` and inherit the
+    lifetime pinned by the last test of this class.
+    """
+
+    def test_the_accessors_are_none_without_a_session(self) -> None:
+        client = HonClient(email="e@x", password="p")  # no _hon_instance yet
+        self.assertIsNone(client._hon_instance)
+        self.assertIsNone(client.last_appliance_fetch)
+        # None, never 0 or {}: "this client has no session" and "the setup built
+        # nothing" are two different findings, and the dump renders them as two
+        # different states (`client_absent` against `expanded: 0`).
+        self.assertIsNone(client.appliance_count)
+        self.assertIsNone(client.setup_expanded)
+        self.assertIsNone(client.setup_drops)
+        self.assertIsNone(client.degraded_census)
+
+    def test_the_accessors_read_the_live_session(self) -> None:
+        census = {"status": 200, "outcome": "ok", "count": 2}
+        drops = {"mac_empty": 2}
+        degraded = {"ADDHON-230": 1}
+        client = HonClient(email="e@x", password="p")
+        client._hon_instance = types.SimpleNamespace(
+            last_appliance_fetch=census,
+            appliances=[],
+            setup_expanded=2,
+            setup_drops=drops,
+            degraded_census=degraded,
+        )
+        self.assertIs(census, client.last_appliance_fetch)
+        self.assertIs(drops, client.setup_drops)
+        self.assertIs(degraded, client.degraded_census)
+        self.assertEqual(2, client.setup_expanded)
+        # State (D) of the design's table, read end to end off one session: the
+        # cloud sent two appliances (census count), setup expanded two objects,
+        # built none of them, and named the reason. That reading is the entire
+        # purpose of these four accessors existing on the same object.
+        self.assertEqual(0, client.appliance_count)
+
+    def test_a_closed_session_stops_reporting_a_fetch(self) -> None:
+        # The lifetime claim of the accessor's docstring, stated as behaviour: after
+        # _close_sync the client holds no session, so it cannot answer with the census
+        # of the one it just discarded. A mirrored field would still answer.
+        client = HonClient(email="e@x", password="p")
+        client._start_hon_loop()
+        session = FakeSession([])
+        session.last_appliance_fetch = {"status": 200, "outcome": "ok", "count": 2}
+        client._hon_instance = session
+        session.setup_expanded = 2
+        session.setup_drops = {"mac_empty": 2}
+        session.degraded_census = {"ADDHON-230": 1}
+        self.assertEqual(2, client.last_appliance_fetch["count"])
+        self.assertEqual(0, client.appliance_count)
+        client._close_sync()
+        self.assertIsNone(client._hon_instance)
+        self.assertIsNone(client.last_appliance_fetch)
+        self.assertIsNone(client.appliance_count)
+        self.assertIsNone(client.setup_expanded)
+        self.assertIsNone(client.setup_drops)
+        self.assertIsNone(client.degraded_census)
+
+
+class SetupFetchSnapshotTest(unittest.TestCase):
+    """`last_setup_fetch`: the one census the live accessor above cannot keep.
+
+    The accessor's argument against mirroring holds for a LIVE census, which drifts
+    because the session keeps writing after the copy. This field is written on the path
+    that has just decided there will be no more writes -- the except of setup_sync, one
+    line before `_close_sync` -- and read once, by `__init__._store_setup_failure`, into
+    a record that is never updated. Without it the census of a setup that raised inside
+    load_appliances dies with the session, and `outcome: "raised"` stays a state the
+    transport writes and no dump can show.
+    """
+
+    def test_a_fresh_client_has_no_snapshot(self) -> None:
+        client = HonClient(email="e@x", password="p")
+        self.assertIsNone(client.last_setup_fetch)
+
+    def test_the_snapshot_survives_the_close_the_accessor_does_not(self) -> None:
+        # The two halves of the same instant, side by side: after _close_sync the live
+        # accessor answers None (it has no session to ask) while the snapshot still
+        # carries what the call returned. That difference is the whole feature.
+        client = HonClient(email="e@x", password="p")
+        client._start_hon_loop()
+        session = FakeSession([])
+        session.last_appliance_fetch = {"outcome": "raised", "code": "ADDHON-470"}
+        client._hon_instance = session
+        client.last_setup_fetch = client.last_appliance_fetch
+        client._close_sync()
+        self.assertIsNone(client.last_appliance_fetch)
+        self.assertEqual("raised", client.last_setup_fetch["outcome"])
+
+    def test_setup_sync_snapshots_before_it_closes_and_clears_on_a_retry(self) -> None:
+        # Source-level: setup_sync runs a real login in an executor and is not
+        # behaviourally reachable here. Two orderings matter and both are asserted by
+        # LINE, because ast.walk is breadth first and an index into it would pass
+        # whichever way the statements are written.
+        #
+        # 1. the snapshot is taken BEFORE _close_sync, which nulls the session the
+        #    accessor reads through -- after it, there is nothing left to snapshot;
+        # 2. it is CLEARED at the top of setup_sync with the rest of the failure
+        #    record, so a retry that succeeds cannot leave a dump describing the
+        #    census of an attempt this client has already thrown away.
+        source = Path(HonClient.__module__.replace(".", "/") + ".py")
+        if not source.exists():  # pragma: no cover - import layout guard
+            source = Path(__file__).resolve().parents[1] / "custom_components" / "addhon" / "hon_client.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        setup = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "setup_sync"
+        )
+        # SORTED, because ast.walk is breadth first: its output is traversal order,
+        # not line order, and the clear and the snapshot sit at different depths. They
+        # happen to come out in line order today, so indexing the raw list would pass
+        # -- until an edit moved either statement and silently swapped the pair being
+        # asserted. (Reported by a reviewer on PR #86; the same trap this file's twin
+        # in test_diagnostics.py already avoids.)
+        writes = sorted(
+            node.lineno
+            for node in ast.walk(setup)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Attribute) and t.attr == "last_setup_fetch"
+                for t in node.targets
+            )
+        )
+        closes = sorted(
+            node.lineno
+            for node in ast.walk(setup)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_close_sync"
+        )
+        self.assertEqual(2, len(writes), "one clear at the top, one snapshot on failure")
+        self.assertTrue(closes, "setup_sync must still close the session it failed on")
+        self.assertLess(writes[0], min(closes), "the clear precedes every close")
+        self.assertLess(writes[1], max(closes), "the snapshot precedes the close it feeds")
 
 
 if __name__ == "__main__":
