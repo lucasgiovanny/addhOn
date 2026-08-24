@@ -259,17 +259,102 @@ _WINE_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
     ),
 )
 
-# Hob (IH/HOB): pan detected per zone.
-_HOB_BINARY: tuple[HonBinarySensorEntityDescription, ...] = tuple(
-    HonBinarySensorEntityDescription(
-        key=f"pan_zone{z}",
-        icon="mdi:pot-steam",
-        attr_key=f"panStatusZ{z}",
-    )
-    for z in range(1, 7)
+# The zone index the per-zone hob families are generated over. Kept as the six the
+# pan sensors have always used: the app's own IH parameter list runs to Z6, and the
+# per-attribute gate is what reduces it to the four a HA2MTSJ68MC reports.
+_HOB_ZONES = range(1, 7)
+
+# Hob (IH/HOB): everything the shadow says about each cooking zone, plus the
+# panel lock.
+#
+# `child_lock` REUSES the wash group's description object rather than declaring a
+# hob-specific twin. It is the same `lockStatus` parameter with the same meaning,
+# so it gets the same key, the same icon and the same translation -- and no
+# device_class: BinarySensorDeviceClass.LOCK is inverted in Home Assistant (on
+# means UNlocked), so a hob reporting lockStatus=1 would display as unlocked.
+_HOB_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"pan_zone{z}",
+            icon="mdi:pot-steam",
+            attr_key=f"panStatusZ{z}",
+        )
+        for z in _HOB_ZONES
+    ),
+    # Whether the zone is switched on at all. Distinct from `pan_zone*`, which
+    # says only that the hob can see cookware on the ring.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"zone_on_zone{z}",
+            attr_key=f"onOffStatusZ{z}",
+            device_class=BinarySensorDeviceClass.RUNNING,
+        )
+        for z in _HOB_ZONES
+    ),
+    # Residual heat: the "H" the panel shows after a zone is switched off. This is
+    # the reading issue #84 asks for by name.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"hot_zone{z}",
+            attr_key=f"hotStatusZ{z}",
+            device_class=BinarySensorDeviceClass.HEAT,
+        )
+        for z in _HOB_ZONES
+    ),
+    # Per-zone fault. `has_problem` and NOT the platform's `on_value`
+    # comparison: the hob spells "no error" as 0 AND as the app's zero-padded
+    # "00", and the client folds "01" to "1" on the way in, so a comparison
+    # against a raw code would light a PROBLEM permanently on all four zones.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"error_zone{z}",
+            attr_key=f"errorZ{z}",
+            device_class=BinarySensorDeviceClass.PROBLEM,
+            value_fn=has_problem,
+        )
+        for z in _HOB_ZONES
+    ),
+    # Flex zones bridged into one cooking surface. Behind the experimental option:
+    # the value is 0 on every zone of the only hob we have, and the app reads 1
+    # and 2 as two different halves of a bridged pair, a distinction a boolean
+    # cannot carry and nothing here can verify.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"combi_mode_zone{z}",
+            icon="mdi:link-variant",
+            attr_key=f"combiModeZ{z}",
+            value_fn=lambda raw: str(raw).strip() not in ("", "0", "0.0"),
+            experimental=True,
+        )
+        for z in _HOB_ZONES
+    ),
+    _CHILD_LOCK,
 )
 
-# Hood (HO).
+def _hood_filter_cleaning(raw) -> bool | None:
+    """True while the hood reports a filter-cleaning cycle in progress.
+
+    Its own reader because this is the one hood flag the device spells as a
+    TEXTUAL boolean: the reporting HADG6DS46BWIFI publishes the string "false",
+    not 0/1, so the platform's default `raw == on_value` comparison would read
+    every value -- "true" included -- as off. Both spellings are accepted, and an
+    unrecognized one reads as unknown rather than being forced to a side: the
+    decompiled app never touches this attribute, so there is no third spelling we
+    can claim to know the meaning of.
+    """
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "on", "yes"):
+        return True
+    if text in ("0", "false", "off", "no"):
+        return False
+    return None
+
+
+# Hood (HO). `filter_clean_needed` (filterCleaningAlarmStatus) and `filter_cleaning`
+# (filterCleaningStatus) are DELIBERATELY two entities: the first is the alarm flag
+# the settings command declares as a fixed "1", the second the cycle-in-progress
+# flag, and on the reporting hood they have not moved together since 2023. Folding
+# them would assert an equivalence nothing in the app or the dump supports.
 _HOOD_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
     HonBinarySensorEntityDescription(
         key="light",
@@ -280,6 +365,24 @@ _HOOD_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
         key="filter_clean_needed",
         attr_key="filterCleaningAlarmStatus",
         device_class=BinarySensorDeviceClass.PROBLEM,
+    ),
+    HonBinarySensorEntityDescription(
+        key="filter_cleaning",
+        icon="mdi:air-filter",
+        attr_key="filterCleaningStatus",
+        value_fn=_hood_filter_cleaning,
+        # An unreadable spelling hides the entity instead of claiming "not
+        # cleaning": see _hood_filter_cleaning.
+        unavailable_when_unmapped=True,
+    ),
+    # Extraction running. Read from onOffStatus rather than from windSpeed, which
+    # the fan entity already publishes: two entities telling the same story from
+    # the same attribute would be a mirror, while onOffStatus is the device's own
+    # separate statement about whether it considers itself on.
+    HonBinarySensorEntityDescription(
+        key="running",
+        attr_key="onOffStatus",
+        device_class=BinarySensorDeviceClass.RUNNING,
     ),
 )
 

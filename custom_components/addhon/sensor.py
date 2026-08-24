@@ -632,6 +632,24 @@ def _g_text(key: str, attr: str, icon: str | None = None,
     )
 
 
+def _experimental_text(key: str, attr: str) -> HonSensorEntityDescription:
+    """Gated RAW reading behind the experimental option.
+
+    For a family whose meaning is documented in the app but whose values this
+    integration has never seen move on any real device: the raw code is true, a
+    rendered label would not be, and the option keeps it out of everyone's way
+    until someone with the hardware can report what it does.
+    """
+    return HonSensorEntityDescription(
+        key=key,
+        attr_key=attr,
+        icon="mdi:tag-outline",
+        value_fn=_as_text,
+        gated=True,
+        experimental=True,
+    )
+
+
 def _g_enum(key: str, attr: str, mapping: dict[str, str], *,
             translation_key: str | None = None,
             icon: str | None = None) -> HonSensorEntityDescription:
@@ -735,23 +753,126 @@ _WINE: tuple[HonSensorEntityDescription, ...] = (
     _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
 )
 
-# Induction hob (IH/HOB): temperature per cooking zone. Pan detection
-# is a binary sensor.
+# The zone index every per-zone hob family is generated over. Six, not the four a
+# HA2MTSJ68MC has: the app's own IH parameter list runs to Z6 and `_HOB_BINARY`
+# has always generated six pan sensors, so the ceiling is the model's and the
+# per-attribute gate decides how many actually exist on a given hob.
+_HOB_ZONES = range(1, 7)
+
+# Attributes the DERIVED per-zone remaining-time sensors read (hours and minutes,
+# combined into one figure). Exported because `diagnostics._mapped_sets` cannot see
+# an entity that has no description row, and without these names its coverage block
+# reports twelve live readings as unmapped on every hob dump.
+HOB_ZONE_TIME_ATTRS: frozenset[str] = frozenset(
+    f"remainingTime{unit}Z{zone}" for zone in _HOB_ZONES for unit in ("HH", "MM")
+)
+
+
+# Induction hob (IH/HOB). Pan detection, zone power state, residual heat and
+# errors are binary sensors; the remaining time per zone is derived from two
+# attributes and so lives in its own class below.
+#
+# `temp_zone{N}` reads `sensorTempZ{N}` and is DELIBERATELY left alone. The hob of
+# issue #84 does not publish those names -- it publishes `tempZ{N}`, which arrives
+# below under the distinct key `plate_temp_zone{N}` -- but other models do publish
+# them, and re-pointing an existing key at a different attribute would silently
+# change what a shipped entity reports.
 _HOB: tuple[HonSensorEntityDescription, ...] = (
     _g_temp("temp_zone1", "sensorTempZ1"),
     _g_temp("temp_zone2", "sensorTempZ2"),
     _g_temp("temp_zone3", "sensorTempZ3"),
     _g_temp("temp_zone4", "sensorTempZ4"),
     _g_temp("temp_zone5", "sensorTempZ5"),
+    _g_temp("temp_zone6", "sensorTempZ6"),
+    # The power LEVEL of each zone, 0..`model_attributes.power` (15 on the
+    # reporting hob). No device_class and no unit: these are panel steps, not
+    # watts, and POWER would make Home Assistant render "15 W" for a zone drawing
+    # a couple of kilowatts.
+    *(
+        HonSensorEntityDescription(
+            key=f"power_zone{zone}",
+            attr_key=f"powerZ{zone}",
+            icon="mdi:fire",
+            state_class=SensorStateClass.MEASUREMENT,
+            gated=True,
+        )
+        for zone in _HOB_ZONES
+    ),
+    # --- families this hob has never moved ------------------------------------
+    # Present in the shadow, unchanged since 2022, and the device declares
+    # `probe = 0`. `experimental` is the mechanism the platforms already have for
+    # exactly this: deterministic, opt-in per config entry, and invisible to
+    # anyone who has not asked for it. It is NOT a liveness heuristic on
+    # `last_update`, which would be non-deterministic across restarts and would
+    # also delete `temp_zone*` from hobs that report it.
+    #
+    # NO device_class, NO unit and NO state_class, unlike every other temperature
+    # in this file. All three are CLAIMS: `device_class=TEMPERATURE` plus `°C`
+    # tells Home Assistant the number is a temperature in Celsius, and
+    # `state_class=MEASUREMENT` records it into long-term statistics under that
+    # unit. On the one hob anyone has, `tempZ{N}` has not moved since 2022 and the
+    # model declares `probe = "0"` -- no temperature probe at all -- so the whole
+    # reading is an inference from a parameter NAME in the decompiled app. The
+    # value is shipped raw, like every other experimental hob family, and a user
+    # with the hardware can report what it turns out to be. Promoting it later is
+    # additive; unpicking a year of statistics recorded in the wrong unit is not.
+    *(
+        HonSensorEntityDescription(
+            key=f"plate_temp_zone{zone}",
+            attr_key=f"tempZ{zone}",
+            icon="mdi:thermometer",
+            gated=True,
+            experimental=True,
+        )
+        for zone in _HOB_ZONES
+    ),
+    # Program code and phase per zone, shipped RAW. The app does carry enums for
+    # both, but the only hob we have has never reported anything other than 0, so
+    # a rendered label would be a claim no observation supports -- and the one
+    # program code this hob does report (212, a residue of the command-history
+    # recovery) already proves the mapping is not the straightforward one it looks.
+    *(
+        _experimental_text(f"program_code_zone{zone}", f"prCodeZ{zone}")
+        for zone in _HOB_ZONES
+    ),
+    *(
+        _experimental_text(f"program_phase_zone{zone}", f"prPhaseZ{zone}")
+        for zone in _HOB_ZONES
+    ),
+    # The hob-wide timer, in two halves as the device reports it. `timerMM` has
+    # moved on the reporting device and `timerHH` never has, but they are one
+    # reading and splitting their gating would ship half a clock.
+    _experimental_text("timer_hh", "timerHH"),
+    _experimental_text("timer_mm", "timerMM"),
 )
 
-# Hood (HO): fan speed. Light/filter alarm are binary sensors.
+# Hood (HO): fan speed, errors, cumulative work time. Light / filter alarm /
+# running are binary sensors, and the SPEED is also a fan entity -- this read-only
+# mirror predates it and stays for the entity_id its users already reference.
 _HOOD: tuple[HonSensorEntityDescription, ...] = (
     HonSensorEntityDescription(
         key="fan_speed",
         attr_key="windSpeed",
         icon="mdi:fan",
         state_class=SensorStateClass.MEASUREMENT,
+        gated=True,
+    ),
+    # Same treatment the oven, dishwasher and wine cooler already give `errors`:
+    # a raw code, not a number. `air_purifier.normalize_error` already folds every
+    # healthy spelling the hood uses (0 and the app's "00") onto one value, so the
+    # optional problem binary below reads correctly without a hood-specific map.
+    _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
+    # No unit, no device_class, no state_class, and DIAGNOSTIC on purpose. The
+    # hood reports 11147 on the device of issue #83 and the decompiled app never
+    # reads the value at all, so whether it counts minutes of lifetime use (~186 h,
+    # credible for a 2022 install) or seconds of the last session (~3.1 h, equally
+    # credible) is unknown. A DURATION class would have to pick one, and a
+    # state_class would start recording long-term statistics in the wrong unit.
+    HonSensorEntityDescription(
+        key="last_work_time",
+        attr_key="lastWorkTime",
+        icon="mdi:timer-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
         gated=True,
     ),
 )
@@ -1039,6 +1160,18 @@ async def async_setup_entry(
         ):
             entities.append(HonMeanWaterConsumption(coordinator, appliance_id))
             created.append("mean_water_consumption")
+        # Per-zone remaining cooking time: the hob reports it as an hour half and
+        # a minute half, and neither alone is a duration anyone can read. Gated on
+        # BOTH halves, per zone, so a hob reporting three zones gets three.
+        if app_type in (APPLIANCE_IH, APPLIANCE_HOB):
+            for zone in _HOB_ZONES:
+                hours, minutes = f"remainingTimeHHZ{zone}", f"remainingTimeMMZ{zone}"
+                if hours not in attributes or minutes not in attributes:
+                    continue
+                entities.append(
+                    HonHobZoneRemainingTime(coordinator, appliance_id, zone)
+                )
+                created.append(f"remaining_time_zone{zone}")
         _LOGGER.debug(
             "Sensor debug: '%s' (type=%s, id=%s) -> %d/%d sensors %s",
             data.get("name", "Haier"),
@@ -1216,6 +1349,50 @@ class HonMeanWaterConsumption(HonBaseEntity, SensorEntity):
         if denom <= 0:
             return None
         return round(water / denom, 2)
+
+
+class HonHobZoneRemainingTime(HonBaseEntity, SensorEntity):
+    """Remaining cooking time of ONE induction-hob zone, in minutes.
+
+    DERIVED from two attributes -- `remainingTimeHHZ<n>` and `remainingTimeMMZ<n>`
+    -- so it cannot be a description-table row (those read a single attr_key).
+    The device splits the figure the way its panel displays it; Home Assistant
+    wants one DURATION, and the minute half alone would read 5 minutes for a
+    two-hour-five programme.
+
+    Both halves are required. A zone reporting only one of them yields unknown
+    rather than a duration built from half the information: the hour half missing
+    would understate a long programme by whole hours, which is worse than saying
+    nothing.
+    """
+
+    _attr_icon = "mdi:timer-outline"
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_device_class = SensorDeviceClass.DURATION
+
+    def __init__(self, coordinator, appliance_id: str, zone: int) -> None:
+        super().__init__(coordinator, appliance_id)
+        self._hours_key = f"remainingTimeHHZ{zone}"
+        self._minutes_key = f"remainingTimeMMZ{zone}"
+        self._attr_translation_key = f"remaining_time_zone{zone}"
+        self._attr_unique_id = f"{appliance_id}_remaining_time_zone{zone}"
+
+    @property
+    def native_value(self):
+        # The int() conversions belong INSIDE the guard, not after it. float()
+        # accepts "nan" and "inf" happily and only int() rejects them, with
+        # ValueError on the first and OverflowError on the second -- both of which
+        # used to escape a PROPERTY, which Home Assistant surfaces as a broken
+        # entity. Folding them in here answers "unknown" instead, which is what a
+        # reading the device could not express actually means. Catching the two
+        # errors is what does the work: an explicit isfinite() check on top would
+        # be unreachable, and an unreachable guard is one no test can defend.
+        try:
+            hours = float(self._get_attr(self._hours_key))
+            minutes = float(self._get_attr(self._minutes_key))
+            return int(hours) * 60 + int(minutes)
+        except (ValueError, TypeError, OverflowError):
+            return None
 
 
 class HonDebugStatusSensor(HonAccountEntity, SensorEntity):

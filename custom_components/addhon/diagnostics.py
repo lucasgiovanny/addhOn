@@ -64,6 +64,9 @@ from .const import (
     APPLIANCE_AP,
     APPLIANCE_FR,
     APPLIANCE_FRE,
+    APPLIANCE_HO,
+    APPLIANCE_HOB,
+    APPLIANCE_IH,
     APPLIANCE_REF,
     APPLIANCE_WASH_GROUP,
     APPLIANCE_WD,
@@ -248,6 +251,23 @@ _CUSTOM_ENTITY_SOURCES: tuple[dict, ...] = (
         "types": (APPLIANCE_AP,),
         "read": ("lightStatus",),
         "write": ("lightStatus",),
+    },
+    # The hood fan, a fixed-key entity with no description table for the registry
+    # walk to find. Unlike the purifier fan it DOES write its read parameter:
+    # `windSpeed` is the whole control, both the level it reports and the level it
+    # sends. Turning off is `stopProgram`, which carries no values of ours at all
+    # (every parameter it declares is fixed), so it names no extra write here.
+    #
+    # The single-name write half is only TRUE because the speed goes out as a
+    # sparse patch (`fan.HonHoodFan._send`). While it went through the full-command
+    # sender the wire also carried `clockHH`/`clockMM`/`clockSS`,
+    # `filterCleaningAlarmStatus` and every other member of the `settings` group,
+    # and this row was telling the reporter something the dump itself disproved.
+    {
+        "tag": "fan.hood",
+        "types": (APPLIANCE_HO,),
+        "read": ("windSpeed",),
+        "write": ("windSpeed",),
     },
 )
 
@@ -630,7 +650,7 @@ def _mapped_sets(
     mapped_params: set[str] = set()
     sources: dict[str, dict[str, list[str]] | None] = {}
     unavailable: list[str] = []
-    # Seven imports, seven guards. Written out rather than driven by a table of
+    # Nine imports, nine guards. Written out rather than driven by a table of
     # module/name strings on purpose: `from .sensor import SENSORS` is a spelling
     # a linter, a grep and `rename` all understand, and this walk is already one
     # rename away from silently collapsing a numerator (there is no test that can
@@ -640,6 +660,16 @@ def _mapped_sets(
     except Exception:  # noqa: BLE001 - a dump must degrade, never raise
         AP_ENTITY_PARAMS = frozenset()
         _note_missing_registry("air_purifier", unavailable)
+    try:
+        from .hob import HOB_ENTITY_PARAMS
+    except Exception:  # noqa: BLE001 - a dump must degrade, never raise
+        HOB_ENTITY_PARAMS = frozenset()
+        _note_missing_registry("hob", unavailable)
+    try:
+        from .hood import HOOD_ENTITY_PARAMS
+    except Exception:  # noqa: BLE001 - a dump must degrade, never raise
+        HOOD_ENTITY_PARAMS = frozenset()
+        _note_missing_registry("hood", unavailable)
     try:
         from .binary_sensor import BINARY_SENSORS, _CONNECTIVITY, _UNIVERSAL_GATED
     except Exception:  # noqa: BLE001 - a dump must degrade, never raise
@@ -661,9 +691,9 @@ def _mapped_sets(
         _AC_DIRECTION_SELECTS, _PROGRAM_OPTION_SELECTS = (), ()
         _note_missing_registry("select", unavailable)
     try:
-        from .sensor import SENSORS
+        from .sensor import HOB_ZONE_TIME_ATTRS, SENSORS
     except Exception:  # noqa: BLE001 - a dump must degrade, never raise
-        SENSORS = {}
+        HOB_ZONE_TIME_ATTRS, SENSORS = frozenset(), {}
         _note_missing_registry("sensor", unavailable)
     try:
         from .switch import (
@@ -809,6 +839,40 @@ def _mapped_sets(
             )
     if app_type in APPLIANCE_WASH_GROUP:
         mapped_params.update(PROGRAM_PARAM_NAMES)
+    if app_type in (APPLIANCE_IH, APPLIANCE_HOB):
+        # The per-zone remaining-time sensors are DERIVED from two attributes
+        # each, so they are custom classes with no description row and the walk
+        # above cannot see either half. Twelve live readings would otherwise be
+        # reported unmapped on every hob dump while `entities.sources` two
+        # sections below named the sensors that read them.
+        mapped_attrs |= HOB_ZONE_TIME_ATTRS
+        # The intake-limit select is a fixed-key entity, so the same applies to
+        # the one parameter a hob lets anyone write.
+        mapped_attrs |= HOB_ENTITY_PARAMS
+        mapped_params |= HOB_ENTITY_PARAMS
+        sources["select.power_limit"] = _source_row(
+            read=_read_chain("powerManagement"), write=["powerManagement"]
+        )
+        for zone in sorted(
+            {name.rsplit("Z", 1)[1] for name in HOB_ZONE_TIME_ATTRS}, key=int
+        ):
+            sources[f"sensor.remaining_time_zone{zone}"] = _source_row(
+                read=[
+                    key
+                    for unit in ("HH", "MM")
+                    for key in _read_chain(f"remainingTime{unit}Z{zone}")
+                ]
+            )
+    if app_type == APPLIANCE_HO:
+        # Same shape as the AP block below, same reason. The hood's four parameters
+        # are each read as state AND written as a command field, but only two of the
+        # four reach the walk above: `windSpeed` belongs to the fan, a fixed-key
+        # entity with no table, and `delayTime`/`delayTimeStatus` are written from
+        # the NUMBERS/_SETTINGS_SWITCHES tables, which feed `mapped_params` alone
+        # and never the attribute axis. Without this line the dump kept naming
+        # `windSpeed` an unmapped control on a hood that ships a fan for it.
+        mapped_attrs |= HOOD_ENTITY_PARAMS
+        mapped_params |= HOOD_ENTITY_PARAMS
     if app_type == APPLIANCE_AP:
         # The AP fan, light, aroma select, toggles and timing numbers are fixed-key
         # entities or live outside the NUMBERS/_SETTINGS_SWITCHES tables, so the

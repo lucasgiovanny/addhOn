@@ -207,8 +207,13 @@ def _collect_code_keys() -> dict[str, set[str]]:
     used["sensor"] = {
         _tk(d) for descs in sensor.SENSORS.values() for d in descs
     }
-    # Derived custom-class sensor (not a description-table row).
+    # Derived custom-class sensors (not description-table rows): each combines
+    # several attributes, so the tables above cannot see them and each has to
+    # register the key it publishes here.
     used["sensor"].add(sensor.HonMeanWaterConsumption._attr_translation_key)
+    used["sensor"].update(
+        f"remaining_time_zone{zone}" for zone in sensor._HOB_ZONES
+    )
     # Account-level diagnostic sensors (fixed-key, not in the per-type table).
     used["sensor"].update(
         {"debug_status", "integration_log_level", "mqtt_log_level",
@@ -247,13 +252,18 @@ def _collect_code_keys() -> dict[str, set[str]]:
             "ref_program",
             select.HonAirPurifierAromaSelect._attr_translation_key,
             select.HonAirPurifierPanelLightSelect._attr_translation_key,
+            select.HonHobPowerLimitSelect._attr_translation_key,
         }
         | {d.translation_key for d in select._PROGRAM_OPTION_SELECTS}
         | {d.translation_key for d in select._AC_DIRECTION_SELECTS}
     )
     used["button"] = {"start_program", "stop_program", "force_refresh", "reset_debug"}
-    # Air purifier fan: a single fixed-key entity, not a description table.
-    used["fan"] = {fan.HonAirPurifierFan._attr_translation_key}
+    # The fans are fixed-key entities, not description tables: each one has to
+    # register itself here or the platform's key set silently loses it.
+    used["fan"] = {
+        fan.HonAirPurifierFan._attr_translation_key,
+        fan.HonHoodFan._attr_translation_key,
+    }
     return used
 
 
