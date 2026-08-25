@@ -585,6 +585,91 @@ class CommandCategoriesTest(unittest.TestCase):
         self.assertIn("operationName", block["commands"]["settings"])
 
 
+class CommandHistoryTest(unittest.TestCase):
+    """What was actually SENT to the appliance (v5.23.0).
+
+    The command definition only ever shows the operation a pinned `settings` command is
+    currently set to; the app's own envelopes are the only place the OTHER operations
+    appear. That makes this section the instrument for turning a read-only schedule into
+    a writable one, so it has to survive redaction and stay identifiable by source.
+    """
+
+    class _WithHistory:
+        def __init__(self, history):
+            self.commands = {}
+            self.command_history = history
+
+    def _entry(self, *, model, command_name, parameters, program=None):
+        return {
+            "command": {
+                "macAddress": "AA:BB:CC:DD:EE:FF",
+                "commandName": command_name,
+                "programName": program,
+                "parameters": parameters,
+                "ancillaryParameters": {},
+                "attributes": {"channel": "mobileApp", "origin": "standardProgram"},
+                "device": {"deviceModel": model, "mobileId": "phone-1"},
+                "transactionId": "AA:BB:CC:DD:EE:FF_123",
+                "timestamp": "2026-08-24T22:28:55.667Z",
+            },
+            "timestampAccepted": "2026-08-25T20:50:44.7Z",
+            "timestampExecuted": "2026-08-25T20:50:45.4Z",
+        }
+
+    def test_app_and_integration_envelopes_are_told_apart(self):
+        appliance = self._WithHistory(
+            [
+                self._entry(
+                    model="addhon",
+                    command_name="startProgram",
+                    parameters={"machMode": "1", "onOffStatus": "1", "tempSel": "63"},
+                    program="PROGRAMS.HW.AUTO",
+                ),
+                self._entry(
+                    model="SM-G991B",
+                    command_name="settings",
+                    parameters={"operationName": "grSetTiming", "timingPowerOn": "09:00"},
+                ),
+            ]
+        )
+        out = diagnostics._command_history(appliance)
+        self.assertEqual([e["source"] for e in out], ["addhon", "app"])
+        self.assertEqual(out[1]["commandName"], "settings")
+        # The whole reason the section exists.
+        self.assertEqual(out[1]["parameters"]["operationName"], "grSetTiming")
+
+    def test_identity_never_leaves_the_envelope(self):
+        appliance = self._WithHistory(
+            [self._entry(model="addhon", command_name="settings", parameters={})]
+        )
+        block = diagnostics._appliance_block(
+            "id1",
+            {"appliance": appliance, "type": "HW", "attributes": {}, "statistics": {}},
+        )
+        entry = block["command_history"][0]
+        self.assertNotIn("device", entry)
+        self.assertNotIn("macAddress", entry)
+        # transactionId embeds the full MAC, so it must not survive either.
+        self.assertNotIn("transactionId", entry)
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", json.dumps(block))
+
+    def test_the_list_is_bounded(self):
+        appliance = self._WithHistory(
+            [
+                self._entry(model="addhon", command_name="settings", parameters={})
+                for _ in range(diagnostics._COMMAND_HISTORY_LIMIT + 10)
+            ]
+        )
+        self.assertEqual(
+            len(diagnostics._command_history(appliance)),
+            diagnostics._COMMAND_HISTORY_LIMIT,
+        )
+
+    def test_an_appliance_without_history_adds_nothing(self):
+        self.assertEqual(diagnostics._command_history(FakeAppliance(commands={})), [])
+        self.assertEqual(diagnostics._command_history(self._WithHistory("nonsense")), [])
+
+
 class DiagnosticsCoverageTest(unittest.TestCase):
     def test_unmapped_bare_attribute_surfaces(self):
         _, blocks = _entry_diag()

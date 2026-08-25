@@ -54,6 +54,7 @@ class HonAppliance:
         self._attributes: dict[str, Any] = {}
         self._zone = zone
         self._additional_data: dict[str, Any] = {}
+        self._command_history: list[dict[str, Any]] = []
         self._last_update: Optional[datetime] = None
         self._default_setting = HonParameter("", {}, "")
         self._connection = (
@@ -192,6 +193,15 @@ class HonAppliance:
         return self._additional_data
 
     @property
+    def command_history(self) -> list[dict[str, Any]]:
+        """Accepted-command history from the last command load (see HonCommandLoader).
+
+        Refreshed only when the commands are loaded, not on every poll: it is a schema-
+        side record, and the diagnostics dump is its only consumer.
+        """
+        return self._command_history
+
+    @property
     def zone(self) -> int:
         return self._zone
 
@@ -268,6 +278,7 @@ class HonAppliance:
         self._commands = command_loader.commands
         self._additional_data = command_loader.additional_data
         self._appliance_model = command_loader.appliance_data
+        self._command_history = command_loader.command_history
         self.sync_params_to_command("settings")
 
     async def load_attributes(self) -> None:

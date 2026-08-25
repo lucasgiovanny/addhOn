@@ -393,6 +393,77 @@ def _command_categories(appliance) -> dict:
     return out
 
 
+# How many past commands the dump carries. The cloud returns the appliance's whole
+# accepted-command history; the recent end is what identifies an operation, and an
+# unbounded list would bloat every dump for no extra answer.
+_COMMAND_HISTORY_LIMIT = 25
+
+# The client's own identity in a command envelope (client/transport/values.py). It is how
+# a command issued by this integration is told apart from one the official app sent --
+# the whole point of the section below, since only the APP's envelopes reveal operations
+# the integration does not know yet.
+_ADDHON_DEVICE_MODEL = "addhon"
+
+
+def _mapping(value) -> dict:
+    """`value` as a plain dict, or {} when it is not a mapping."""
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _command_history(appliance) -> list:
+    """The appliance's accepted-command history, trimmed to what identifies an operation.
+
+    This is the one record of the ENVELOPES the official app sends. It matters because
+    several appliances expose a `settings` command that performs ONE operation per call,
+    named by a fixed `operationName` parameter: everything outside that operation is
+    accepted by the cloud and dropped by the appliance (see
+    hon_commands.settings_write_blocked). The command definition only ever shows the
+    operation the appliance is currently pinned to, so the ONLY way to learn the others
+    is to look at what the app actually sent -- change a setting in the app, take a dump,
+    read the operationName here.
+
+    `source` says who issued each command: "addhon" for this integration (matched on the
+    client identity it sends), "app" otherwise. The identity fields inside the envelope
+    (device block, transactionId, mobileId) are dropped or redacted -- transactionId
+    embeds the full MAC.
+    """
+    history = getattr(appliance, "command_history", None)
+    if not isinstance(history, (list, tuple)):
+        return []
+    out: list = []
+    for entry in list(history)[:_COMMAND_HISTORY_LIMIT]:
+        if not isinstance(entry, Mapping):
+            continue
+        command = entry.get("command")
+        command = command if isinstance(command, Mapping) else {}
+        device = command.get("device")
+        device = device if isinstance(device, Mapping) else {}
+        attributes = command.get("attributes")
+        attributes = attributes if isinstance(attributes, Mapping) else {}
+        out.append(
+            {
+                "source": (
+                    "addhon"
+                    if str(device.get("deviceModel", "")) == _ADDHON_DEVICE_MODEL
+                    else "app"
+                ),
+                "commandName": command.get("commandName"),
+                "programName": command.get("programName"),
+                # Left as plain mappings: the block-wide _redact walks them (it
+                # recurses dicts and coerces the leaves), while _jsonable is a LEAF
+                # coercion and would stringify the whole parameter dict.
+                "parameters": _mapping(command.get("parameters")),
+                "ancillaryParameters": _mapping(command.get("ancillaryParameters")),
+                "channel": attributes.get("channel"),
+                "origin": attributes.get("origin"),
+                "timestamp": command.get("timestamp"),
+                "accepted": entry.get("timestampAccepted"),
+                "executed": entry.get("timestampExecuted"),
+            }
+        )
+    return out
+
+
 def _mapped_sets(app_type) -> tuple[set[str], set[str]]:
     """(mapped attribute keys, mapped writable command params) for a type.
 
@@ -649,6 +720,7 @@ def _appliance_block(
 
     commands = _command_schema(appliance)
     command_categories = _command_categories(appliance)
+    command_history = _command_history(appliance)
     model_attributes = _model_attributes(appliance)
     coverage = _coverage(app_type, attributes, statistics, appliance)
     future = _future_capabilities(app_type, attributes, appliance)
@@ -680,6 +752,10 @@ def _appliance_block(
         # Only present when a command hides categories behind the active one; see
         # _command_categories for why that gap matters.
         "command_categories": command_categories,
+        # What was actually SENT to this appliance, app envelopes included. The other two
+        # sections say what the schema currently offers; this one says what the appliance
+        # has been observed to accept.
+        "command_history": command_history,
         "coverage": coverage,
         # Next to coverage on purpose: one says what the code could map for this
         # type, the other what Home Assistant actually holds. Reading them together

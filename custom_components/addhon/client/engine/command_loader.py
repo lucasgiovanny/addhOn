@@ -67,6 +67,18 @@ class HonCommandLoader:
     def additional_data(self) -> dict[str, Any]:
         return self._additional_data
 
+    @property
+    def command_history(self) -> list[dict[str, Any]]:
+        """The appliance's accepted-command history, as the cloud returns it.
+
+        Already fetched to recover the last command state; kept addressable so the
+        appliance can hold on to it. It is the only record of the ENVELOPES the official
+        app sends -- commandName, programName and the parameters, including the
+        `operationName` that decides which operation a `settings` write performs -- which
+        is what the diagnostics dump needs to answer "what else does this command accept".
+        """
+        return self._command_history
+
     async def load_commands(self) -> None:
         await self._load_data()
         self._appliance_data = self._api_commands.pop("applianceModel", {})

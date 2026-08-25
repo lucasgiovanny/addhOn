@@ -60,6 +60,13 @@ Set the off-peak windows in the hOn app to your solar hours and the appliance do
 rest — no cloud round-trip, no automation, and it keeps working when Home Assistant is
 down. The integration mirrors the configuration read-only, for the reason above.
 
+**Why read-only, and what would change it.** Nothing about the Home Assistant side stops
+these from being editable — a time picker per window is a small amount of code. What
+stops it is that the write would not reach the appliance: it would arrive labelled
+`grSetVacDate` and be dropped. The moment the `operationName` the app uses for a given
+group is known, that group becomes writable. See *Reporting a new model* below for how to
+harvest it.
+
 `opp1EcoDays` is reported as a hex bitmask (`7F` = all seven days) and is exposed
 **raw**: only the all-days value has ever been observed, so which bit is which weekday
 is not knowable from the evidence and is not guessed.
@@ -161,10 +168,22 @@ to the Energy dashboard, where adding it would inflate the household total.
 
 ## Reporting a new model
 
-`custom_components/addhon`'s diagnostics dump is the input for everything above. Since
-v5.22.0 it also carries `command_categories` — the command categories the active one
-hides. On this appliance `settings` enumerates both `setConfig` and `setParameters`
-while only one is loaded, so that section is where the still-unanswered question lives:
-**which other operations does `settings` accept?** A dump taken right after using the
-feature in the hOn app also records the app's own command envelope under
-`attributes.commandHistory`, which is the cleanest way to learn an `operationName`.
+`custom_components/addhon`'s diagnostics dump is the input for everything above.
+
+Two sections exist specifically to answer the one question still open — **which other
+operations does `settings` accept?**
+
+- `command_categories` (v5.22.0): the command categories the active one hides. On this
+  appliance `settings` enumerates both `setConfig` and `setParameters` while only one is
+  ever loaded.
+- `command_history` (v5.23.0): the envelopes actually **sent** to the appliance, with a
+  `source` field saying whether each came from the hOn app or from this integration. The
+  command definition only ever shows the operation the appliance is currently pinned to;
+  the app's envelopes are the only place the others appear.
+
+So: change a setting in the hOn app (the timer, an off-peak window, the anti-legionella
+hour), **reload the integration** so the command history is re-fetched, then download the
+device diagnostics and read the `operationName` of the `settings` entries whose `source`
+is `app`. Each one learned is one more group of parameters that can become writable —
+add it to `SETTINGS_OPERATION_PARAMS` in `hon_commands.py` and the gate opens for exactly
+those fields.
