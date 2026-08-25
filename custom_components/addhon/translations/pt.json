@@ -86,9 +86,57 @@
     }
   },
   "services": {
+    "probe_settings_operation": {
+      "name": "Descobrir o nome de uma operação settings (avançado)",
+      "description": "Diagnóstico. Experimenta uma escada de candidatos a `operationName` contra um parâmetro até o aparelho aceitar um, e depois anuncia o vencedor numa notificação. É assim que uma definição só de leitura (um temporizador, uma janela horária) pode passar a editável: a operação a que pertence não se lê em lado nenhum, só se pode tentar.",
+      "fields": {
+        "device_id": {
+          "name": "Aparelho",
+          "description": "O aparelho a sondar."
+        },
+        "parameter": {
+          "name": "Parametro",
+          "description": "O parametro a mexer, tal como o aparelho o escreve. Por exemplo `sterilizationTime`."
+        },
+        "value": {
+          "name": "Valor",
+          "description": "Um valor que o parametro NAO tem agora, para que um acerto seja inequivoco. Por exemplo \"07:00\"."
+        },
+        "command": {
+          "name": "Comando",
+          "description": "Comando que transporta o parametro. Normalmente `settings`."
+        },
+        "operations": {
+          "name": "Nomes candidatos",
+          "description": "Nomes de operacao a experimentar, por ordem. Deixa vazio para os derivar do nome do parametro."
+        },
+        "settle": {
+          "name": "Espera entre tentativas",
+          "description": "Segundos a esperar para o aparelho aplicar e reportar antes de reler o parametro. Aumenta se um nome que devia funcionar aparecer como falhado."
+        }
+      }
+    },
     "refresh": {
       "name": "Atualizar agora",
       "description": "Força uma consulta imediata à nuvem para todas as contas hOn configuradas. O equivalente chamável por automações do botão \"Atualizar agora\" de cada dispositivo: pede a todos os coordenadores carregados que procurem dados novos imediatamente, em vez de aguardar a próxima consulta agendada. Não recebe opções e aplica-se à integração inteira."
+    },
+    "send_command": {
+      "name": "Enviar um comando em bruto (avançado)",
+      "description": "Diagnóstico. Envia um comando a um aparelho exatamente como indicado, sem qualquer travão de segurança. Serve para testar um candidato a `operationName` nos aparelhos cujo comando `settings` só executa uma operação de cada vez. Um nome errado não muda nada.",
+      "fields": {
+        "device_id": {
+          "name": "Aparelho",
+          "description": "O aparelho a que enviar o comando."
+        },
+        "command": {
+          "name": "Comando",
+          "description": "Nome do comando, tal como o esquema do aparelho o escreve. Normalmente `settings`."
+        },
+        "parameters": {
+          "name": "Parametros",
+          "description": "Os parametros a enviar, como nome: valor. Inclui `operationName` quando estiveres a testar uma operacao."
+        }
+      }
     },
     "set_log_level": {
       "name": "Definir nível de registo de diagnóstico",

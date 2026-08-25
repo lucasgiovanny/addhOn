@@ -86,9 +86,57 @@
     }
   },
   "services": {
+    "probe_settings_operation": {
+      "name": "Trova il nome di un'operazione settings (avanzato)",
+      "description": "Diagnostico. Prova una scala di candidati `operationName` su un parametro finché l'elettrodomestico ne accetta uno, poi segnala il vincitore con una notifica. È il modo per rendere scrivibile un'impostazione di sola lettura (un timer, una fascia oraria): l'operazione a cui appartiene non si può leggere da nessuna parte, si può solo provare.",
+      "fields": {
+        "device_id": {
+          "name": "Elettrodomestico",
+          "description": "L'elettrodomestico da sondare."
+        },
+        "parameter": {
+          "name": "Parametro",
+          "description": "Il parametro da muovere, come lo scrive l'elettrodomestico. Per esempio `sterilizationTime`."
+        },
+        "value": {
+          "name": "Valore",
+          "description": "Un valore che il parametro NON ha adesso, cosi un successo e inequivocabile. Per esempio \"07:00\"."
+        },
+        "command": {
+          "name": "Comando",
+          "description": "Comando che contiene il parametro. Di solito `settings`."
+        },
+        "operations": {
+          "name": "Nomi candidati",
+          "description": "Nomi di operazione da provare, in ordine. Lascia vuoto per derivarli dal nome del parametro."
+        },
+        "settle": {
+          "name": "Attesa tra i tentativi",
+          "description": "Secondi di attesa perche l'elettrodomestico applichi e riporti il valore prima di rileggerlo. Aumentalo se un nome che dovrebbe funzionare risulta fallito."
+        }
+      }
+    },
     "refresh": {
       "name": "Aggiorna ora",
       "description": "Forza un polling immediato dal cloud per tutti gli account hOn configurati. L'equivalente richiamabile da automazione del pulsante \"Aggiorna ora\" per dispositivo: chiede a ogni coordinator caricato di recuperare subito i dati aggiornati, senza attendere il prossimo polling pianificato. Non richiede opzioni e si applica all'intera integrazione."
+    },
+    "send_command": {
+      "name": "Invia un comando grezzo (avanzato)",
+      "description": "Diagnostico. Invia un comando a un elettrodomestico esattamente come indicato, senza alcun controllo di sicurezza. Serve a provare un singolo candidato `operationName` sugli elettrodomestici il cui comando `settings` esegue una sola operazione per volta. Un nome sbagliato non cambia nulla.",
+      "fields": {
+        "device_id": {
+          "name": "Elettrodomestico",
+          "description": "L'elettrodomestico a cui inviare il comando."
+        },
+        "command": {
+          "name": "Comando",
+          "description": "Nome del comando come lo scrive lo schema dell'elettrodomestico. Di solito `settings`."
+        },
+        "parameters": {
+          "name": "Parametri",
+          "description": "I parametri da inviare, come nome: valore. Includi `operationName` quando provi un'operazione."
+        }
+      }
     },
     "set_log_level": {
       "name": "Imposta livello log diagnostico",

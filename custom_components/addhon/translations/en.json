@@ -86,9 +86,57 @@
     }
   },
   "services": {
+    "probe_settings_operation": {
+      "name": "Find a settings operation name (advanced)",
+      "description": "Diagnostic. Tries a ladder of candidate `operationName` values against one parameter until the appliance honours one, then reports the winner as a notification. This is how a read-only setting (a timer, a schedule window) can be made writable: the operation it belongs to cannot be read anywhere, only tried.",
+      "fields": {
+        "device_id": {
+          "name": "Appliance",
+          "description": "The appliance to probe."
+        },
+        "parameter": {
+          "name": "Parameter",
+          "description": "The parameter to move, as the appliance spells it. For example `sterilizationTime`."
+        },
+        "value": {
+          "name": "Value",
+          "description": "A value the parameter does NOT currently hold, so a hit is unmistakable. For example \"07:00\"."
+        },
+        "command": {
+          "name": "Command",
+          "description": "Command carrying the parameter. Usually `settings`."
+        },
+        "operations": {
+          "name": "Candidate names",
+          "description": "Operation names to try, in order. Leave empty to derive them from the parameter name."
+        },
+        "settle": {
+          "name": "Wait between attempts",
+          "description": "Seconds to wait for the appliance to apply and report back before reading the parameter. Raise it if a name that should work reads as a miss."
+        }
+      }
+    },
     "refresh": {
       "name": "Refresh now",
       "description": "Force an immediate cloud poll for all configured hOn accounts. The automation-callable equivalent of the per-device \"Refresh now\" button: it asks every loaded coordinator to fetch fresh data right away, instead of waiting for the next scheduled poll. Takes no options and applies to the whole integration."
+    },
+    "send_command": {
+      "name": "Send a raw command (advanced)",
+      "description": "Diagnostic. Sends one command to one appliance exactly as given, with no safety gate. Use it to test a single `operationName` candidate on appliances whose `settings` command only performs one operation at a time. A wrong operation name changes nothing.",
+      "fields": {
+        "device_id": {
+          "name": "Appliance",
+          "description": "The appliance to send the command to."
+        },
+        "command": {
+          "name": "Command",
+          "description": "Command name, as the appliance's schema spells it. Usually `settings`."
+        },
+        "parameters": {
+          "name": "Parameters",
+          "description": "The parameters to send, as name: value. Include `operationName` when testing an operation."
+        }
+      }
     },
     "set_log_level": {
       "name": "Set diagnostic log level",
