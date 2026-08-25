@@ -90,7 +90,18 @@ and the mode: the parallel *Target temperature* number and *Mode* select were re
 in v5.21.0 as duplicates (their orphaned registry entries are cleaned up on setup).
 The remaining `number` / `switch` controls stay because they cover what the
 `water_heater` domain has no slot for (boost, silent mode, child lock, sterilization,
-per-mode setpoints).
+per-mode setpoints). The **power** switch was retired in v5.22.0 for the same reason —
+and because it never worked: the appliance's `settings` command is pinned to a single
+operation and drops everything else in the payload, so power is now written through
+`startProgram` by the `water_heater` entity, the one channel that reaches this device.
+
+Since v5.22.0 the appliance's **own schedule** is mirrored read-only — the daily power
+timer, the off-peak / "cheap energy" windows (up to 3 per group, 2 groups, with a day
+mask), the quiet windows and the anti-legionella cycle — plus daily energy counters and
+the photovoltaic / smart-grid dry-contact setup. Configuring the schedule in the hOn app
+is also the best way to run the appliance on solar surplus without any automation. See
+[`docs/heat-pump-water-heater.md`](docs/heat-pump-water-heater.md) for what is writable,
+what is not, and why.
 
 The target temperature is **snapped onto the device's own min/max/step grid** before it
 is sent, on both the `water_heater` and the `climate` (AC) entity. Home Assistant does

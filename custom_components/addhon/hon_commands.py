@@ -70,6 +70,66 @@ def find_settings_param(
     return None
 
 
+# The parameter through which a settings-style command declares WHICH device operation
+# it performs. Where it exists the command is a SINGLE-OPERATION envelope: `command.send()`
+# transmits the whole parameter group, but the appliance acts only on the fields that
+# belong to `operationName` and silently drops everything else in the same payload.
+SETTINGS_OPERATION_PARAM = "operationName"
+
+# Parameters each KNOWN operation actually writes. An operation absent from this table is
+# never treated as blocking: "not ground-truthed" is not "writes nothing".
+SETTINGS_OPERATION_PARAMS: dict[str, frozenset[str]] = {
+    # Heat pump water heater (HP250M7C-F9): the app schedules holiday BY DATES through
+    # this operation, and it is the operation the cloud pins the whole `settings` command
+    # to on that model. Live-verified in both directions: a vacation window written from
+    # Home Assistant reaches the device (v5.19.0), while a tempSel (v5.10) and an
+    # onOffStatus (v5.22.0) sent in the very same payload are silently dropped.
+    "grSetVacDate": frozenset({"vacStartDate", "vacEndDate"}),
+}
+
+
+def settings_operation(appliance, command_name: str = "settings") -> str | None:
+    """The operation `command_name` is PINNED to, or None when it is a free write.
+
+    Pinned means `operationName` exists AND offers exactly one value (typology "fixed",
+    or an enum with a single member). Ground truth: on a real HP250M7C-F9 the `settings`
+    command carries `operationName` fixed to "grSetVacDate", identical across four
+    diagnostics dumps a month apart -- it is the cloud's command definition, not a
+    leftover of the last app action.
+
+    Returns None when the parameter is absent or offers a choice, so an appliance whose
+    settings command is a genuine multi-parameter write (the air conditioner, the wine
+    cooler) is never gated by this.
+    """
+    param = command_param(appliance, command_name, SETTINGS_OPERATION_PARAM)
+    if param is None:
+        return None
+    if len(param_values(param)) > 1:
+        return None
+    value = getattr(param, "value", None)
+    text = "" if value is None else str(value).strip()
+    return text or None
+
+
+def settings_write_blocked(
+    appliance, param_name: str, command_name: str = "settings"
+) -> str | None:
+    """The pinned operation that would SWALLOW a write of `param_name`, or None.
+
+    The capability gate for every settings-backed control: a device whose settings
+    command only performs one KNOWN operation cannot be written through it for anything
+    outside that operation, and a control that reports success while the appliance
+    ignores it is worse than no control at all.
+    """
+    operation = settings_operation(appliance, command_name)
+    if operation is None:
+        return None
+    carried = SETTINGS_OPERATION_PARAMS.get(operation)
+    if carried is None or param_name in carried:
+        return None
+    return operation
+
+
 def param_values(param) -> list[str]:
     """Allowed values (strings) of an enum parameter, or [] if not enumerated."""
     values = getattr(param, "values", None)

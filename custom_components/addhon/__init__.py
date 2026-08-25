@@ -362,6 +362,11 @@ _TD_REMOVED_SUFFIXES = (
 _HW_REMOVED = (
     ("select", "_hw_mode"),
     ("number", "_target_temp"),
+    # v5.22.0: the power SWITCH. It wrote onOffStatus through the `settings` command,
+    # which on this appliance is pinned to one operation and drops everything else, so
+    # it never turned anything off. Power is now the water_heater entity's, written
+    # through startProgram like the mode and the setpoint.
+    ("switch", "_on_off"),
 )
 
 

@@ -351,6 +351,48 @@ def _command_schema(appliance) -> dict:
     return out
 
 
+def _command_categories(appliance) -> dict:
+    """Per-command schema of the categories the ACTIVE one HIDES.
+
+    `appliance.commands[name]` holds exactly one category: the loader keeps
+    `setParameters` when it exists and the first entry otherwise (see
+    client/engine/command_loader._parse_categories), so `_command_schema` above can only
+    ever describe that one. Whatever the appliance offers under another category is
+    invisible in a dump -- and on the heat pump water heater that is exactly where the
+    open question lives: its `settings` command enumerates BOTH `setConfig` and
+    `setParameters` in its own `category` parameter while pinning `operationName` to a
+    single operation, so the operations the appliance really accepts cannot be confirmed
+    from the active category alone.
+
+    Emitted next to `commands` rather than nested inside it, so the established shape
+    (command -> parameter -> schema) is untouched, and only for commands that actually
+    have more than one category -- an appliance with flat commands adds nothing to the
+    payload.
+    """
+    commands = getattr(appliance, "commands", None)
+    if not isinstance(commands, Mapping):
+        return {}
+    out: dict = {}
+    for cmd_name, cmd in commands.items():
+        categories = getattr(cmd, "categories", None)
+        if not isinstance(categories, Mapping) or len(categories) < 2:
+            continue
+        active = getattr(cmd, "category", None)
+        per_category: dict = {}
+        for cat_name, cat in categories.items():
+            params = getattr(cat, "parameters", None)
+            per_category[str(cat_name)] = {
+                "active": cat_name == active,
+                "parameters": (
+                    {str(p_name): _param_schema(p) for p_name, p in params.items()}
+                    if isinstance(params, Mapping)
+                    else {}
+                ),
+            }
+        out[str(cmd_name)] = per_category
+    return out
+
+
 def _mapped_sets(app_type) -> tuple[set[str], set[str]]:
     """(mapped attribute keys, mapped writable command params) for a type.
 
@@ -606,6 +648,7 @@ def _appliance_block(
     statistics = statistics if isinstance(statistics, Mapping) else {}
 
     commands = _command_schema(appliance)
+    command_categories = _command_categories(appliance)
     model_attributes = _model_attributes(appliance)
     coverage = _coverage(app_type, attributes, statistics, appliance)
     future = _future_capabilities(app_type, attributes, appliance)
@@ -634,6 +677,9 @@ def _appliance_block(
         "model_attributes": model_attributes,
         "attributes": dict(attributes),
         "commands": commands,
+        # Only present when a command hides categories behind the active one; see
+        # _command_categories for why that gap matters.
+        "command_categories": command_categories,
         "coverage": coverage,
         # Next to coverage on purpose: one says what the code could map for this
         # type, the other what Home Assistant actually holds. Reading them together

@@ -33,6 +33,7 @@ attribute a model does not report there reads as *unavailable*.
 | Washing machine | `WM` | sensor, binary_sensor, switch, select, button | ✅ state, cycle phase, program, spin speed, wash temperature, soil level, load %, delay, errors, water/energy consumption + door/door-lock/child-lock/maintenance | ◑ pause + program select/start | ✅ yes |
 | Washer-dryer | `WD` | sensor, binary_sensor, switch, select, button | ✅ same as WM + dry level | ◑ pause + program select/start | ⚠️ no (no WD among test devices) |
 | Tumble dryer | `TD` | sensor, binary_sensor, switch, select, button | ✅ state, cycle phase, program, dry level, load %, delay, errors, total cycles + door/child-lock | ◑ pause + program select/start | ✅ yes |
+| Heat pump water heater | `HW` | water_heater, sensor, binary_sensor, switch, number, date | ✅ water temperature, setpoint, hot-water level, heating status + heat source, energy split by source (day/month/year) and heat output, tank volume, errors + compressor / electric heater / aux / boiler / antifreeze / defrost / vacation / anti-legionella / silent / solar / off-peak, plus the appliance's own schedule (daily timer, off-peak windows, quiet windows, anti-legionella time) | ✅ **mode** (auto/eco/electric/holiday), **target temperature**, **power**, **away**, scheduled vacation window (dates) | ✅ yes |
 
 **Note on WM/WD/TD (◑):** read/monitoring is **complete**; control covers pause
 and program select + start. Advanced cycle options (pre-wash, extra-rinse,
@@ -58,6 +59,10 @@ is recognised whichever code the cloud reports.
 | Hood | `HO` | fan speed | light, filter-cleaning alarm |
 | Coffee machine / kettle | `KT` | instantaneous power, descaling counter, lifetime cycles | — |
 | Water heater | `WH` | water / inlet / outlet temperature, power, available water volume, time-to-target, phase | indicator light, child lock |
+
+> A plain `WH` that exposes a writable setpoint gets the full `water_heater` entity too
+> (the platform is capability-gated, not type-gated); one that reports temperature
+> read-only stays here. The heat pump variant is `HW`, in the table above.
 | Robot vacuum | `RVC` | battery, state, remaining time, suction power, last/total cleaned area, errors | — |
 
 ## Not yet supported (❌)
@@ -75,6 +80,7 @@ End-to-end validation on a real Home Assistant instance (shared account).
 | `AC` | **AS35PBPHRA-PRE** | "Clima camera" | ✅ climate + 16 switches + 8 sensors; swing re-enabled and validated |
 | `WM` | **HW80-B14959TU1IT** | "HW80-B14959TU1IT" | ✅ 15 sensors + 6 binary + pause/program |
 | `TD` | **HD100-C367GU1-IT** | "HD100-C367GU1-IT" | ✅ 9 sensors + 2 binary (door/child-lock) + pause/program |
+| `HW` | **HP250M7C-F9** | "HP250M7C-F9" | ✅ water_heater entity (mode/setpoint/power/away) + 20 sensors + 9 binary + vacation dates; see [Heat pump water heater](heat-pump-water-heater.md) for what is writable and what is not |
 
 Other known but **not** validated devices:
 - A **fridge** (`REF`) on a different account, confirmed present but offline;

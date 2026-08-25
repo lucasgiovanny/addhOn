@@ -39,6 +39,7 @@ from .const import (
     WM_ATTR_STATUS,
 )
 from .debug_utils import redact_id
+from .hon_commands import settings_write_blocked
 from .param_rollback import restore_params, snapshot_params
 from .program_options import (
     HonProgramOptionEntity,
@@ -94,14 +95,24 @@ _WC_SWITCHES: tuple[HonSettingsSwitchDescription, ...] = (
 
 
 # Heat pump water heater (HW) switches: 0/1 parameters of the settings command,
-# ground-truthed on a real HP250M7C-F9 (full schema dump: settings.onOffStatus,
-# settings.boostStatus, settings.silentStatus, settings.lockStatus,
-# settings.sterilizationStatus). Capability-gated like the AC toggles.
-# key is "on_off", NOT "power": _remove_legacy_entities purges every SWITCH whose
-# unique_id ends in "_power" (the 2.3/2.4 refactor cleanup), which would delete
-# and re-create this entity on every setup.
+# ground-truthed on a real HP250M7C-F9 (full schema dump: settings.boostStatus,
+# settings.silentStatus, settings.lockStatus, settings.sterilizationStatus).
+# Capability-gated like the AC toggles.
+#
+# POWER is NOT here since v5.22.0. It was, as `on_off`, and it never worked: on this
+# appliance the settings command is pinned to one operation (`operationName` fixed to
+# "grSetVacDate"), so the write was accepted by the cloud and dropped by the device.
+# Power lives on `startProgram`, which only the water_heater entity can address --
+# and that entity already exposes it, as ON_OFF plus the `off` operation mode. A
+# second surface for the same control is exactly what v5.21.0 retired for the mode
+# and the setpoint, so the switch is retired too (registry cleanup in
+# __init__._remove_legacy_entities).
+#
+# The four that remain read correctly (the device mirrors all of them into the
+# shadow) and their WRITE is gated at send time by settings_write_blocked: on an
+# appliance whose settings command is pinned elsewhere they raise a clear error
+# instead of silently doing nothing.
 _HW_SWITCHES: tuple[HonSettingsSwitchDescription, ...] = (
-    HonSettingsSwitchDescription(key="on_off", param="onOffStatus", icon="mdi:power"),
     HonSettingsSwitchDescription(key="boost", param="boostStatus", icon="mdi:rocket-launch-outline"),
     HonSettingsSwitchDescription(key="silent_mode", param="silentStatus", icon="mdi:volume-off"),
     HonSettingsSwitchDescription(key="child_lock", param="lockStatus", icon="mdi:lock"),
@@ -613,6 +624,18 @@ class HonSettingsSwitch(HonBaseEntity, SwitchEntity):
                 translation_key="appliance_or_client_unavailable",
             )
         param = self._desc.param
+        # Refuse a write the appliance would silently swallow (a settings command pinned
+        # to one operation, see hon_commands.settings_write_blocked). Raising here keeps
+        # the READ half of the switch -- the device mirrors these parameters into the
+        # shadow, so the state stays true -- while the toggle says why it cannot move,
+        # instead of reporting a success the appliance never performed.
+        blocked_by = settings_write_blocked(appliance, param)
+        if blocked_by is not None:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="settings_operation_locked",
+                translation_placeholders={"param": param, "operation": blocked_by},
+            )
         try:
             _LOGGER.debug("Switch debug: AC set %s=%s id=%s", param, value, redact_id(self._appliance_id))
             await async_send_settings(self.hass, client, appliance, {param: value})

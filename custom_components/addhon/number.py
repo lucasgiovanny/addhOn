@@ -79,6 +79,7 @@ from .hon_commands import (
     find_settings_param,
     param_range,
     param_values,
+    settings_write_blocked,
 )
 from .program_options import (
     HonProgramOptionEntity,
@@ -93,12 +94,21 @@ class HonNumberEntityDescription(NumberEntityDescription):
     """Description of a Haier hOn number.
 
     - `key` = unique_id suffix (new, no collision with the Tier 2 sensors).
-    - `param` = name of the hOn parameter to read (state) and write (command).
+    - `param` = name of the hOn parameter written (command), and read (state) unless
+      `attr` overrides the read side.
     - `fallback_min/max/step` = used only if the client does not expose the range on
       the parameter; normally the REAL range is read at runtime from param_range().
     """
 
     param: str
+    # The attribute the STATE is read from, when the device does not spell it the same
+    # way as the command parameter. The HP250M7C-F9 reports its auxiliary setpoints as
+    # tempSelHc / tempSelPv / tempSelSg while writing them as hcTempSel / pvTempSel /
+    # sgTempSel -- reading the command name found nothing, so every one of those numbers
+    # sat at "unknown" while the appliance held a real value (they appear in the
+    # diagnostics dump's own `attributes_unmapped`). Defaults to `param`: nothing else
+    # changes.
+    attr: str | None = None
     fallback_min: float = 0.0
     fallback_max: float = 100.0
     fallback_step: float = 1.0
@@ -169,11 +179,12 @@ _OVEN_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
 # is the anti-legionella target. Ranges are read live from the device schema;
 # the fallback mirrors the dump.
 def _hw_temp(key: str, param: str, *, enabled_default: bool = True,
-             fallback_min: float = 35.0,
+             fallback_min: float = 35.0, attr: str | None = None,
              ) -> HonNumberEntityDescription:
     return HonNumberEntityDescription(
         key=key,
         param=param,
+        attr=attr,
         device_class=NumberDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         mode=NumberMode.BOX,
@@ -185,10 +196,20 @@ def _hw_temp(key: str, param: str, *, enabled_default: bool = True,
     )
 
 
+# The auxiliary setpoints are READ under a different name than they are WRITTEN: the
+# HP250M7C-F9 shadow reports tempSelHc / tempSelPv / tempSelSg while the settings command
+# spells them hcTempSel / pvTempSel / sgTempSel. Without the override each of these read
+# "unknown" while the appliance held a real value (the 2026-08 dump: tempSelPv 75 against
+# a command still holding its 65 default -- the command mirror never syncs either, for the
+# same naming reason). sterilizationTempSel is spelled identically on both sides, so it
+# needs no override.
 _HEAT_PUMP_NUMBERS: tuple[HonNumberEntityDescription, ...] = (
-    _hw_temp("target_temp_hc", "hcTempSel", enabled_default=False, fallback_min=55.0),
-    _hw_temp("target_temp_pv", "pvTempSel", enabled_default=False, fallback_min=55.0),
-    _hw_temp("target_temp_sg", "sgTempSel", enabled_default=False, fallback_min=55.0),
+    _hw_temp("target_temp_hc", "hcTempSel", enabled_default=False, fallback_min=55.0,
+             attr="tempSelHc"),
+    _hw_temp("target_temp_pv", "pvTempSel", enabled_default=False, fallback_min=55.0,
+             attr="tempSelPv"),
+    _hw_temp("target_temp_sg", "sgTempSel", enabled_default=False, fallback_min=55.0,
+             attr="tempSelSg"),
     _hw_temp("sterilization_temp", "sterilizationTempSel", enabled_default=False,
              fallback_min=55.0),
 )
@@ -537,8 +558,14 @@ class HonNumber(HonBaseEntity, NumberEntity):
         return self._live_range[2]
 
     @property
+    def _read_attr(self) -> str:
+        """The attribute the STATE is read from: `attr` when the device spells the
+        reading differently from the parameter it writes, else `param` itself."""
+        return self.entity_description.attr or self.entity_description.param
+
+    @property
     def native_value(self) -> float | None:
-        raw = self._get_attr(self.entity_description.param)
+        raw = self._get_attr(self._read_attr)
         if raw is None:
             return None
         try:
@@ -546,7 +573,7 @@ class HonNumber(HonBaseEntity, NumberEntity):
         except (ValueError, TypeError):
             _LOGGER.debug(
                 "Number debug: native_value not numeric for %s raw=%r",
-                self.entity_description.param, raw,
+                self._read_attr, raw,
             )
             return None
 
@@ -578,6 +605,22 @@ class HonNumber(HonBaseEntity, NumberEntity):
             # Snap to the canonical member so the serialize below emits the exact enum
             # string ("2", "10.5"), not the drifted "2.0000001" the cloud would reject.
             value = snapped
+        # Refuse a write the appliance would silently swallow. On a settings command
+        # pinned to a single operation (see hon_commands.settings_write_blocked) the
+        # cloud accepts the payload and the device drops everything outside that
+        # operation, so "success" here would be a lie. The READ half keeps working.
+        blocked_by = settings_write_blocked(
+            appliance, self.entity_description.param, self._command_name
+        )
+        if blocked_by is not None:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="settings_operation_locked",
+                translation_placeholders={
+                    "param": self.entity_description.param,
+                    "operation": blocked_by,
+                },
+            )
         # ALWAYS send a string: the client's str_to_float does `int(string)` and catches
         # only ValueError, so a fractional float (5.5) would be truncated to 5
         # WITHOUT error. The string "5.5" instead stays 5.5 and the range setter

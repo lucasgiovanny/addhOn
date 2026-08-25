@@ -1,0 +1,485 @@
+{
+    "_comment": "Real command schema and shadow attribute NAMES of a live Haier heat pump water heater (HP250M7C-F9, 250 L) from the redacted device diagnostics dump of 2026-08-25, one of four captures taken between 2026-07-26 and 2026-08-25. Parameter metadata is kept (typology/mandatory/range/enum) because the capability gates read exactly those fields; identity and telemetry VALUES are not. The load-bearing detail is settings.operationName: typology fixed, mandatory 1, a single-value enum - which is why every settings write on this appliance reaches it labelled grSetVacDate and is dropped for anything else. See docs/heat-pump-water-heater.md.",
+    "model": "HP250M7C-F9",
+    "type": "HW",
+    "source": "device diagnostics (.data.appliance), redacted",
+    "captured": "2026-08-25",
+    "commands": {
+        "startProgram": {
+            "machMode": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "1"
+                ]
+            },
+            "onOffStatus": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "1"
+                ]
+            },
+            "program": {
+                "typology": "enum",
+                "mandatory": 0,
+                "enum": [
+                    "auto",
+                    "eco",
+                    "elec",
+                    "vac"
+                ]
+            },
+            "tempSel": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 35.0,
+                "max": 75.0,
+                "step": 1.0
+            }
+        },
+        "settings": {
+            "boostStatus": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "category": {
+                "typology": "enum",
+                "mandatory": 0,
+                "enum": [
+                    "setConfig",
+                    "setParameters"
+                ]
+            },
+            "externalHeatSource": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 2.0,
+                "step": 1.0
+            },
+            "hcTempSel": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 55.0,
+                "max": 75.0,
+                "step": 1.0
+            },
+            "lockStatus": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "offPeakPeriodScheme": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "offpeakSignalHeatMode": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 1.0,
+                "max": 3.0,
+                "step": 1.0
+            },
+            "offpeakSignalHeatStrategy": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 1.0,
+                "max": 4.0,
+                "step": 1.0
+            },
+            "offpeakSignalNcNo": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "onOffStatus": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "operationName": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "grSetVacDate"
+                ]
+            },
+            "opp1EcoDays": {
+                "typology": "range",
+                "mandatory": 1,
+                "min": 0.0,
+                "max": 40.0,
+                "step": 1.0
+            },
+            "opp1EcoEndTime1": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp1EcoEndTime2": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp1EcoEndTime3": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp1EcoStartTime1": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp1EcoStartTime2": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp1EcoStartTime3": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp2EcoEndTime1": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp2EcoEndTime2": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp2EcoEndTime3": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp2EcoStartTime1": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp2EcoStartTime2": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "opp2EcoStartTime3": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "powerSupplySource": {
+                "typology": "enum",
+                "mandatory": 0,
+                "enum": [
+                    "0",
+                    "2",
+                    "3",
+                    "4"
+                ]
+            },
+            "pvTempSel": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 55.0,
+                "max": 75.0,
+                "step": 1.0
+            },
+            "sgTempSel": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 55.0,
+                "max": 75.0,
+                "step": 1.0
+            },
+            "silentEndTime1": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "silentEndTime2": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "silentStartTime1": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "silentStartTime2": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "00:00"
+                ]
+            },
+            "silentStatus": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "sterilizationInterval": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 1.0,
+                "max": 3.0,
+                "step": 1.0
+            },
+            "sterilizationStatus": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "sterilizationTempSel": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 55.0,
+                "max": 75.0,
+                "step": 1.0
+            },
+            "sterilizationTime": {
+                "typology": "fixed",
+                "mandatory": 0,
+                "enum": [
+                    "22:00"
+                ]
+            },
+            "tempSel": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 35.0,
+                "max": 75.0,
+                "step": 1.0
+            },
+            "tempUnit": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "timingOnOffStatus": {
+                "typology": "range",
+                "mandatory": 0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "timingPowerOff": {
+                "typology": "range",
+                "mandatory": 1,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "timingPowerOn": {
+                "typology": "range",
+                "mandatory": 1,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0
+            },
+            "vacEndDate": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "2000-01-01"
+                ]
+            },
+            "vacStartDate": {
+                "typology": "fixed",
+                "mandatory": 1,
+                "enum": [
+                    "2000-01-01"
+                ]
+            }
+        }
+    },
+    "shadow_attribute_names": [
+        "accumulatedHeatDay",
+        "accumulatedHeatMonth",
+        "accumulatedHeatYear",
+        "active",
+        "activity",
+        "antifreezingStatus",
+        "autoDefrostStatus",
+        "auxElecHeatingStatus",
+        "available",
+        "boilerHeatingCurrentStatus",
+        "boostStatus",
+        "commandHistory",
+        "compressorHeatingCurrentStatus",
+        "date",
+        "debugEnabled",
+        "electricHeatingCurrentStatus",
+        "energyConsumptionDayCp",
+        "energyConsumptionDayEc",
+        "energyConsumptionMonthCp",
+        "energyConsumptionMonthEc",
+        "energyConsumptionYearCp",
+        "energyConsumptionYearEc",
+        "errors",
+        "externalHeatSource",
+        "highTransRate",
+        "lastConnEvent",
+        "lockStatus",
+        "machMode",
+        "mostUsedPrograms",
+        "mostUsedRecipes",
+        "offPeakPeriodScheme",
+        "offpeakSignalCurrentStatus",
+        "offpeakSignalHeatMode",
+        "offpeakSignalNcNo",
+        "offpeakSignalSwitch",
+        "onOffStatus",
+        "opp1EcoDays",
+        "opp1EcoEndTime1",
+        "opp1EcoEndTime2",
+        "opp1EcoEndTime3",
+        "opp1EcoStartTime1",
+        "opp1EcoStartTime2",
+        "opp1EcoStartTime3",
+        "opp2EcoEndTime1",
+        "opp2EcoEndTime2",
+        "opp2EcoEndTime3",
+        "opp2EcoStartTime1",
+        "opp2EcoStartTime2",
+        "opp2EcoStartTime3",
+        "parameters",
+        "powerSupplySource",
+        "productVolume",
+        "programName",
+        "remainingWaterLevel",
+        "resultCode",
+        "silentCurrentStatus",
+        "silentEndTime1",
+        "silentEndTime2",
+        "silentStartTime1",
+        "silentStartTime2",
+        "silentStatus",
+        "solarHeatingCurrentStatus",
+        "statusSyncRate",
+        "stdTransRate",
+        "sterilizationCurrentStatus",
+        "sterilizationInterval",
+        "sterilizationStatus",
+        "sterilizationTempSel",
+        "sterilizationTime",
+        "temp",
+        "tempSel",
+        "tempSelHc",
+        "tempSelPv",
+        "tempSelSg",
+        "tempUnit",
+        "time",
+        "timingOnOffStatus",
+        "timingPowerOff",
+        "timingPowerOn",
+        "transMode",
+        "vacEndDate",
+        "vacStartDate",
+        "weekDay"
+    ],
+    "command_mirror_attribute_names": [
+        "settings.boostStatus",
+        "settings.category",
+        "settings.externalHeatSource",
+        "settings.hcTempSel",
+        "settings.httpEndpoint",
+        "settings.lockStatus",
+        "settings.mqttEndpoint",
+        "settings.offPeakPeriodScheme",
+        "settings.offpeakSignalHeatMode",
+        "settings.offpeakSignalHeatStrategy",
+        "settings.offpeakSignalNcNo",
+        "settings.onOffStatus",
+        "settings.operationName",
+        "settings.opp1EcoDays",
+        "settings.opp1EcoEndTime1",
+        "settings.opp1EcoEndTime2",
+        "settings.opp1EcoEndTime3",
+        "settings.opp1EcoStartTime1",
+        "settings.opp1EcoStartTime2",
+        "settings.opp1EcoStartTime3",
+        "settings.opp2EcoEndTime1",
+        "settings.opp2EcoEndTime2",
+        "settings.opp2EcoEndTime3",
+        "settings.opp2EcoStartTime1",
+        "settings.opp2EcoStartTime2",
+        "settings.opp2EcoStartTime3",
+        "settings.powerSupplySource",
+        "settings.pvTempSel",
+        "settings.sgTempSel",
+        "settings.silentEndTime1",
+        "settings.silentEndTime2",
+        "settings.silentStartTime1",
+        "settings.silentStartTime2",
+        "settings.silentStatus",
+        "settings.sterilizationInterval",
+        "settings.sterilizationStatus",
+        "settings.sterilizationTempSel",
+        "settings.sterilizationTime",
+        "settings.tempSel",
+        "settings.tempUnit",
+        "settings.timingOnOffStatus",
+        "settings.timingPowerOff",
+        "settings.timingPowerOn",
+        "settings.vacEndDate",
+        "settings.vacStartDate",
+        "startProgram.machMode",
+        "startProgram.onOffStatus",
+        "startProgram.program",
+        "startProgram.tempSel"
+    ]
+}

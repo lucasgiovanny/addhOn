@@ -523,6 +523,54 @@
       },
       "heat_output_year": {
         "name": "Calore prodotto quest'anno"
+      },
+      "compressor_energy_day": {
+        "name": "Energia compressore oggi"
+      },
+      "heater_energy_day": {
+        "name": "Energia resistenza oggi"
+      },
+      "heat_output_day": {
+        "name": "Calore prodotto oggi"
+      },
+      "timer_power_on": {
+        "name": "Accensione programmata"
+      },
+      "timer_power_off": {
+        "name": "Spegnimento programmato"
+      },
+      "eco_schedule_1": {
+        "name": "Fasce economiche 1"
+      },
+      "eco_schedule_2": {
+        "name": "Fasce economiche 2"
+      },
+      "eco_days": {
+        "name": "Giorni fascia economica"
+      },
+      "silent_schedule": {
+        "name": "Fasce silenziose"
+      },
+      "sterilization_time": {
+        "name": "Orario anti-legionella"
+      },
+      "sterilization_interval": {
+        "name": "Intervallo anti-legionella"
+      },
+      "power_supply_source": {
+        "name": "Sorgente di alimentazione"
+      },
+      "external_heat_source": {
+        "name": "Fonte di calore esterna"
+      },
+      "off_peak_period_scheme": {
+        "name": "Schema fasce economiche"
+      },
+      "off_peak_heat_mode": {
+        "name": "Modalità riscaldamento fascia economica"
+      },
+      "off_peak_heat_strategy": {
+        "name": "Strategia riscaldamento fascia economica"
       }
     },
     "binary_sensor": {
@@ -678,6 +726,21 @@
       },
       "vacation_active": {
         "name": "Vacanza attiva"
+      },
+      "timer_enabled": {
+        "name": "Timer"
+      },
+      "sterilization_running": {
+        "name": "Ciclo anti-legionella"
+      },
+      "silent_running": {
+        "name": "Modalità silenziosa attiva"
+      },
+      "solar_heating": {
+        "name": "Riscaldamento solare"
+      },
+      "off_peak_input_enabled": {
+        "name": "Ingresso fascia economica"
       }
     },
     "switch": {
@@ -782,9 +845,6 @@
       },
       "silent_mode": {
         "name": "Modalità silenziosa"
-      },
-      "on_off": {
-        "name": "Accensione"
       }
     },
     "date": {
@@ -1037,6 +1097,9 @@
     },
     "refresh_after_command_failed_error": {
       "message": "Aggiornamento dopo il comando non riuscito: {error}"
+    },
+    "settings_operation_locked": {
+      "message": "\"{param}\" non è scrivibile su questo elettrodomestico: il suo comando settings esegue solo l'operazione \"{operation}\", quindi l'elettrodomestico ignorerebbe la modifica. Impostalo dall'app hOn."
     },
     "speed_not_supported": {
       "message": "Questo purificatore funziona a modalità discrete e non ha una velocità della ventola. Imposta una modalità preimpostata invece di una percentuale."

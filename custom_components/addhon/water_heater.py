@@ -27,7 +27,19 @@ WRITE PATHS (ground-truthed on a real HP250M7C-F9, see number.py / select.py):
   HW `settings` command is silently ignored (live-verified: the device reverted the
   setpoint on the next poll) while the app writes mode+temperature via startProgram;
 - the operating mode is a startProgram PROGRAM, sent via async_send_program (swap-aware);
-- on/off is a plain 0/1 parameter of the settings command.
+- POWER is resolved the same way, on `startProgram` FIRST (v5.22.0). It used to go
+  through `settings`, and did nothing at all: that command declares `operationName` as a
+  MANDATORY fixed parameter pinned to "grSetVacDate" -- identical across four diagnostics
+  dumps a month apart, so it is the cloud's command definition and not a leftover of the
+  last app action -- and `command.send()` transmits the whole parameter group, so the
+  appliance reads every settings write as "set the vacation dates" and drops the rest.
+  That is the same trap the setpoint fell into in v5.10, and the dumps show it: the
+  vacation window written from Home Assistant reached the device while onOffStatus stayed
+  1 through every capture. `startProgram` carries onOffStatus as a mandatory parameter of
+  its own, which makes it the only channel on this appliance that can express power. Where
+  it is NOT there, `settings` is still tried -- and refused up front when
+  settings_write_blocked says the pin would swallow it, so the entity offers no `off` it
+  cannot deliver.
 
 SINGLE SURFACE since v5.21.0: this entity is the ONLY handle for the main setpoint and
 the operating mode. The parallel `number.target_temp` and `select.hw_mode` read and
@@ -57,6 +69,7 @@ from .hon_commands import (
     async_send_command,
     find_settings_param,
     param_range,
+    settings_write_blocked,
     snap_to_range,
 )
 from .hw_values import (
@@ -69,6 +82,7 @@ from .hw_values import (
     hw_water_level,
 )
 from .program_options import (
+    STARTPROGRAM_COMMAND,
     async_send_program,
     startprogram_program_codes,
     startprogram_program_param,
@@ -87,9 +101,15 @@ WATER_HEATER_TYPES = (APPLIANCE_HW, APPLIANCE_WH)
 HW_TEMP_PARAM = "tempSel"
 HW_TEMP_COMMANDS = ("startProgram", "settings", "setParameters")
 
-# Power parameter, resolved on the usual settings/setParameters pair. Same key the shared
-# helpers read for the action, so the entity and the sensors cannot disagree on power.
+# Power parameter. Same key the shared helpers read for the action, so the entity and the
+# sensors cannot disagree on power.
 HW_ON_OFF_PARAM = HW_POWER_ATTR
+
+# Commands searched for the power parameter, IN ORDER -- startProgram first, for the
+# reason spelled out in the module docstring. Kept as its own tuple rather than reusing
+# HW_TEMP_COMMANDS: they happen to coincide today, and a future divergence in one must
+# not silently move the other.
+HW_ON_OFF_COMMANDS = ("startProgram", "settings", "setParameters")
 
 # Current water temperature in the cloud shadow (same attribute the `water_temp` sensor
 # reads).
@@ -194,8 +214,26 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         ) or HW_TEMP_FALLBACK_RANGE
 
         # --- power ----------------------------------------------------------------
-        on_off = find_settings_param(appliance, HW_ON_OFF_PARAM)
+        on_off = find_settings_param(appliance, HW_ON_OFF_PARAM, HW_ON_OFF_COMMANDS)
         self._on_off_command = on_off[0] if on_off is not None else None
+        # A power parameter that only exists on a settings command PINNED to another
+        # operation cannot be written: the appliance would accept the payload and ignore
+        # it. Drop the capability rather than offer an `off` that does nothing -- the same
+        # rule the setpoint gate applies (no writable parameter -> no control).
+        if self._on_off_command is not None:
+            blocked_by = settings_write_blocked(
+                appliance, HW_ON_OFF_PARAM, self._on_off_command
+            )
+            if blocked_by is not None:
+                _LOGGER.info(
+                    "WaterHeater: no power control for id=%s -- '%s' is pinned to "
+                    "operation '%s', which would swallow %s",
+                    redact_id(appliance_id),
+                    self._on_off_command,
+                    blocked_by,
+                    HW_ON_OFF_PARAM,
+                )
+                self._on_off_command = None
 
         # --- operating modes ------------------------------------------------------
         program = startprogram_program_param(appliance)
@@ -428,6 +466,17 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         await self._async_write_power("0")
         await self._async_request_command_refresh()
 
+    @property
+    def _power_on_start_program(self) -> bool:
+        """True when power rides on the SAME command a program start uses.
+
+        Where it does, powering on before a program change must not be a second command:
+        both values belong to one startProgram envelope, which is also the shape the
+        official app sends (its command history carries machMode + onOffStatus + tempSel
+        in a single startProgram).
+        """
+        return self._on_off_command == STARTPROGRAM_COMMAND
+
     async def _async_write_power(self, value: str) -> None:
         """Send onOffStatus WITHOUT refreshing (the callers batch the refresh)."""
         if self._on_off_command is None:
@@ -512,19 +561,28 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
     async def _async_apply_mode(self, code: str) -> None:
         """Start the device program `code` (a raw device code, not an HA state)."""
         # Selecting a program on a powered-off device would leave it off (startProgram
-        # does not imply power on), so power it back up first -- one extra command, only
-        # when the device actually reports itself off.
-        if self._on_off_command is not None and self._is_off:
+        # does not imply power on), so power it back up first -- only when the device
+        # actually reports itself off. When power lives on startProgram it rides along in
+        # the SAME send instead of costing a second command.
+        power_on = self._on_off_command is not None and self._is_off
+        extra: dict[str, str] | None = None
+        if power_on:
             _LOGGER.debug(
-                "WaterHeater debug: powering on before program '%s' id=%s",
+                "WaterHeater debug: powering on before program '%s' id=%s (same_command=%s)",
                 code,
                 redact_id(self._appliance_id),
+                self._power_on_start_program,
             )
-            await self._async_write_power("1")
-        await self._async_send_mode(code)
+            if self._power_on_start_program:
+                extra = {HW_ON_OFF_PARAM: "1"}
+            else:
+                await self._async_write_power("1")
+        await self._async_send_mode(code, extra)
         await self._async_request_command_refresh()
 
-    async def _async_send_mode(self, code: str) -> None:
+    async def _async_send_mode(
+        self, code: str, extra_params: dict[str, str] | None = None
+    ) -> None:
         """Send the program via the swap-aware startProgram sender (no refresh)."""
         appliance = self._appliance
         client = self._hon_client
@@ -539,7 +597,9 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
                 code,
                 redact_id(self._appliance_id),
             )
-            await async_send_program(self.hass, client, appliance, code)
+            await async_send_program(
+                self.hass, client, appliance, code, extra_params
+            )
         except HomeAssistantError:
             raise
         except Exception as err:

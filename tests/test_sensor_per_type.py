@@ -195,6 +195,142 @@ class FakeEntry:
         self.options = dict(options or {})
 
 
+class HeatPumpWaterHeaterTest(unittest.TestCase):
+    """The HW table and the derivations behind it, against the four real HP250M7C-F9
+    diagnostics dumps (2026-07-26 -> 2026-08-25)."""
+
+    def _by_key(self) -> dict:
+        from custom_components.addhon.sensor import SENSORS
+
+        return {d.key: d for d in SENSORS["HW"]}
+
+    # --- the schedule mirror (v5.22.0) ---------------------------------------
+
+    def test_schedule_sensors_exist_and_read_the_shadow_names(self) -> None:
+        by_key = self._by_key()
+        expected = {
+            "timer_power_on": "timingPowerOn",
+            "timer_power_off": "timingPowerOff",
+            "eco_schedule_1": "opp1EcoStartTime1",
+            "eco_schedule_2": "opp2EcoStartTime1",
+            "eco_days": "opp1EcoDays",
+            "silent_schedule": "silentStartTime1",
+            "sterilization_time": "sterilizationTime",
+            "sterilization_interval": "sterilizationInterval",
+        }
+        for key, attr in expected.items():
+            with self.subTest(key=key):
+                self.assertIn(key, by_key)
+                self.assertEqual(by_key[key].attr_key, attr)
+                # Capability-gated: a model without the parameter creates no entity.
+                self.assertTrue(by_key[key].gated)
+
+    def test_schedule_sensors_are_diagnostic(self) -> None:
+        # They mirror configuration, not telemetry -- and they are read-only because the
+        # settings command that owns them is pinned to one operation.
+        from homeassistant.const import EntityCategory
+
+        by_key = self._by_key()
+        for key in ("timer_power_on", "eco_schedule_1", "eco_days", "sterilization_time"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    by_key[key].entity_category, EntityCategory.DIAGNOSTIC
+                )
+
+    def test_timer_times_render_as_clock_values(self) -> None:
+        by_key = self._by_key()
+        timer_on = by_key["timer_power_on"]
+        self.assertEqual(timer_on.value_fn("07:30"), "07:30")
+        # The settings COMMAND declares the same name as a range[0,1]; a bare 0 must not
+        # be rendered as a time.
+        self.assertIsNone(timer_on.value_fn(0))
+
+    def test_eco_schedule_reads_every_slot_of_its_own_group(self) -> None:
+        by_key = self._by_key()
+        attributes = {
+            "opp1EcoStartTime1": "11:00", "opp1EcoEndTime1": "16:00",
+            "opp1EcoStartTime3": "20:00", "opp1EcoEndTime3": "22:30",
+            "opp2EcoStartTime1": "01:00", "opp2EcoEndTime1": "05:00",
+        }
+        get_attr = attributes.get
+        self.assertTrue(by_key["eco_schedule_1"].value_fn_needs_attrs)
+        self.assertEqual(
+            by_key["eco_schedule_1"].value_fn(None, get_attr), "11:00-16:00, 20:00-22:30"
+        )
+        self.assertEqual(
+            by_key["eco_schedule_2"].value_fn(None, get_attr), "01:00-05:00"
+        )
+
+    def test_an_unconfigured_schedule_is_unknown_not_a_zero_length_window(self) -> None:
+        by_key = self._by_key()
+        attributes = {
+            f"opp1Eco{edge}Time{slot}": "00:00"
+            for edge in ("Start", "End")
+            for slot in (1, 2, 3)
+        }
+        self.assertIsNone(by_key["eco_schedule_1"].value_fn(None, attributes.get))
+
+    def test_eco_days_stay_raw(self) -> None:
+        # "7F" = every day. Only that value has ever been observed, so the bit order is
+        # not knowable and the mask is reported as the device spells it.
+        by_key = self._by_key()
+        self.assertEqual(by_key["eco_days"].value_fn("7F"), "7F")
+
+    # --- the daily counters (v5.22.0) ----------------------------------------
+
+    def test_daily_counters_index_by_the_device_weekday(self) -> None:
+        by_key = self._by_key()
+        # The 2026-08-25 capture: Tuesday, weekDay 2 -> index 1.
+        get_attr = {"weekDay": 2, "date": "2026-08-25"}.get
+        self.assertEqual(
+            by_key["compressor_energy_day"].value_fn("2;1;0;0;2;1;1", get_attr), 1.0
+        )
+        self.assertEqual(
+            by_key["heat_output_day"].value_fn("9;6;0;0;12;4;6", get_attr), 6.0
+        )
+        # The 2026-08-16 capture: Sunday, weekDay 7 -> index 6.
+        sunday = {"weekDay": 7, "date": "2026-08-16"}.get
+        self.assertEqual(
+            by_key["compressor_energy_day"].value_fn("2;1;1;1;1;1;1", sunday), 1.0
+        )
+
+    def test_a_daily_counter_without_a_clock_is_unknown_not_slot_zero(self) -> None:
+        by_key = self._by_key()
+        self.assertIsNone(
+            by_key["compressor_energy_day"].value_fn("2;1;0;0;2;1;1", {}.get)
+        )
+
+    def test_daily_counters_are_disabled_by_default(self) -> None:
+        # Whole-kWh device-side on an appliance that burns about 1 kWh a day.
+        by_key = self._by_key()
+        for key in ("compressor_energy_day", "heater_energy_day", "heat_output_day"):
+            with self.subTest(key=key):
+                self.assertFalse(by_key[key].enabled_default)
+
+    # --- the counters that were already there, re-verified -------------------
+
+    def test_the_month_sum_still_equals_the_year_slot_on_the_new_dumps(self) -> None:
+        # The invariant _hw_sum_year and _hw_total_energy rest on, checked against the
+        # 2026-08-25 capture (the earlier one is pinned in the v5.11 tests).
+        from custom_components.addhon.sensor import _hw_total_energy
+
+        attributes = {
+            "energyConsumptionMonthCp": "0;0;0;0;0;0;19;26;0;0;0;0",
+            "energyConsumptionYearCp": "0;0;0;0;45",
+            "energyConsumptionMonthEc": "0;0;0;0;0;0;8;3;0;0;0;0",
+            "energyConsumptionYearEc": "0;0;0;0;11",
+        }
+        for month_attr, year_attr in (
+            ("energyConsumptionMonthCp", "energyConsumptionYearCp"),
+            ("energyConsumptionMonthEc", "energyConsumptionYearEc"),
+        ):
+            with self.subTest(counter=month_attr):
+                months = sum(float(p) for p in attributes[month_attr].split(";"))
+                self.assertEqual(months, float(attributes[year_attr].split(";")[-1]))
+        # Lifetime total = both sources across the whole Year window.
+        self.assertEqual(_hw_total_energy(None, attributes.get), 56.0)
+
+
 class PerTypeTableTest(unittest.TestCase):
     def _keys(self, app_type: str) -> list[str]:
         from custom_components.addhon.sensor import SENSORS

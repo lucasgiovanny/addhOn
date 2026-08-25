@@ -52,6 +52,153 @@ def hw_vacation_active(raw) -> bool | None:
     return str(raw).strip() == HW_VACATION_MACH_MODE
 
 
+# --- the appliance's own schedule --------------------------------------------
+#
+# Ground truth: full command + shadow dump of a real HP250M7C-F9 (2026-07-26 ->
+# 2026-08-25, four captures). The appliance schedules itself in three independent ways,
+# all of them reported as plain shadow attributes and all of them configured from the
+# official app:
+#
+#   timingOnOffStatus + timingPowerOn/timingPowerOff   a daily power on/off timer
+#   opp{1,2}Eco{Start,End}Time{1,2,3} + opp1EcoDays    up to 3 "cheap energy" windows
+#                                                      per period group, with a day mask
+#   silent{Start,End}Time{1,2}                         up to 2 quiet windows
+#   sterilizationTime + sterilizationInterval          the anti-legionella cycle
+#
+# These are READ-ONLY here. Every one of them is a parameter of the `settings` command,
+# which on this appliance is pinned to a single operation (see
+# hon_commands.settings_write_blocked), so a write would be silently dropped -- exposing
+# them as writable controls would be exposing controls that do nothing.
+#
+# The device spells "this slot is unused" as 00:00, on BOTH ends of the window: all six
+# eco slots and both silent slots read 00:00 on every capture, with the features off.
+
+# Unused-slot spelling, and the separator between the two ends of a window.
+HW_TIME_UNSET = "00:00"
+HW_WINDOW_SEPARATOR = "-"
+HW_SCHEDULE_SEPARATOR = ", "
+
+# Slot counts, as the parameter names enumerate them.
+HW_ECO_GROUPS: tuple[int, ...] = (1, 2)
+HW_ECO_SLOTS: tuple[int, ...] = (1, 2, 3)
+HW_SILENT_SLOTS: tuple[int, ...] = (1, 2)
+
+# The eco day mask, reported as hex ("7F" = seven bits = every day). Exposed RAW on
+# purpose: only the all-days value has ever been observed, so which bit carries which
+# weekday is not derivable from the evidence, and a decoded weekday list would assert an
+# ordering nothing supports.
+HW_ECO_DAYS_ATTR = "opp1EcoDays"
+
+# The device's own weekday, ISO-numbered. Verified against the appliance's `date` field
+# on all four captures (2026-07-26 Sun -> 7, 2026-08-16 Sun -> 7, 2026-08-18 Tue -> 2,
+# 2026-08-25 Tue -> 2), which is what makes the 7-slot Day energy series addressable:
+# the slot for today is index weekDay - 1.
+HW_WEEKDAY_ATTR = "weekDay"
+
+
+def hw_time(raw) -> str | None:
+    """A device clock field normalised to "HH:MM", or None when it is not one.
+
+    Strict on purpose: the same names appear on the `settings` COMMAND with numeric
+    placeholder values (timingPowerOn is a range[0,1] there while the shadow reports
+    "00:00"), so anything that is not an actual HH:MM reading is refused rather than
+    rendered as a bogus time.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    hours, _, minutes = text.partition(":")
+    if not minutes:
+        return None
+    try:
+        hour = int(hours)
+        minute = int(minutes)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def hw_window(start_raw, end_raw) -> str | None:
+    """"HH:MM-HH:MM" for a CONFIGURED window, or None when the slot is unused.
+
+    A slot whose two ends are equal is not a window: it is how the device spells an
+    empty slot (00:00-00:00 on every capture), and a zero-length window is
+    indistinguishable from one that never runs anyway.
+    """
+    start = hw_time(start_raw)
+    end = hw_time(end_raw)
+    if start is None or end is None or start == end:
+        return None
+    return f"{start}{HW_WINDOW_SEPARATOR}{end}"
+
+
+def _hw_windows(get_attr, names) -> str | None:
+    """The configured windows among `names` ((start_attr, end_attr) pairs), joined.
+
+    None -- not an empty string -- when none of the slots is configured: the schedule
+    then has no value to report, and an empty state would read as a window of zero
+    length rather than as "nothing scheduled".
+    """
+    windows = [
+        window
+        for start_attr, end_attr in names
+        if (window := hw_window(get_attr(start_attr), get_attr(end_attr))) is not None
+    ]
+    return HW_SCHEDULE_SEPARATOR.join(windows) if windows else None
+
+
+def hw_eco_schedule(get_attr, group: int) -> str | None:
+    """The "cheap energy" windows of period group `group` (1 or 2), joined."""
+    return _hw_windows(
+        get_attr,
+        [
+            (f"opp{group}EcoStartTime{slot}", f"opp{group}EcoEndTime{slot}")
+            for slot in HW_ECO_SLOTS
+        ],
+    )
+
+
+def hw_silent_schedule(get_attr) -> str | None:
+    """The quiet-mode windows, joined."""
+    return _hw_windows(
+        get_attr,
+        [
+            (f"silentStartTime{slot}", f"silentEndTime{slot}")
+            for slot in HW_SILENT_SLOTS
+        ],
+    )
+
+
+def hw_weekday(get_attr) -> int | None:
+    """The device's own ISO weekday (1 = Monday .. 7 = Sunday), or None.
+
+    Read from the appliance rather than from the Home Assistant host: the daily counters
+    roll over in the APPLIANCE's timezone. Falls back to its `date` field, which is
+    reported next to the series and carries the same clock, and never to the host's --
+    a wrong index would silently attribute one day's energy to another.
+    """
+    raw = get_attr(HW_WEEKDAY_ATTR)
+    if raw is not None:
+        try:
+            day = int(str(raw).strip())
+        except (TypeError, ValueError):
+            day = 0
+        if 1 <= day <= 7:
+            return day
+    raw_date = get_attr("date")
+    if raw_date is None:
+        return None
+    try:
+        from datetime import date as _date
+
+        year, month, day_of_month = (int(part) for part in str(raw_date).split("-"))
+        return _date(year, month, day_of_month).isoweekday()
+    except (TypeError, ValueError):
+        return None
+
+
 # --- what the appliance is DOING right now -----------------------------------
 #
 # The heat sources the appliance reports as currently running, ground-truthed on the real

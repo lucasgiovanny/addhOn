@@ -28,6 +28,7 @@ if str(REPO) not in sys.path:
 
 _AC_FIXTURE = REPO / "tests" / "fixtures" / "ac_as35" / "settings_command_params.json"
 _WC_FIXTURE = REPO / "tests" / "fixtures" / "wc_hws77" / "settings_command_params.json"
+_HW_FIXTURE = REPO / "tests" / "fixtures" / "hw_hp250" / "device_schema.json"
 
 
 def _mod(name: str) -> types.ModuleType:
@@ -119,6 +120,14 @@ def _real_ac_settings_params() -> set[str]:
 def _real_wc_settings_params() -> set[str]:
     data = json.loads(_WC_FIXTURE.read_text(encoding="utf-8"))
     return set(data["settings_command_params"])
+
+
+def _hw_fixture() -> dict:
+    return json.loads(_HW_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _real_hw_settings_params() -> set[str]:
+    return set(_hw_fixture()["commands"]["settings"])
 
 
 class AcSwitchParamRealityTest(unittest.TestCase):
@@ -223,6 +232,87 @@ class WcSwitchPinTest(unittest.TestCase):
     def test_wc_switches_pinned(self):
         actual = {desc.key: desc.param for desc in switch._WC_SWITCHES}
         self.assertEqual(actual, self._PINNED)
+
+
+class HwSwitchParamRealityTest(unittest.TestCase):
+    """The `param` of every HW switch must exist in a real HP250M7C-F9 settings schema.
+
+    Fixture tests/fixtures/hw_hp250/, captured 2026-08-25 from a live 250 L unit. Same
+    guard as the AC and wine-cooler ones: a wrong name makes a capability-gated switch
+    silently never created.
+    """
+
+    def test_every_hw_switch_param_exists_on_real_device(self):
+        real = _real_hw_settings_params()
+        missing = {desc.param for desc in switch._HW_SWITCHES} - real
+        self.assertEqual(
+            missing,
+            set(),
+            "These _HW_SWITCHES params are absent from the real HP250M7C-F9 settings "
+            f"schema: {sorted(missing)}. Verify against a real device before changing.",
+        )
+
+    def test_fixture_is_sane(self):
+        real = _real_hw_settings_params()
+        self.assertGreater(len(real), 20)
+        self.assertIn("onOffStatus", real)
+
+    def test_the_fixture_pins_the_operation_that_causes_all_of_this(self):
+        # If this ever stops being a single-value mandatory fixed parameter, the whole
+        # settings-write story changes and every gate built on it must be revisited.
+        operation = _hw_fixture()["commands"]["settings"]["operationName"]
+        self.assertEqual(operation["typology"], "fixed")
+        self.assertEqual(operation["mandatory"], 1)
+        self.assertEqual(operation["enum"], ["grSetVacDate"])
+
+    def test_the_fixture_pins_power_on_start_program(self):
+        # The other half: power is expressible on startProgram, which is why the
+        # water_heater entity can turn the appliance off at all.
+        start = _hw_fixture()["commands"]["startProgram"]
+        self.assertIn("onOffStatus", start)
+        self.assertEqual(start["onOffStatus"]["typology"], "fixed")
+
+
+class HwSwitchPinTest(unittest.TestCase):
+    """Drift guard for the heat pump water heater toggles, pinned to the HP250M7C-F9
+    schema dumps (2026-07-26 -> 2026-08-25).
+
+    POWER is deliberately ABSENT (v5.22.0). `on_off` was here and it never worked: the
+    appliance's `settings` command declares `operationName` as a mandatory fixed parameter
+    offering only "grSetVacDate", and `command.send()` transmits the whole parameter group,
+    so the device read every settings write as "set the vacation dates" and dropped the
+    rest -- onOffStatus stayed 1 across all four captures. Power is expressed on
+    `startProgram`, which only the water_heater entity addresses, and that entity already
+    exposes it (ON_OFF + the `off` operation mode), so a second surface would be the same
+    duplication v5.21.0 retired for the mode and the setpoint.
+    """
+
+    _PINNED = {
+        "boost": "boostStatus",
+        "silent_mode": "silentStatus",
+        "child_lock": "lockStatus",
+        "sterilization": "sterilizationStatus",
+    }
+
+    def test_hw_switches_pinned(self):
+        actual = {desc.key: desc.param for desc in switch._HW_SWITCHES}
+        self.assertEqual(actual, self._PINNED)
+
+    def test_power_is_not_a_switch_anymore(self):
+        self.assertNotIn("on_off", {desc.key for desc in switch._HW_SWITCHES})
+        self.assertNotIn("onOffStatus", {desc.param for desc in switch._HW_SWITCHES})
+
+    def test_the_retired_switch_is_cleaned_from_the_registry(self):
+        import importlib
+
+        addhon = importlib.import_module("custom_components.addhon")
+        self.assertIn(("switch", "_on_off"), addhon._HW_REMOVED)
+
+    def test_hw_switch_keys_and_params_unique(self):
+        keys = [desc.key for desc in switch._HW_SWITCHES]
+        params = [desc.param for desc in switch._HW_SWITCHES]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate HW switch key")
+        self.assertEqual(len(params), len(set(params)), "duplicate HW switch param")
 
 
 if __name__ == "__main__":

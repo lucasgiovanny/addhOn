@@ -367,6 +367,140 @@ class Tier2TableTest(unittest.TestCase):
         )
 
 
+class HeatPumpAttributeRealityTest(unittest.TestCase):
+    """Every HW attr_key must be a name the real appliance actually reports.
+
+    Fixture tests/fixtures/hw_hp250/, captured 2026-08-25 from a live HP250M7C-F9. A
+    typo (or a command-side name used where a shadow name belongs, the v5.21.0 bug in
+    number.py) produces an entity that is gated off forever, or one stuck at unknown --
+    neither of which any other test notices.
+    """
+
+    # Names in the tables that this UNIT legitimately does not report:
+    #  - the first six are the plain WATER HEATER (WH) set that the HW table extends;
+    #    a heat pump does not carry an inlet/outlet probe or a cycle phase.
+    #  - offpeakSignalHeatStrategy exists on this model's settings COMMAND but is not
+    #    mirrored into the shadow, so the gate simply creates no entity here (see the
+    #    comment on _g_hw_config in sensor.py).
+    _NOT_ON_THIS_UNIT = {
+        "tempIn",
+        "tempOut",
+        "power",
+        "waterVolume",
+        "remainingTimeMMHeating",
+        "prPhase",
+        "offpeakSignalHeatStrategy",
+    }
+
+    @staticmethod
+    def _shadow() -> set:
+        import json
+        from pathlib import Path
+
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "tests" / "fixtures" / "hw_hp250" / "device_schema.json"
+        )
+        return set(json.loads(path.read_text(encoding="utf-8"))["shadow_attribute_names"])
+
+    def test_every_hw_sensor_attribute_is_real(self) -> None:
+        from custom_components.addhon.sensor import SENSORS
+
+        used = set()
+        for description in SENSORS["HW"]:
+            used.add(description.attr_key)
+            used.update(description.attr_fallbacks)
+        unknown = used - self._shadow() - self._NOT_ON_THIS_UNIT
+        self.assertEqual(
+            unknown,
+            set(),
+            "HW sensors reading attributes the real appliance never reports "
+            f"(typo, or a command-side name): {sorted(unknown)}",
+        )
+
+    def test_every_hw_binary_attribute_is_real(self) -> None:
+        unknown = set(
+            d.attr_key
+            for d in __import__(
+                "custom_components.addhon.binary_sensor", fromlist=["BINARY_SENSORS"]
+            ).BINARY_SENSORS["HW"]
+        ) - self._shadow() - self._NOT_ON_THIS_UNIT
+        self.assertEqual(unknown, set(), f"not reported by the real appliance: {sorted(unknown)}")
+
+    def test_the_allow_list_does_not_hide_a_real_name(self) -> None:
+        # Anti-rot: an entry that the appliance DOES report has no business being
+        # excused here.
+        self.assertEqual(self._NOT_ON_THIS_UNIT & self._shadow(), set())
+
+
+class HeatPumpBinaryTest(unittest.IsolatedAsyncioTestCase):
+    """The HW binary sensors added in v5.22.0, against the real HP250M7C-F9 shadow."""
+
+    # The 2026-08-25 capture, verbatim for the keys under test: the anti-legionella
+    # cycle was up (sterilizationTime 22:00, capture at 21:54, compressor running) while
+    # the quiet mode, the solar coil and the off-peak input were all idle/disabled.
+    _SHADOW = {
+        "timingOnOffStatus": 0,
+        "sterilizationCurrentStatus": 1,
+        "silentCurrentStatus": 0,
+        "solarHeatingCurrentStatus": 0,
+        "offpeakSignalSwitch": 0,
+        "offpeakSignalCurrentStatus": 0,
+    }
+
+    def test_the_new_keys_are_in_the_table(self) -> None:
+        keys = set(_binary_keys("HW"))
+        self.assertLessEqual(
+            {
+                "timer_enabled",
+                "sterilization_running",
+                "silent_running",
+                "solar_heating",
+                "off_peak_input_enabled",
+            },
+            keys,
+        )
+
+    async def test_states_follow_the_shadow(self) -> None:
+        entities = {
+            e.entity_description.key: e for e in await _build_binary("HW", self._SHADOW)
+        }
+        self.assertIs(entities["sterilization_running"].is_on, True)
+        self.assertIs(entities["timer_enabled"].is_on, False)
+        self.assertIs(entities["silent_running"].is_on, False)
+        self.assertIs(entities["off_peak_input_enabled"].is_on, False)
+
+    async def test_they_are_capability_gated(self) -> None:
+        # A model that reports none of them creates none of them, rather than five
+        # confident "off" entities.
+        created = {e.entity_description.key for e in await _build_binary("HW", {})}
+        self.assertEqual(
+            created
+            & {
+                "timer_enabled",
+                "sterilization_running",
+                "silent_running",
+                "solar_heating",
+                "off_peak_input_enabled",
+            },
+            set(),
+        )
+
+    def test_the_off_peak_pair_is_input_enabled_plus_signal(self) -> None:
+        # Two different questions: is the dry contact WIRED UP at all, and is it closed
+        # right now. Reading one for the other would misreport a PV install.
+        by_key = {
+            d.key: d
+            for d in __import__(
+                "custom_components.addhon.binary_sensor", fromlist=["BINARY_SENSORS"]
+            ).BINARY_SENSORS["HW"]
+        }
+        self.assertEqual(by_key["off_peak_input_enabled"].attr_key, "offpeakSignalSwitch")
+        self.assertEqual(
+            by_key["off_peak_signal"].attr_key, "offpeakSignalCurrentStatus"
+        )
+
+
 class Tier2GatingTest(unittest.IsolatedAsyncioTestCase):
     async def test_cooling_creates_only_reported_attrs(self) -> None:
         added = await _build_sensors("REF", {"tempZ1": "4", "tempEnv": "22", "humidityEnv": "55"})

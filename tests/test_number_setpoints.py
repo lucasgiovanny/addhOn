@@ -284,6 +284,192 @@ async def _build(app_type: str, appliance, attributes: dict, client=None) -> lis
     return added
 
 
+class FixedParam:
+    """Mimics HonParameterFixed: one declared value, and a setter that does not validate."""
+
+    def __init__(self, value) -> None:
+        self._value = str(value)
+
+    @property
+    def values(self):
+        return [self._value]
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, v):
+        self._value = str(v)
+
+
+def _hw_commands(*, pinned_operation: str | None = "grSetVacDate") -> dict:
+    """HP250M7C-F9 `settings`, as the 2026-08 dump reports it.
+
+    The three auxiliary setpoints, plus the mandatory `operationName` fixed to a single
+    value -- which is what makes every write through this command a no-op for anything
+    outside that operation.
+    """
+    params = {
+        "hcTempSel": RangeParam(65, 55, 75, 1),
+        "pvTempSel": RangeParam(65, 55, 75, 1),
+        "sgTempSel": RangeParam(65, 55, 75, 1),
+        "sterilizationTempSel": RangeParam(70, 55, 75, 1),
+    }
+    if pinned_operation is not None:
+        params["operationName"] = FixedParam(pinned_operation)
+        params["vacStartDate"] = FixedParam("2000-01-01")
+    return {"settings": RecordingCommand(params)}
+
+
+def _hw_attributes() -> dict:
+    """The shadow, verbatim from the 2026-08-25 capture: the auxiliary setpoints are
+    reported under tempSelHc / tempSelPv / tempSelSg -- NOT under the names the command
+    writes them with."""
+    return {
+        "tempSelHc": 65.0,
+        "tempSelPv": 75.0,
+        "tempSelSg": 65.0,
+        "sterilizationTempSel": 70.0,
+    }
+
+
+class HeatPumpNumberRealityTest(unittest.TestCase):
+    """Both halves of every HW number, against the real HP250M7C-F9 schema.
+
+    The write name must exist in the settings command, and the READ name must exist in
+    the shadow -- the second check is the one that would have caught v5.21.0 shipping
+    three setpoints permanently stuck at "unknown".
+    """
+
+    @staticmethod
+    def _fixture() -> dict:
+        import json
+
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "tests" / "fixtures" / "hw_hp250" / "device_schema.json"
+        )
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _descriptions(self):
+        from custom_components.addhon.number import NUMBERS
+
+        return NUMBERS["HW"]
+
+    def test_every_write_param_exists_in_the_settings_command(self) -> None:
+        real = set(self._fixture()["commands"]["settings"])
+        missing = {d.param for d in self._descriptions()} - real
+        self.assertEqual(missing, set(), f"absent from the real settings schema: {sorted(missing)}")
+
+    def test_every_read_attribute_exists_in_the_shadow(self) -> None:
+        shadow = set(self._fixture()["shadow_attribute_names"])
+        missing = {d.attr or d.param for d in self._descriptions()} - shadow
+        self.assertEqual(
+            missing,
+            set(),
+            "These HW setpoints read an attribute the appliance never reports, so they "
+            f"would sit at unknown forever: {sorted(missing)}",
+        )
+
+    def test_the_two_halves_really_do_differ(self) -> None:
+        # Anti-vacuity: if the names ever coincide the test above proves nothing.
+        pairs = {(d.param, d.attr) for d in self._descriptions() if d.attr}
+        self.assertIn(("pvTempSel", "tempSelPv"), pairs)
+
+
+class HeatPumpSetpointReadTest(unittest.TestCase):
+    """The read side of the HW auxiliary setpoints (v5.22.0).
+
+    The appliance spells them differently on the two sides, so reading the command's
+    parameter name found nothing and all three numbers sat at "unknown" -- while the
+    command itself still held its 65 default, so even a fallback to the command value
+    would have reported 65 where the appliance says 75.
+    """
+
+    def _by_key(self):
+        added = asyncio.run(
+            _build("HW", FakeAppliance(_hw_commands()), _hw_attributes())
+        )
+        return {e.entity_description.key: e for e in added}
+
+    def test_auxiliary_setpoints_read_the_shadow_names(self) -> None:
+        by_key = self._by_key()
+        self.assertEqual(by_key["target_temp_pv"].native_value, 75.0)
+        self.assertEqual(by_key["target_temp_hc"].native_value, 65.0)
+        self.assertEqual(by_key["target_temp_sg"].native_value, 65.0)
+
+    def test_the_pv_reading_is_the_appliance_value_not_the_command_default(self) -> None:
+        # The distinguishing case: shadow 75, command 65. Reading the command would be
+        # confidently wrong rather than merely blank.
+        by_key = self._by_key()
+        self.assertEqual(by_key["target_temp_pv"].native_value, 75.0)
+        self.assertEqual(by_key["target_temp_pv"]._param.value, 65)
+
+    def test_a_setpoint_spelled_the_same_on_both_sides_needs_no_override(self) -> None:
+        by_key = self._by_key()
+        self.assertIsNone(
+            by_key["sterilization_temp"].entity_description.attr
+        )
+        self.assertEqual(by_key["sterilization_temp"].native_value, 70.0)
+
+
+class PinnedSettingsWriteTest(unittest.TestCase):
+    """A write the appliance would silently swallow must fail loudly (v5.22.0)."""
+
+    def _pv(self, *, pinned_operation="grSetVacDate"):
+        commands = _hw_commands(pinned_operation=pinned_operation)
+        added = asyncio.run(
+            _build(
+                "HW",
+                FakeAppliance(commands),
+                _hw_attributes(),
+                client=FakeClient(),
+            )
+        )
+        return next(e for e in added if e.entity_description.key == "target_temp_pv"), commands
+
+    def test_write_through_a_pinned_command_raises_and_sends_nothing(self) -> None:
+        from homeassistant.exceptions import HomeAssistantError
+
+        pv, commands = self._pv()
+        with self.assertRaises(HomeAssistantError) as ctx:
+            asyncio.run(pv.async_set_native_value(70.0))
+        self.assertEqual(
+            ctx.exception.translation_key, "settings_operation_locked"
+        )
+        self.assertEqual(
+            ctx.exception.translation_placeholders,
+            {"param": "pvTempSel", "operation": "grSetVacDate"},
+        )
+        self.assertEqual(commands["settings"].send_calls, 0)
+        # ...and the READ half is untouched: the entity still reports the appliance.
+        self.assertEqual(pv.native_value, 75.0)
+
+    def test_an_unpinned_settings_command_still_writes(self) -> None:
+        pv, commands = self._pv(pinned_operation=None)
+        asyncio.run(pv.async_set_native_value(70.0))
+        self.assertEqual(commands["settings"].send_calls, 1)
+        self.assertEqual(commands["settings"].parameters["pvTempSel"].value, 70)
+
+    def test_an_unknown_operation_does_not_block(self) -> None:
+        pv, commands = self._pv(pinned_operation="grSetSomethingNew")
+        asyncio.run(pv.async_set_native_value(70.0))
+        self.assertEqual(commands["settings"].send_calls, 1)
+
+    def test_a_parameter_the_operation_does_carry_is_allowed(self) -> None:
+        # grSetVacDate writes the vacation dates: those must keep working (they are the
+        # one thing this command demonstrably does -- the window written from Home
+        # Assistant reached the real appliance).
+        from custom_components.addhon.hon_commands import settings_write_blocked
+
+        appliance = FakeAppliance(_hw_commands())
+        self.assertIsNone(settings_write_blocked(appliance, "vacStartDate"))
+        self.assertEqual(
+            settings_write_blocked(appliance, "boostStatus"), "grSetVacDate"
+        )
+
+
 class NumberSetpointTest(unittest.TestCase):
     def test_gating_only_present_setpoints(self) -> None:
         app = FakeAppliance(_fridge_commands())

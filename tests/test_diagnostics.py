@@ -524,6 +524,67 @@ class DiagnosticsModelAttributesTest(unittest.TestCase):
         self.assertEqual(block["model_attributes"]["zones"], "fridge")
 
 
+class CommandCategoriesTest(unittest.TestCase):
+    """The categories the ACTIVE command hides (v5.22.0).
+
+    `appliance.commands[name]` holds ONE category -- the loader keeps `setParameters`
+    when it exists and the first entry otherwise -- so the `commands` block can only ever
+    describe that one. On the heat pump water heater that is where the open question
+    lives: its `settings` command enumerates both `setConfig` and `setParameters` in its
+    own `category` parameter while pinning `operationName` to a single operation, so the
+    operations the appliance really accepts cannot be confirmed from the active category.
+    """
+
+    class _Categorised:
+        def __init__(self, parameters, categories, category):
+            self.parameters = parameters
+            self.categories = categories
+            self.category = category
+
+    def _appliance(self):
+        set_config = FakeCommand({"operationName": FakeParam(value="grSetOnOff")})
+        set_parameters = FakeCommand({"operationName": FakeParam(value="grSetVacDate")})
+        settings = self._Categorised(
+            set_parameters.parameters,
+            {"setConfig": set_config, "setParameters": set_parameters},
+            "setParameters",
+        )
+        return FakeAppliance(commands={"settings": settings})
+
+    def test_hidden_categories_are_dumped(self):
+        out = diagnostics._command_categories(self._appliance())
+        self.assertEqual(set(out), {"settings"})
+        self.assertEqual(set(out["settings"]), {"setConfig", "setParameters"})
+        self.assertEqual(
+            out["settings"]["setConfig"]["parameters"]["operationName"]["value"],
+            "grSetOnOff",
+        )
+
+    def test_the_active_category_is_marked(self):
+        out = diagnostics._command_categories(self._appliance())
+        self.assertIs(out["settings"]["setParameters"]["active"], True)
+        self.assertIs(out["settings"]["setConfig"]["active"], False)
+
+    def test_a_flat_command_adds_nothing_to_the_payload(self):
+        appliance = FakeAppliance(commands={"settings": FakeCommand({"tempSel": FakeParam(1)})})
+        self.assertEqual(diagnostics._command_categories(appliance), {})
+
+    def test_the_block_carries_the_section(self):
+        block = diagnostics._appliance_block(
+            "id1",
+            {
+                "appliance": self._appliance(),
+                "type": "HW",
+                "attributes": {},
+                "statistics": {},
+            },
+        )
+        self.assertIn("command_categories", block)
+        self.assertIn("setConfig", block["command_categories"]["settings"])
+        # The established shape is untouched.
+        self.assertIn("operationName", block["commands"]["settings"])
+
+
 class DiagnosticsCoverageTest(unittest.TestCase):
     def test_unmapped_bare_attribute_surfaces(self):
         _, blocks = _entry_diag()

@@ -384,6 +384,57 @@ _HEAT_PUMP_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
         icon="mdi:transmission-tower",
         enabled_default=False,
     ),
+    # ON while the appliance's OWN daily power timer is armed (v5.22.0). Enabled by
+    # default and deliberately paired with the `timer_power_on` / `timer_power_off`
+    # sensors: the two times are meaningless without knowing whether the timer is
+    # running, and this is the flag that answers "is the appliance scheduling itself?".
+    # Configured in the official app -- like the whole schedule it is a `settings`
+    # parameter, and that command is pinned to one operation on this model.
+    HonBinarySensorEntityDescription(
+        key="timer_enabled",
+        attr_key="timingOnOffStatus",
+        icon="mdi:timer-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    # The anti-legionella cycle, as opposed to `switch.sterilization` (which is whether
+    # the cycle is ENABLED at all). Observed 1 on the 2026-08-25 capture, minutes before
+    # the configured sterilizationTime of 22:00 and with the compressor running, and 0 on
+    # the three captures taken away from that hour -- so it tracks the cycle rather than
+    # the setting. Whether the device raises it exactly at the scheduled time or shortly
+    # before is a single-sample detail and not asserted here.
+    HonBinarySensorEntityDescription(
+        key="sterilization_running",
+        attr_key="sterilizationCurrentStatus",
+        icon="mdi:bacteria",
+        device_class=BinarySensorDeviceClass.RUNNING,
+    ),
+    HonBinarySensorEntityDescription(
+        key="silent_running",
+        attr_key="silentCurrentStatus",
+        icon="mdi:volume-off",
+        device_class=BinarySensorDeviceClass.RUNNING,
+        enabled_default=False,
+    ),
+    # Solar THERMAL: the appliance's external coil input, unrelated to the photovoltaic
+    # dry contact below. Reported by the model but wired on none of the captures.
+    HonBinarySensorEntityDescription(
+        key="solar_heating",
+        attr_key="solarHeatingCurrentStatus",
+        icon="mdi:solar-power-variant",
+        device_class=BinarySensorDeviceClass.RUNNING,
+        enabled_default=False,
+    ),
+    # Whether the off-peak / photovoltaic dry-contact INPUT is enabled at all, as
+    # opposed to `off_peak_signal`, which is whether the contact is currently closed.
+    # The pair is what tells a PV-wired install apart from one where the feature is
+    # simply off (0 on every capture of this appliance).
+    HonBinarySensorEntityDescription(
+        key="off_peak_input_enabled",
+        attr_key="offpeakSignalSwitch",
+        icon="mdi:electric-switch",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        enabled_default=False,
+    ),
 )
 
 # Air purifier (AP). Both signals are reported and meaningful with the purifier

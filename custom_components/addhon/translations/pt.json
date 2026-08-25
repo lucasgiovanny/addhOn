@@ -523,6 +523,54 @@
       },
       "heat_output_year": {
         "name": "Calor produzido este ano"
+      },
+      "compressor_energy_day": {
+        "name": "Energia do compressor hoje"
+      },
+      "heater_energy_day": {
+        "name": "Energia da resistência hoje"
+      },
+      "heat_output_day": {
+        "name": "Calor produzido hoje"
+      },
+      "timer_power_on": {
+        "name": "Ligar programado"
+      },
+      "timer_power_off": {
+        "name": "Desligar programado"
+      },
+      "eco_schedule_1": {
+        "name": "Janelas de vazio 1"
+      },
+      "eco_schedule_2": {
+        "name": "Janelas de vazio 2"
+      },
+      "eco_days": {
+        "name": "Dias de vazio"
+      },
+      "silent_schedule": {
+        "name": "Janelas silenciosas"
+      },
+      "sterilization_time": {
+        "name": "Hora do anti-legionela"
+      },
+      "sterilization_interval": {
+        "name": "Intervalo do anti-legionela"
+      },
+      "power_supply_source": {
+        "name": "Fonte de alimentação"
+      },
+      "external_heat_source": {
+        "name": "Fonte de calor externa"
+      },
+      "off_peak_period_scheme": {
+        "name": "Esquema de períodos de vazio"
+      },
+      "off_peak_heat_mode": {
+        "name": "Modo de aquecimento em vazio"
+      },
+      "off_peak_heat_strategy": {
+        "name": "Estratégia de aquecimento em vazio"
       }
     },
     "binary_sensor": {
@@ -678,6 +726,21 @@
       },
       "vacation_active": {
         "name": "Férias ativas"
+      },
+      "timer_enabled": {
+        "name": "Temporizador"
+      },
+      "sterilization_running": {
+        "name": "Ciclo anti-legionela"
+      },
+      "silent_running": {
+        "name": "Modo silencioso ativo"
+      },
+      "solar_heating": {
+        "name": "Aquecimento solar"
+      },
+      "off_peak_input_enabled": {
+        "name": "Entrada de tarifa de vazio"
       }
     },
     "switch": {
@@ -782,9 +845,6 @@
       },
       "silent_mode": {
         "name": "Modo silencioso"
-      },
-      "on_off": {
-        "name": "Ligar/desligar"
       }
     },
     "date": {
@@ -1037,6 +1097,9 @@
     },
     "refresh_after_command_failed_error": {
       "message": "A atualização após o comando falhou: {error}"
+    },
+    "settings_operation_locked": {
+      "message": "\"{param}\" não é gravável neste aparelho: o comando settings só executa a operação \"{operation}\", por isso o aparelho ignoraria a alteração. Defina-o na app hOn."
     },
     "speed_not_supported": {
       "message": "Este purificador funciona em modos discretos e não tem velocidade de ventilação. Defina um modo predefinido em vez de uma percentagem."

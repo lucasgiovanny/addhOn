@@ -523,6 +523,54 @@
       },
       "heat_output_year": {
         "name": "Heat output this year"
+      },
+      "compressor_energy_day": {
+        "name": "Compressor energy today"
+      },
+      "heater_energy_day": {
+        "name": "Heater energy today"
+      },
+      "heat_output_day": {
+        "name": "Heat produced today"
+      },
+      "timer_power_on": {
+        "name": "Timer switch-on"
+      },
+      "timer_power_off": {
+        "name": "Timer switch-off"
+      },
+      "eco_schedule_1": {
+        "name": "Off-peak windows 1"
+      },
+      "eco_schedule_2": {
+        "name": "Off-peak windows 2"
+      },
+      "eco_days": {
+        "name": "Off-peak days"
+      },
+      "silent_schedule": {
+        "name": "Silent windows"
+      },
+      "sterilization_time": {
+        "name": "Anti-legionella time"
+      },
+      "sterilization_interval": {
+        "name": "Anti-legionella interval"
+      },
+      "power_supply_source": {
+        "name": "Power supply source"
+      },
+      "external_heat_source": {
+        "name": "External heat source"
+      },
+      "off_peak_period_scheme": {
+        "name": "Off-peak period scheme"
+      },
+      "off_peak_heat_mode": {
+        "name": "Off-peak heating mode"
+      },
+      "off_peak_heat_strategy": {
+        "name": "Off-peak heating strategy"
       }
     },
     "binary_sensor": {
@@ -678,6 +726,21 @@
       },
       "vacation_active": {
         "name": "Vacation active"
+      },
+      "timer_enabled": {
+        "name": "Timer"
+      },
+      "sterilization_running": {
+        "name": "Anti-legionella cycle"
+      },
+      "silent_running": {
+        "name": "Silent mode running"
+      },
+      "solar_heating": {
+        "name": "Solar heating"
+      },
+      "off_peak_input_enabled": {
+        "name": "Off-peak input"
       }
     },
     "switch": {
@@ -782,9 +845,6 @@
       },
       "silent_mode": {
         "name": "Silent mode"
-      },
-      "on_off": {
-        "name": "Power"
       }
     },
     "date": {
@@ -1037,6 +1097,9 @@
     },
     "refresh_after_command_failed_error": {
       "message": "Refresh after the command failed: {error}"
+    },
+    "settings_operation_locked": {
+      "message": "\"{param}\" cannot be written on this appliance: its settings command only performs the \"{operation}\" operation, so the appliance would ignore the change. Set it in the hOn app instead."
     },
     "speed_not_supported": {
       "message": "This purifier runs in discrete modes and has no fan speed. Set a preset mode instead of a percentage."

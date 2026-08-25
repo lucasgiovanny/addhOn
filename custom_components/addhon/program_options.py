@@ -57,8 +57,17 @@ def startprogram_command(appliance):
     return get_command(appliance, STARTPROGRAM_COMMAND)
 
 
-async def async_send_program(hass, client, appliance, program_code: str) -> None:
+async def async_send_program(
+    hass, client, appliance, program_code: str, extra_params: dict | None = None
+) -> None:
     """Apply ``program_code`` to the ``startProgram`` command and send it, SWAP-AWARE.
+
+    ``extra_params`` are applied to the SWAPPED command, i.e. after the program has
+    selected its category, so they land on the object that is actually transmitted. It
+    exists for the parameters that share the startProgram envelope with the program
+    itself -- the heat pump water heater's ``onOffStatus`` (see water_heater.py) -- so
+    powering on and starting a program is ONE command instead of two, which is also the
+    shape the official app sends.
 
     Setting the ``program``/``prCode`` parameter SWAPS the active startProgram command in
     ``appliance.commands`` (a ``HonParameterProgram`` setter does ``command.category =
@@ -97,6 +106,7 @@ async def async_send_program(hass, client, appliance, program_code: str) -> None
             # the param-__dict__ restore covers the value-mutating (prCode) case.
             original_command = command
             snapshots = snapshot_params(params)
+            extra_snapshots = None
             try:
                 applied = False
                 for pname in PROGRAM_PARAM_NAMES:
@@ -118,12 +128,34 @@ async def async_send_program(hass, client, appliance, program_code: str) -> None
                         program_code,
                     )
                     command = refreshed
+                # Applied after the swap on purpose: the pre-swap object is not the one
+                # that gets serialized. Snapshotted separately first -- when the program
+                # swapped the category, `snapshots` covers the ORIGINAL command's
+                # parameters, so without this the extras would survive a failed send on
+                # the swapped object. Unknown names are refused loudly rather than
+                # dropped: a caller asking for a parameter this category does not have is
+                # a bug, not a no-op.
+                if extra_params:
+                    target_params = getattr(command, "parameters", None)
+                    target_params = target_params if isinstance(target_params, dict) else {}
+                    if target_params is not params:
+                        extra_snapshots = snapshot_params(target_params)
+                    for extra_name, extra_value in extra_params.items():
+                        extra_param = target_params.get(extra_name)
+                        if extra_param is None:
+                            raise RuntimeError(
+                                f"startProgram has no parameter '{extra_name}' "
+                                f"among {sorted(target_params)}"
+                            )
+                        extra_param.value = extra_value
                 await command.send()
             except Exception:
                 # Restore the pre-swap parameter state (shared helper copies __dict__
                 # directly, so a value-mutating param does not re-fire its rules) and
                 # reset the swapped command pointer to the original.
                 restore_params(params, snapshots)
+                if extra_snapshots is not None:
+                    restore_params(getattr(command, "parameters", {}), extra_snapshots)
                 commands[STARTPROGRAM_COMMAND] = original_command
                 raise
             _LOGGER.debug(

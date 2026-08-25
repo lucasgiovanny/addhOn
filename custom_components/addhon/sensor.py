@@ -112,12 +112,17 @@ from .air_purifier import (
 from .debug_utils import redact_id
 from .hw_values import (
     HW_ACTIONS,
+    HW_ECO_DAYS_ATTR,
     HW_HEAT_SOURCES,
     HW_SOURCES,
     HW_WATER_LEVEL_ATTR,
     hw_action,
+    hw_eco_schedule,
     hw_heat_source,
+    hw_silent_schedule,
+    hw_time,
     hw_water_level,
+    hw_weekday,
 )
 from .program_labels import for_coordinator
 
@@ -948,6 +953,22 @@ def _hw_pick_month(parts: list[str], get_attr: Callable[[str], object]) -> float
     return _hw_slot(parts[_hw_device_month(get_attr) - 1])
 
 
+def _hw_pick_day(parts: list[str], get_attr: Callable[[str], object]) -> float:
+    """Today's slot of a 7-day series, indexed by the DEVICE's own weekday.
+
+    The index is ground-truthed rather than assumed: `weekDay` matched the ISO weekday
+    of the appliance's own `date` field on all four HP250M7C-F9 captures (two Sundays
+    -> 7, two Tuesdays -> 2), and the slot it selects behaved like a running daily
+    total across them (Sunday's slot froze once the day was over, the current day's
+    kept climbing). An unreadable weekday raises rather than guesses index 0, so the
+    sensor reports unknown instead of attributing one day's energy to another.
+    """
+    weekday = hw_weekday(get_attr)
+    if weekday is None:
+        raise ValueError("no device weekday")
+    return _hw_slot(parts[weekday - 1])
+
+
 def _hw_sum_year(parts: list[str], get_attr: Callable[[str], object]) -> float:
     """Year to date = the SUM of the 12 month slots.
 
@@ -995,6 +1016,86 @@ def _hw_total_energy(_raw, get_attr: Callable[[str], object]) -> float | None:
             return None
         seen = True
     return total if seen else None
+
+
+def _hw_eco_schedule_1(_raw, get_attr: Callable[[str], object]) -> str | None:
+    """The three "cheap energy" windows of period group 1, as one readable list."""
+    return hw_eco_schedule(get_attr, 1)
+
+
+def _hw_eco_schedule_2(_raw, get_attr: Callable[[str], object]) -> str | None:
+    """The three "cheap energy" windows of period group 2."""
+    return hw_eco_schedule(get_attr, 2)
+
+
+def _hw_silent_schedule(_raw, get_attr: Callable[[str], object]) -> str | None:
+    """The two quiet-mode windows."""
+    return hw_silent_schedule(get_attr)
+
+
+def _g_hw_time(key: str, attr: str, *, icon: str | None = None,
+               enabled_default: bool = True) -> HonSensorEntityDescription:
+    """Capability-gated clock readout ("HH:MM") from the appliance's own schedule.
+
+    Diagnostic category: these are configuration READBACKS, not telemetry. They are
+    read-only by necessity -- every one of them is a `settings` parameter, and on this
+    appliance that command is pinned to a single operation (see
+    hon_commands.settings_write_blocked), so a writable control would be a control that
+    does nothing. The schedule is configured in the official app; this is the mirror.
+    """
+    return HonSensorEntityDescription(
+        key=key,
+        attr_key=attr,
+        icon=icon,
+        value_fn=hw_time,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        gated=True,
+        enabled_default=enabled_default,
+    )
+
+
+def _g_hw_schedule(key: str, attr: str,
+                   value_fn: Callable[[object, Callable[[str], object]], object], *,
+                   icon: str = "mdi:calendar-clock",
+                   enabled_default: bool = True) -> HonSensorEntityDescription:
+    """Capability-gated window LIST, derived from a whole group of slot parameters.
+
+    `attr_key` is the group's first start time, which is what the capability gate keys
+    on; the value is built from every slot by `value_fn`. A group with no window
+    configured reports unknown rather than an empty string -- see hw_values._hw_windows.
+    """
+    return HonSensorEntityDescription(
+        key=key,
+        attr_key=attr,
+        icon=icon,
+        value_fn=value_fn,
+        value_fn_needs_attrs=True,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        gated=True,
+        enabled_default=enabled_default,
+    )
+
+
+def _g_hw_config(key: str, attr: str, *, icon: str | None = None,
+                 ) -> HonSensorEntityDescription:
+    """Capability-gated RAW configuration readback of the auxiliary-input setup.
+
+    Deliberately a bare number with NO enum mapping and NO unit: the appliance offers
+    these as small integers (powerSupplySource enum[0,2,3,4], offpeakSignalHeatMode 1-3,
+    offpeakSignalHeatStrategy 1-4) and nothing in the dumps says what the individual
+    values mean -- every capture reads the factory default. Labelling them would be
+    inventing knowledge; exposing the raw figure at least lets a user who changes the
+    setting in the app see WHICH number it moved to. Disabled by default for the same
+    reason.
+    """
+    return HonSensorEntityDescription(
+        key=key,
+        attr_key=attr,
+        icon=icon,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        gated=True,
+        enabled_default=False,
+    )
 
 
 # Heat pump water heater (HW): shares the WH temperature set, plus the
@@ -1090,6 +1191,70 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
         gated=True,
         enabled_default=False,
     ),
+    # --- daily counters ------------------------------------------------------
+    # The 7-slot Day series, addressable now that `weekDay` is ground-truthed against
+    # the appliance's own date on four captures (see _hw_pick_day). Disabled by default
+    # because of the RESOLUTION, not the indexing: the counters are whole kWh device-side
+    # and this appliance burns about 1 kWh a day, so a daily slot only ever reads 0, 1 or
+    # 2 -- Home Assistant derives finer statistics from the month counter on its own.
+    # They are here for the users who want the device's own daily figure rather than a
+    # derived one, and for the heat OUTPUT, whose daily slots (9;6;0;0;12;4;6 on the
+    # 2026-08-25 capture) actually carry usable detail.
+    _g_hw_energy("compressor_energy_day", "energyConsumptionDayCp", _hw_pick_day,
+                 enabled_default=False),
+    _g_hw_energy("heater_energy_day", "energyConsumptionDayEc", _hw_pick_day,
+                 enabled_default=False),
+    _g_hw_energy("heat_output_day", "accumulatedHeatDay", _hw_pick_day,
+                 enabled_default=False, device_class=None, icon="mdi:heat-wave"),
+    # --- the appliance's own schedule, mirrored read-only --------------------
+    # Ground truth: the HP250M7C-F9 command + shadow dumps (see hw_values). This is the
+    # answer to "can the appliance run only during certain hours" -- it can, three
+    # different ways, and none of them was visible in Home Assistant before v5.22.0.
+    # Every one is configured in the official app and mirrored here.
+    _g_hw_time("timer_power_on", "timingPowerOn", icon="mdi:timer-play-outline"),
+    _g_hw_time("timer_power_off", "timingPowerOff", icon="mdi:timer-stop-outline"),
+    _g_hw_schedule("eco_schedule_1", "opp1EcoStartTime1", _hw_eco_schedule_1),
+    _g_hw_schedule("eco_schedule_2", "opp2EcoStartTime1", _hw_eco_schedule_2,
+                   enabled_default=False),
+    # The day mask as the device spells it ("7F" = every day). Raw on purpose: see
+    # HW_ECO_DAYS_ATTR -- only the all-days value has ever been observed, so decoding it
+    # into weekday names would assert a bit order nothing supports.
+    HonSensorEntityDescription(
+        key="eco_days",
+        attr_key=HW_ECO_DAYS_ATTR,
+        icon="mdi:calendar-week",
+        value_fn=_as_text,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        gated=True,
+        enabled_default=False,
+    ),
+    _g_hw_schedule("silent_schedule", "silentStartTime1", _hw_silent_schedule,
+                   icon="mdi:volume-off", enabled_default=False),
+    _g_hw_time("sterilization_time", "sterilizationTime",
+               icon="mdi:bacteria-outline"),
+    HonSensorEntityDescription(
+        key="sterilization_interval",
+        attr_key="sterilizationInterval",
+        icon="mdi:calendar-refresh",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        gated=True,
+        enabled_default=False,
+    ),
+    # --- auxiliary-input configuration, raw ----------------------------------
+    # The photovoltaic / smart-grid / off-peak dry-contact setup. Its SETPOINTS are the
+    # target_temp_pv/sg/hc numbers; these are the switches that decide when the appliance
+    # honours them. Raw values, see _g_hw_config.
+    #
+    # off_peak_heat_strategy is listed even though the HP250M7C-F9 does NOT mirror it into
+    # the shadow (it exists only on the settings command): the capability gate then simply
+    # creates no entity there, while a model that does report it gets one. Reading the
+    # command mirror instead is deliberately not done -- that value is the schema default
+    # refreshed only at load, i.e. a confidently stale reading.
+    _g_hw_config("power_supply_source", "powerSupplySource", icon="mdi:transmission-tower"),
+    _g_hw_config("external_heat_source", "externalHeatSource", icon="mdi:fire"),
+    _g_hw_config("off_peak_period_scheme", "offPeakPeriodScheme", icon="mdi:calendar-clock"),
+    _g_hw_config("off_peak_heat_mode", "offpeakSignalHeatMode", icon="mdi:transmission-tower"),
+    _g_hw_config("off_peak_heat_strategy", "offpeakSignalHeatStrategy", icon="mdi:strategy"),
 )
 
 # Robot vacuum (RVC): battery, state, time, power, areas, errors.

@@ -4,8 +4,10 @@
 """Tests for the water_heater platform (HW heat pump water heaters / WH water heaters).
 
 Modeled on the REAL HP250M7C-F9 schema (full dump): a `startProgram` command carrying
-program[auto,eco,elec,vac] + tempSel range[35,75,1], and a `settings` command carrying
-onOffStatus range[0,1] plus its OWN tempSel (the one the device silently ignores).
+machMode + program[auto,eco,elec,vac] + onOffStatus + tempSel range[35,75,1], and a
+`settings` command carrying onOffStatus range[0,1], its OWN tempSel (the one the device
+silently ignores) and the mandatory `operationName` fixed to "grSetVacDate" that pins the
+whole command to one operation.
 
 Verifies:
 - capability-gating: no writable tempSel -> no entity; the feature bits follow the
@@ -13,8 +15,11 @@ Verifies:
 - the setpoint resolves on startProgram FIRST, never on settings (the v5.10 live finding);
 - min/max/step read from the REAL parameter at runtime;
 - current/target temperature and the operating mode read from the cloud shadow;
-- "off" is a synthetic operation backed by onOffStatus, and selecting a program on a
-  powered-off device powers it on first;
+- "off" is a synthetic operation backed by onOffStatus, resolved on startProgram (the
+  settings command is pinned to grSetVacDate and would swallow it), and selecting a
+  program on a powered-off device powers it on IN THE SAME send;
+- a device whose only onOffStatus sits on a pinned settings command gets NO power
+  capability at all, rather than an "off" that does nothing;
 - away mode maps to the `vac` program and restores the previous mode when switched off.
 
 Stdlib unittest with inline Home Assistant stubs (no HA install required). The stubs are
@@ -205,6 +210,27 @@ class ProgramParam:
         self._value = str(v)
 
 
+class FixedParam:
+    """Mimics HonParameterFixed: a single declared value, and a setter that does NOT
+    validate (the engine relies on that -- it is how the vacation dates, and now the
+    power flag, are written through parameters the schema calls "fixed")."""
+
+    def __init__(self, value) -> None:
+        self._value = str(value)
+
+    @property
+    def values(self):
+        return [self._value]
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, v):
+        self._value = str(v)
+
+
 class RecordingCommand:
     def __init__(self, parameters) -> None:
         self.parameters = parameters
@@ -255,22 +281,42 @@ class FakeEntry:
         self.entry_id = entry_id
 
 
-def _hw_commands(program: str = "eco", *, with_on_off: bool = True) -> dict:
-    """HP250M7C-F9-shaped schema: tempSel on BOTH commands, program only on startProgram.
+def _hw_commands(
+    program: str = "eco",
+    *,
+    with_on_off: bool = True,
+    power_on_start_program: bool = True,
+    pinned_operation: str | None = "grSetVacDate",
+) -> dict:
+    """HP250M7C-F9-shaped schema, as the 2026-08 dumps report it.
 
-    The settings tempSel deliberately carries a DIFFERENT range so a test can prove which
-    of the two the entity resolved.
+    tempSel AND onOffStatus exist on BOTH commands; program only on startProgram. The
+    settings tempSel deliberately carries a DIFFERENT range so a test can prove which of
+    the two the entity resolved.
+
+    `pinned_operation` reproduces the load-bearing detail: `operationName` is a MANDATORY
+    fixed parameter offering exactly one value, so every settings write reaches the
+    appliance labelled as that operation and everything outside it is dropped. Set it to
+    None for an appliance whose settings command is a free write.
+
+    `power_on_start_program` / `with_on_off` control where onOffStatus exists at all.
     """
     settings_params = {"tempSel": RangeParam(60, 50, 70, 5)}
     if with_on_off:
         settings_params["onOffStatus"] = RangeParam(1, 0, 1, 1)
+    if pinned_operation is not None:
+        settings_params["operationName"] = FixedParam(pinned_operation)
+        settings_params["vacStartDate"] = FixedParam("2000-01-01")
+        settings_params["vacEndDate"] = FixedParam("2000-01-01")
+    start_params = {
+        "machMode": FixedParam("1"),
+        "program": ProgramParam(["auto", "eco", "elec", "vac"], program),
+        "tempSel": RangeParam(55, 35, 75, 1),
+    }
+    if with_on_off and power_on_start_program:
+        start_params["onOffStatus"] = FixedParam("1")
     return {
-        "startProgram": RecordingCommand(
-            {
-                "program": ProgramParam(["auto", "eco", "elec", "vac"], program),
-                "tempSel": RangeParam(55, 35, 75, 1),
-            }
-        ),
+        "startProgram": RecordingCommand(start_params),
         "settings": RecordingCommand(settings_params),
     }
 
@@ -417,6 +463,7 @@ class ReadStateTest(unittest.TestCase):
             {
                 "program": ProgramParam(["elec", "electric", "eco"], "eco"),
                 "tempSel": RangeParam(55, 35, 75, 1),
+                "onOffStatus": FixedParam("1"),
             }
         )
         added, _ = _one(commands=commands)
@@ -626,18 +673,28 @@ class WriteTest(unittest.TestCase):
         # Device already on: no power command needed.
         self.assertEqual(commands["settings"].send_calls, 0)
 
-    def test_set_operation_mode_powers_on_first_when_off(self) -> None:
+    def test_set_operation_mode_powers_on_in_the_same_send_when_off(self) -> None:
+        # Power lives on startProgram, so powering on before a program change costs no
+        # second command: one send carrying BOTH, which is also the envelope the
+        # official app uses (its command history: machMode + onOffStatus + tempSel).
         added, commands = _one(attributes=_attrs(onOffStatus="0"), client=FakeClient())
         asyncio.run(added[0].async_set_operation_mode("heat_pump"))
-        self.assertEqual(commands["settings"].send_calls, 1)
-        self.assertEqual(commands["settings"].parameters["onOffStatus"].value, 1)
-        self.assertEqual(commands["startProgram"].parameters["program"].value, "auto")
+        start = commands["startProgram"]
+        self.assertEqual(start.send_calls, 1)
+        self.assertEqual(start.parameters["program"].value, "auto")
+        self.assertEqual(start.parameters["onOffStatus"].value, "1")
+        # The pinned settings command is never touched.
+        self.assertEqual(commands["settings"].send_calls, 0)
 
-    def test_set_operation_mode_off_writes_power(self) -> None:
+    def test_set_operation_mode_off_writes_power_on_start_program(self) -> None:
         added, commands = _one(client=FakeClient())
         asyncio.run(added[0].async_set_operation_mode("off"))
-        self.assertEqual(commands["settings"].parameters["onOffStatus"].value, 0)
-        self.assertEqual(commands["startProgram"].send_calls, 0)
+        self.assertEqual(commands["startProgram"].parameters["onOffStatus"].value, "0")
+        self.assertEqual(commands["startProgram"].send_calls, 1)
+        # NOT through settings: that command is pinned to grSetVacDate, which is exactly
+        # why "off" did nothing before v5.22.0.
+        self.assertEqual(commands["settings"].send_calls, 0)
+        self.assertEqual(commands["settings"].parameters["onOffStatus"].value, 1)
 
     def test_unknown_operation_mode_raises(self) -> None:
         from homeassistant.exceptions import HomeAssistantError
@@ -651,9 +708,138 @@ class WriteTest(unittest.TestCase):
         added, commands = _one(client=FakeClient())
         entity = added[0]
         asyncio.run(entity.async_turn_off())
-        self.assertEqual(commands["settings"].parameters["onOffStatus"].value, 0)
+        self.assertEqual(commands["startProgram"].parameters["onOffStatus"].value, "0")
         asyncio.run(entity.async_turn_on())
-        self.assertEqual(commands["settings"].parameters["onOffStatus"].value, 1)
+        self.assertEqual(commands["startProgram"].parameters["onOffStatus"].value, "1")
+
+
+class PowerCommandResolutionTest(unittest.TestCase):
+    """Where the power flag is written -- the v5.22.0 fix.
+
+    The HP250M7C-F9 exposes onOffStatus on BOTH commands, and only one of them works:
+    `settings` declares `operationName` as a MANDATORY fixed parameter offering the single
+    value "grSetVacDate" (identical on four dumps between 2026-07-26 and 2026-08-25), and
+    `command.send()` transmits the whole parameter group, so the appliance reads every
+    settings write as "set the vacation dates" and drops the rest. The dumps show both
+    halves of that: the vacation window written from Home Assistant landed, while
+    onOffStatus stayed 1 through every capture with the entity reporting "off" sent.
+    """
+
+    def test_power_resolves_on_start_program(self) -> None:
+        added, _ = _one()
+        self.assertEqual(added[0]._on_off_command, "startProgram")
+
+    def test_power_falls_back_to_settings_when_start_program_has_none(self) -> None:
+        # Another model may keep power only on a settings command that is NOT pinned --
+        # that must keep working exactly as before.
+        commands = _hw_commands(power_on_start_program=False, pinned_operation=None)
+        added, _ = _one(commands=commands, client=FakeClient())
+        entity = added[0]
+        self.assertEqual(entity._on_off_command, "settings")
+        asyncio.run(entity.async_turn_off())
+        self.assertEqual(commands["settings"].parameters["onOffStatus"].value, 0)
+
+    def test_pinned_settings_operation_removes_the_power_capability(self) -> None:
+        # onOffStatus exists, but ONLY on a command pinned to another operation: the
+        # appliance would accept the payload and ignore it, so the capability is dropped
+        # rather than offered as an "off" that does nothing.
+        from homeassistant.components.water_heater import WaterHeaterEntityFeature
+
+        commands = _hw_commands(power_on_start_program=False)
+        added, _ = _one(commands=commands)
+        entity = added[0]
+        self.assertIsNone(entity._on_off_command)
+        self.assertFalse(
+            entity._attr_supported_features & WaterHeaterEntityFeature.ON_OFF
+        )
+        self.assertNotIn("off", entity._attr_operation_list)
+
+    def test_an_unknown_pinned_operation_is_not_treated_as_blocking(self) -> None:
+        # "Not ground-truthed" is not "writes nothing": an operation this integration has
+        # never seen must not silently remove a control.
+        commands = _hw_commands(
+            power_on_start_program=False, pinned_operation="grSetSomethingNew"
+        )
+        added, _ = _one(commands=commands)
+        self.assertEqual(added[0]._on_off_command, "settings")
+
+
+class RealDeviceSchemaTest(unittest.TestCase):
+    """The whole entity, built from the REAL HP250M7C-F9 command schema.
+
+    The other tests use a hand-written fixture; this one rebuilds the commands straight
+    from tests/fixtures/hw_hp250/device_schema.json (the redacted 2026-08-25 dump), so a
+    schema detail the hand-written one gets wrong cannot hide the regression.
+    """
+
+    @staticmethod
+    def _commands() -> dict:
+        import json
+        from pathlib import Path
+
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "tests" / "fixtures" / "hw_hp250" / "device_schema.json"
+        )
+        schema = json.loads(path.read_text(encoding="utf-8"))["commands"]
+        commands = {}
+        for name, params in schema.items():
+            built = {}
+            for p_name, meta in params.items():
+                typology = meta.get("typology")
+                if typology == "range":
+                    built[p_name] = RangeParam(
+                        meta["min"], meta["min"], meta["max"], meta["step"]
+                    )
+                elif typology == "enum" and len(meta.get("enum", [])) > 1:
+                    built[p_name] = ProgramParam(meta["enum"], meta["enum"][0])
+                else:
+                    built[p_name] = FixedParam(meta.get("enum", ["0"])[0])
+            commands[name] = RecordingCommand(built)
+        return commands
+
+    def _entity(self, commands, attributes=None):
+        added = asyncio.run(
+            _build(
+                "HW",
+                FakeAppliance(commands),
+                _attrs() if attributes is None else attributes,
+                client=FakeClient(),
+            )
+        )
+        self.assertEqual(len(added), 1)
+        return added[0]
+
+    def test_the_setpoint_and_the_power_both_resolve_on_start_program(self) -> None:
+        entity = self._entity(self._commands())
+        self.assertEqual(entity._temp_command, "startProgram")
+        self.assertEqual(entity._on_off_command, "startProgram")
+
+    def test_the_real_schema_still_offers_off(self) -> None:
+        entity = self._entity(self._commands())
+        self.assertEqual(
+            entity._attr_operation_list, ["off", "heat_pump", "eco", "electric", "vac"]
+        )
+
+    def test_off_reaches_the_appliance_on_the_channel_that_works(self) -> None:
+        commands = self._commands()
+        entity = self._entity(commands)
+        asyncio.run(entity.async_set_operation_mode("off"))
+        self.assertEqual(commands["startProgram"].send_calls, 1)
+        self.assertEqual(commands["startProgram"].parameters["onOffStatus"].value, "0")
+        # The pinned settings command is never used for this.
+        self.assertEqual(commands["settings"].send_calls, 0)
+
+    def test_the_setpoint_snaps_onto_the_real_grid(self) -> None:
+        # The shadow reports an off-grid 62.8 on a range[35,75,1]; every dial press would
+        # otherwise produce a value the range setter refuses.
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        commands = self._commands()
+        entity = self._entity(commands, attributes=_attrs(tempSel="62.8"))
+        self.assertEqual(entity.target_temperature, 62.8)
+        asyncio.run(entity.async_set_temperature(**{ATTR_TEMPERATURE: 63.8}))
+        self.assertEqual(commands["startProgram"].parameters["tempSel"].value, 64)
 
 
 class AwayModeTest(unittest.TestCase):
