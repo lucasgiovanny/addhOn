@@ -27,3 +27,22 @@ set_mqtt_log_level:
             - "info"
             - "warning"
             - "error"
+
+send_command:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: addhon
+    command:
+      required: true
+      default: settings
+      example: settings
+      selector:
+        text:
+    parameters:
+      required: true
+      example: '{"operationName": "grSetVacDate", "vacStartDate": "2026-09-01"}'
+      selector:
+        object:

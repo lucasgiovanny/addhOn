@@ -1098,6 +1098,12 @@
     "refresh_after_command_failed_error": {
       "message": "Aggiornamento dopo il comando non riuscito: {error}"
     },
+    "send_command_no_parameters": {
+      "message": "Nessun parametro indicato: addhon.send_command richiede almeno un parametro da scrivere."
+    },
+    "send_command_unknown_device": {
+      "message": "Il dispositivo {device} non è un elettrodomestico Haier hOn di questa integrazione."
+    },
     "settings_operation_locked": {
       "message": "\"{param}\" non è scrivibile su questo elettrodomestico: il suo comando settings esegue solo l'operazione \"{operation}\", quindi l'elettrodomestico ignorerebbe la modifica. Impostalo dall'app hOn."
     },

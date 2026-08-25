@@ -122,6 +122,14 @@ ATTR_LEVEL = "level"
 # entries: the automation-callable equivalent of the per-device "Refresh now"
 # button. Global to the domain (no target, no fields), registered once.
 SERVICE_REFRESH = "refresh"
+# Diagnostic write service: sends one raw command to one appliance. It exists because
+# some appliances expose a `settings` command that performs a SINGLE operation named by
+# a fixed `operationName` parameter, and the cloud only ever advertises the one it is
+# pinned to -- the other operation names cannot be read anywhere, only tried. See
+# docs/heat-pump-water-heater.md.
+SERVICE_SEND_COMMAND = "send_command"
+ATTR_COMMAND = "command"
+ATTR_PARAMETERS = "parameters"
 
 # Option keys (entry.options) of the two debug toggles exposed in the
 # Configure/Options screen of the integration. They persist across restarts and

@@ -107,6 +107,7 @@ from custom_components.addhon.const import (  # noqa: E402
     DOMAIN,
     SERVICE_REFRESH,
     SERVICE_SET_LOG_LEVEL,
+    SERVICE_SEND_COMMAND,
     SERVICE_SET_MQTT_LOG_LEVEL,
 )
 
@@ -180,6 +181,140 @@ def _entry_data(coordinator, entry_id: str) -> dict:
             "integration_version": "9.9.9",
         }
     }
+
+
+class SendCommandServiceTest(unittest.IsolatedAsyncioTestCase):
+    """The diagnostic write service (v5.24.0).
+
+    It exists because some appliances expose a `settings` command that performs ONE
+    operation named by a fixed `operationName`, and the cloud only ever advertises the
+    operation it is pinned to. Five captures of a real HP250M7C-F9 showed the others
+    appear in no schema, no attribute and no command history (which records program
+    starts only), so they can be tried and nothing else. This service is therefore
+    DELIBERATELY ungated -- the one place in the integration that is.
+    """
+
+    class _Registry:
+        def __init__(self, identifiers):
+            self._identifiers = identifiers
+
+        def async_get(self, device_id):
+            if device_id not in self._identifiers:
+                return None
+            return type("Device", (), {"identifiers": self._identifiers[device_id]})()
+
+    class _Appliance:
+        def __init__(self):
+            self.commands = {}
+
+    def _hass(self, appliance, coordinator=None):
+        coordinator = coordinator or FakeCoordinator()
+        coordinator.data = {"app-1": {"appliance": appliance, "type": "HW"}}
+        hass = FakeHass({DOMAIN: {"e1": {"coordinator": coordinator, "client": object()}}})
+        _async_register_services(hass)
+        return hass, coordinator
+
+    def _call(self, **data):
+        call = FakeServiceCall()
+        call.data = data
+        return call
+
+    def _patch(self, hass, sent):
+        """Stub the two function-local imports the handler makes."""
+        import sys
+        import types
+
+        dr = types.ModuleType("homeassistant.helpers.device_registry")
+        dr.async_get = lambda _hass: self._Registry(
+            {"dev-1": {(DOMAIN, "app-1")}, "dev-other": {("other", "x")}}
+        )
+        helpers = sys.modules["homeassistant.helpers"]
+        previous = getattr(helpers, "device_registry", None)
+        helpers.device_registry = dr
+        sys.modules["homeassistant.helpers.device_registry"] = dr
+
+        import importlib
+
+        hon_commands = importlib.import_module("custom_components.addhon.hon_commands")
+
+        async def _send(_hass, _client, appliance, command_name, params):
+            sent.append((command_name, dict(params)))
+
+        original = hon_commands.async_send_command
+        hon_commands.async_send_command = _send
+        return lambda: (
+            setattr(helpers, "device_registry", previous),
+            setattr(hon_commands, "async_send_command", original),
+        )
+
+    async def test_it_sends_the_raw_parameters_and_refreshes(self) -> None:
+        hass, coordinator = self._hass(self._Appliance())
+        sent: list = []
+        undo = self._patch(hass, sent)
+        try:
+            await hass.services.handlers[(DOMAIN, SERVICE_SEND_COMMAND)](
+                self._call(
+                    device_id=["dev-1"],
+                    command="settings",
+                    parameters={"operationName": "grSetVacDate", "vacStartDate": "2026-09-01"},
+                )
+            )
+        finally:
+            undo()
+        self.assertEqual(
+            sent,
+            [("settings", {"operationName": "grSetVacDate", "vacStartDate": "2026-09-01"})],
+        )
+        self.assertEqual(coordinator.refreshes, 1)
+
+    async def test_values_are_sent_as_strings(self) -> None:
+        # The engine's str_to_float truncates a float silently; every write path in this
+        # integration sends strings for that reason, and a service call carrying a YAML
+        # number must not be the exception.
+        hass, _ = self._hass(self._Appliance())
+        sent: list = []
+        undo = self._patch(hass, sent)
+        try:
+            await hass.services.handlers[(DOMAIN, SERVICE_SEND_COMMAND)](
+                self._call(device_id="dev-1", command="settings", parameters={"tempSel": 63})
+            )
+        finally:
+            undo()
+        self.assertEqual(sent, [("settings", {"tempSel": "63"})])
+
+    async def test_an_empty_parameter_set_is_refused(self) -> None:
+        from homeassistant.exceptions import HomeAssistantError
+
+        hass, _ = self._hass(self._Appliance())
+        sent: list = []
+        undo = self._patch(hass, sent)
+        try:
+            with self.assertRaises(HomeAssistantError) as ctx:
+                await hass.services.handlers[(DOMAIN, SERVICE_SEND_COMMAND)](
+                    self._call(device_id="dev-1", command="settings", parameters={})
+                )
+        finally:
+            undo()
+        self.assertEqual(ctx.exception.translation_key, "send_command_no_parameters")
+        self.assertEqual(sent, [])
+
+    async def test_a_foreign_device_is_refused(self) -> None:
+        from homeassistant.exceptions import HomeAssistantError
+
+        hass, _ = self._hass(self._Appliance())
+        sent: list = []
+        undo = self._patch(hass, sent)
+        try:
+            with self.assertRaises(HomeAssistantError) as ctx:
+                await hass.services.handlers[(DOMAIN, SERVICE_SEND_COMMAND)](
+                    self._call(
+                        device_id=["dev-other"], command="settings", parameters={"a": "1"}
+                    )
+                )
+        finally:
+            undo()
+        self.assertEqual(ctx.exception.translation_key, "send_command_unknown_device")
+        self.assertEqual(sent, [])
 
 
 class RefreshServiceRegistrationTest(unittest.TestCase):

@@ -1098,6 +1098,12 @@
     "refresh_after_command_failed_error": {
       "message": "A atualização após o comando falhou: {error}"
     },
+    "send_command_no_parameters": {
+      "message": "Nenhum parâmetro informado: addhon.send_command precisa de pelo menos um parâmetro para escrever."
+    },
+    "send_command_unknown_device": {
+      "message": "O dispositivo {device} não é um aparelho Haier hOn desta integração."
+    },
     "settings_operation_locked": {
       "message": "\"{param}\" não pode ser gravado neste aparelho: o comando settings só executa a operação \"{operation}\", então o aparelho ignoraria a mudança. Configure pelo app hOn."
     },

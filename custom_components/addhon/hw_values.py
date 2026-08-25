@@ -41,6 +41,15 @@ def hw_water_level(raw) -> float | None:
 # program) and the official app showed vacation ON. machMode is therefore the only
 # signal that the device is ACTUALLY holidaying; the program enum only says what it
 # will run when it is not.
+#
+# The 4 is no longer just an observation: the appliance's startProgram is split into one
+# category PER PROGRAM, and each declares its own machMode -- auto 1, eco 2, elec 3,
+# vac 4 (2026-08-25 dump), with its accepted commands carrying exactly that pairing. So
+# machMode names the RUNNING program, and 4 is simply the vac one. The water_heater
+# entity reads that mapping off the live schema (program_options.startprogram_machmode_map)
+# rather than the constant below; the constant remains the fallback for the binary sensor,
+# which sees a raw value and no appliance, and the two agree by construction because the
+# constant IS the value that schema declares.
 HW_MACH_MODE_ATTR = "machMode"
 HW_VACATION_MACH_MODE = "4"
 

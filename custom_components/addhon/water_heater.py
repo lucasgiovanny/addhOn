@@ -93,6 +93,7 @@ from .hw_values import (
 from .program_options import (
     STARTPROGRAM_COMMAND,
     async_send_program,
+    startprogram_machmode_map,
     startprogram_program_codes,
     startprogram_program_param,
 )
@@ -551,10 +552,45 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         return by_lower.get(token) or by_lower.get(token.rsplit(".", 1)[-1])
 
     @property
+    def _running_mode(self) -> str | None:
+        """The program the appliance says it is RUNNING, or None when it does not say.
+
+        `machMode` is that report, and the mapping is read from the DEVICE SCHEMA: each
+        startProgram category declares its own machMode (HP250M7C-F9: auto 1, eco 2,
+        elec 3, vac 4), and the appliance's accepted commands carry exactly that pairing.
+        Nothing is hard-coded -- a model that numbers its modes differently maps itself,
+        and one that exposes no per-program categories simply reports None here.
+
+        This is the reading that differs from `_live_mode`: the program enum is what the
+        appliance is CONFIGURED to run, machMode is what it is running right now. A
+        holiday window scheduled by dates moves only the second (live-verified around
+        2026-08-18: machMode 1 -> 4 while the enum stayed `auto`).
+        """
+        raw = self._get_attr(HW_MACH_MODE_ATTR)
+        if raw is None:
+            return None
+        mapping = startprogram_machmode_map(self._appliance)
+        if not mapping:
+            return None
+        code = mapping.get(str(raw).strip())
+        # Double-gated against the offered codes, like _live_mode: a category the program
+        # enum does not list is not a mode this entity can report.
+        return code if code in self._mode_codes else None
+
+    @property
     def _vacation_hold(self) -> bool:
-        """True while the device REPORTS the vacation machMode (scheduled window
-        running). Distinct from the vac PROGRAM: a window scheduled by dates never
-        touches the program (live-verified on the HP250M7C-F9, see hw_values)."""
+        """True while the appliance is RUNNING the holiday program, whether it was asked
+        to (the vac program) or entered it by itself (a window scheduled by dates, which
+        never touches the program enum -- live-verified on the HP250M7C-F9).
+
+        Prefers the schema-derived machMode map; falls back to the hw_values constant,
+        which is the same value read off that schema (the vac category declares
+        machMode 4) and is what the binary sensor uses, so the two cannot disagree.
+        """
+        if self._away_code is not None:
+            running = self._running_mode
+            if running is not None:
+                return running == self._away_code
         return hw_vacation_active(self._get_attr(HW_MACH_MODE_ATTR)) is True
 
     @property
@@ -570,9 +606,14 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
             # program can never report an option it does not offer.
             if self._away_code is not None and self._vacation_hold:
                 return self._code_to_ha.get(self._away_code, self._away_code)
+            # What the appliance says it is RUNNING wins over what it is configured to
+            # run: the two differ whenever it switches by itself, and the state should
+            # describe the appliance rather than the setting. Falls back to the program
+            # enum where machMode carries no readable mapping.
+            #
             # Reported under HA's standard name so the frontend's built-in mode icons
-            # apply; _live_mode stays in device codes for the send path.
-            mode = self._live_mode
+            # apply; the device codes stay for the send path.
+            mode = self._running_mode or self._live_mode
             return self._code_to_ha.get(mode, mode) if mode is not None else None
         # No program enum: on/off is the whole operating state (see __init__).
         if self._on_off_command is not None:
@@ -660,7 +701,7 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
             return None
         if self._vacation_hold:
             return True
-        mode = self._live_mode
+        mode = self._running_mode or self._live_mode
         if mode is None:
             return None
         return mode == self._away_code

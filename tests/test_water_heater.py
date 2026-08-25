@@ -236,6 +236,8 @@ class RecordingCommand:
         self.parameters = parameters
         self.send_calls = 0
         self.sent = None
+        # Mirrors HonCommand.categories for a command with no per-program split.
+        self.categories = {}
 
     async def send(self) -> None:
         self.send_calls += 1
@@ -287,6 +289,7 @@ def _hw_commands(
     with_on_off: bool = True,
     power_on_start_program: bool = True,
     pinned_operation: str | None = "grSetVacDate",
+    with_categories: bool = True,
 ) -> dict:
     """HP250M7C-F9-shaped schema, as the 2026-08 dumps report it.
 
@@ -308,15 +311,38 @@ def _hw_commands(
         settings_params["operationName"] = FixedParam(pinned_operation)
         settings_params["vacStartDate"] = FixedParam("2000-01-01")
         settings_params["vacEndDate"] = FixedParam("2000-01-01")
+    codes = ["auto", "eco", "elec", "vac"]
     start_params = {
         "machMode": FixedParam("1"),
-        "program": ProgramParam(["auto", "eco", "elec", "vac"], program),
+        "program": ProgramParam(codes, program),
         "tempSel": RangeParam(55, 35, 75, 1),
     }
     if with_on_off and power_on_start_program:
         start_params["onOffStatus"] = FixedParam("1")
+    start = RecordingCommand(start_params)
+    if with_categories:
+        # One category per program, each pinning its OWN machMode -- the real schema
+        # (auto 1, eco 2, elec 3, vac 4). This is what makes machMode readable as "which
+        # program is running"; a fixture without it exercises the fallback instead.
+        siblings = {}
+        for index, code in enumerate(codes, start=1):
+            sibling = (
+                start
+                if code == program
+                else RecordingCommand(
+                    {
+                        "machMode": FixedParam(str(index)),
+                        "program": ProgramParam(codes, code),
+                        "tempSel": RangeParam(55, 35, 75, 1),
+                    }
+                )
+            )
+            sibling.parameters["machMode"] = FixedParam(str(index))
+            sibling.categories = siblings
+            siblings[code] = sibling
+        start.categories = siblings
     return {
-        "startProgram": RecordingCommand(start_params),
+        "startProgram": start,
         "settings": RecordingCommand(settings_params),
     }
 
@@ -857,9 +883,9 @@ class RealDeviceSchemaTest(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "tests" / "fixtures" / "hw_hp250" / "device_schema.json"
         )
-        schema = json.loads(path.read_text(encoding="utf-8"))["commands"]
-        commands = {}
-        for name, params in schema.items():
+        fixture = json.loads(path.read_text(encoding="utf-8"))
+
+        def build(params):
             built = {}
             for p_name, meta in params.items():
                 typology = meta.get("typology")
@@ -868,10 +894,28 @@ class RealDeviceSchemaTest(unittest.TestCase):
                         meta["min"], meta["min"], meta["max"], meta["step"]
                     )
                 elif typology == "enum" and len(meta.get("enum", [])) > 1:
-                    built[p_name] = ProgramParam(meta["enum"], meta["enum"][0])
+                    # The SELECTED member, not the first: each startProgram category
+                    # names its own program that way.
+                    built[p_name] = ProgramParam(
+                        meta["enum"], meta.get("value", meta["enum"][0])
+                    )
                 else:
-                    built[p_name] = FixedParam(meta.get("enum", ["0"])[0])
-            commands[name] = RecordingCommand(built)
+                    built[p_name] = FixedParam(
+                        meta.get("value", meta.get("enum", ["0"])[0])
+                    )
+            return RecordingCommand(built)
+
+        commands = {name: build(params) for name, params in fixture["commands"].items()}
+        # The per-program categories, which carry the machMode pairing.
+        for cmd_name, categories in fixture.get("command_categories", {}).items():
+            siblings = {
+                cat: build(params) for cat, params in categories.items()
+            }
+            for sibling in siblings.values():
+                sibling.categories = siblings
+            active = commands.get(cmd_name)
+            if active is not None:
+                active.categories = siblings
         return commands
 
     def _entity(self, commands, attributes=None):
@@ -905,6 +949,25 @@ class RealDeviceSchemaTest(unittest.TestCase):
         self.assertEqual(commands["startProgram"].parameters["onOffStatus"].value, "0")
         # The pinned settings command is never used for this.
         self.assertEqual(commands["settings"].send_calls, 0)
+
+    def test_the_real_categories_pin_the_running_mode(self) -> None:
+        # auto 1, eco 2, elec 3, vac 4 -- read off the schema, not written down here.
+        from custom_components.addhon.program_options import startprogram_machmode_map
+
+        commands = self._commands()
+        self.assertEqual(
+            startprogram_machmode_map(FakeAppliance(commands)),
+            {"1": "auto", "2": "eco", "3": "elec", "4": "vac"},
+        )
+
+    def test_a_self_entered_holiday_reads_as_holiday(self) -> None:
+        # The 2026-08-18 capture: machMode 4 while the program enum stayed `auto`.
+        commands = self._commands()
+        entity = self._entity(
+            commands, attributes=_attrs(machMode="4", **{"startProgram.program": "auto"})
+        )
+        self.assertEqual(entity.current_operation, "vac")
+        self.assertIs(entity.is_away_mode_on, True)
 
     def test_the_setpoint_snaps_onto_the_real_grid(self) -> None:
         # The shadow reports an off-grid 62.8 on a range[35,75,1]; every dial press would
@@ -957,10 +1020,78 @@ class ScheduledVacationHoldTest(unittest.TestCase):
         added, _ = _one(attributes=_attrs(machMode="4"))
         self.assertEqual(added[0].current_operation, "vac")
 
-    def test_normal_machmode_changes_nothing(self) -> None:
+    def test_a_normal_machmode_is_not_away(self) -> None:
         added, _ = _one(attributes=_attrs(machMode="1"))
         self.assertIs(added[0].is_away_mode_on, False)
+
+
+class RunningModeTest(unittest.TestCase):
+    """machMode reports which program is RUNNING; the enum reports which is configured.
+
+    The pairing comes from the device schema: each startProgram category pins its own
+    machMode (HP250M7C-F9: auto 1, eco 2, elec 3, vac 4), and the appliance's accepted
+    commands carry exactly that (a PROGRAMS.HW.ECO command with machMode "2"). Nothing
+    is hard-coded, so a model that numbers its modes differently maps itself.
+    """
+
+    def test_the_running_program_wins_over_the_configured_one(self) -> None:
+        # Configured `eco`, running `auto`: the state describes the appliance.
+        added, _ = _one(attributes=_attrs(machMode="1"))
+        self.assertEqual(added[0].current_operation, "heat_pump")
+
+    def test_they_agree_in_the_ordinary_case(self) -> None:
+        added, _ = _one(attributes=_attrs(machMode="2"))
         self.assertEqual(added[0].current_operation, "eco")
+
+    def test_every_category_maps_itself(self) -> None:
+        for mach_mode, expected in (("1", "heat_pump"), ("2", "eco"), ("3", "electric")):
+            with self.subTest(machMode=mach_mode):
+                added, _ = _one(attributes=_attrs(machMode=mach_mode))
+                self.assertEqual(added[0].current_operation, expected)
+
+    def test_without_categories_the_program_enum_still_answers(self) -> None:
+        # A model whose startProgram is not split per program has no machMode pairing to
+        # read; the behaviour must be exactly what it was.
+        added, _ = _one(
+            commands=_hw_commands(with_categories=False),
+            attributes=_attrs(machMode="1"),
+        )
+        self.assertEqual(added[0].current_operation, "eco")
+
+    def test_an_unmapped_machmode_falls_back_rather_than_guessing(self) -> None:
+        added, _ = _one(attributes=_attrs(machMode="9"))
+        self.assertEqual(added[0].current_operation, "eco")
+
+    def test_an_ambiguous_map_is_refused_whole(self) -> None:
+        # Two programs claiming one machMode is not knowledge; the map is dropped and the
+        # program enum answers instead.
+        commands = _hw_commands()
+        for sibling in commands["startProgram"].categories.values():
+            sibling.parameters["machMode"] = FixedParam("1")
+        added, _ = _one(commands=commands, attributes=_attrs(machMode="1"))
+        self.assertEqual(added[0].current_operation, "eco")
+
+    def test_the_write_envelope_still_uses_the_configured_program(self) -> None:
+        # The read follows the appliance, the WRITE follows the setting: that is what the
+        # app sends (its selected program), and re-asserting a self-entered holiday would
+        # make it the configured one.
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        commands = _hw_commands("auto")
+        added = asyncio.run(
+            _build(
+                "HW",
+                FakeAppliance(commands),
+                _attrs(machMode="4", **{"startProgram.program": "eco"}),
+                client=FakeClient(),
+            )
+        )
+        entity = added[0]
+        self.assertEqual(entity.current_operation, "vac")
+        asyncio.run(entity.async_set_temperature(**{ATTR_TEMPERATURE: 58.0}))
+        self.assertEqual(
+            commands["startProgram"].parameters["program"].value, "eco"
+        )
 
     def test_power_off_still_wins_over_the_hold(self) -> None:
         added, _ = _one(attributes=_attrs(machMode="4", onOffStatus="0"))

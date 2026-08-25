@@ -30,6 +30,7 @@ so the entity is never created (auto-removes the fixed toggles on the user's mod
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 
 from homeassistant.exceptions import HomeAssistantError
@@ -46,6 +47,10 @@ _LOGGER = logging.getLogger(__name__)
 # The single runtime command that carries the program + its options. Selecting a program
 # swaps the active category (program.py / commands.py), but the command name is stable.
 STARTPROGRAM_COMMAND = "startProgram"
+
+# The parameter each startProgram category pins to its own program; see
+# startprogram_machmode_map.
+MACH_MODE_PARAM = "machMode"
 
 # Safety cap when materializing the reachable values of a range parameter: a malformed
 # range (huge max / tiny step) must never loop unbounded while building a select's options.
@@ -186,6 +191,62 @@ def startprogram_program_param(appliance):
         if param is not None:
             return param, name
     return None
+
+
+def startprogram_machmode_map(appliance) -> dict[str, str]:
+    """``machMode`` value -> program code, read from the startProgram CATEGORIES.
+
+    ``startProgram`` is split into one category per program, and each category declares
+    its own ``machMode`` as a fixed parameter. Ground truth on a real HP250M7C-F9:
+    auto -> 1, eco -> 2, elec -> 3, vac -> 4, and its accepted commands carry exactly
+    that pairing (a PROGRAMS.HW.ECO command with machMode "2").
+
+    That makes ``machMode`` the appliance's report of WHICH PROGRAM IS RUNNING, as
+    opposed to the program enum, which is the one CONFIGURED. The two differ whenever
+    the appliance switches by itself -- a holiday window scheduled by dates leaves the
+    enum on `auto` and moves machMode to the vac program's value.
+
+    Derived from the live schema, never hard-coded: a model that numbers its modes
+    differently, or exposes no categories, simply produces a map this integration does
+    not use rather than a wrong reading. Returns {} when the pairing cannot be read.
+    """
+    command = startprogram_command(appliance)
+    categories = getattr(command, "categories", None) if command is not None else None
+    if not isinstance(categories, Mapping) or len(categories) < 2:
+        return {}
+    out: dict[str, str] = {}
+    for name, category in categories.items():
+        params = getattr(category, "parameters", None)
+        if not isinstance(params, dict):
+            continue
+        mach_mode = params.get(MACH_MODE_PARAM)
+        value = getattr(mach_mode, "value", None) if mach_mode is not None else None
+        if value is None:
+            continue
+        code = None
+        for param_name in PROGRAM_PARAM_NAMES:
+            program = params.get(param_name)
+            if program is not None:
+                code = getattr(program, "value", None)
+                break
+        # The category KEY is the cleaned program name and is what the codes list uses;
+        # the program parameter's own value is preferred where it is readable.
+        key = str(value).strip()
+        resolved = str(code).strip() if code is not None else str(name).strip()
+        if not key or not resolved:
+            continue
+        # An ambiguous map (two programs claiming one machMode) is not knowledge: drop
+        # the whole thing rather than report one of them.
+        if key in out and out[key] != resolved:
+            _LOGGER.debug(
+                "ProgramSend debug: ambiguous machMode map (%s claimed by %s and %s)",
+                key,
+                out[key],
+                resolved,
+            )
+            return {}
+        out[key] = resolved
+    return out
 
 
 def startprogram_program_codes(appliance) -> list[str]:

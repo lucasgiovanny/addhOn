@@ -1098,6 +1098,12 @@
     "refresh_after_command_failed_error": {
       "message": "Refresh after the command failed: {error}"
     },
+    "send_command_no_parameters": {
+      "message": "No parameters given: addhon.send_command needs at least one parameter to write."
+    },
+    "send_command_unknown_device": {
+      "message": "Device {device} is not a Haier hOn appliance of this integration."
+    },
     "settings_operation_locked": {
       "message": "\"{param}\" cannot be written on this appliance: its settings command only performs the \"{operation}\" operation, so the appliance would ignore the change. Set it in the hOn app instead."
     },

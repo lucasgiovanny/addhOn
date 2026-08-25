@@ -80,8 +80,14 @@ down. The integration mirrors the configuration read-only, for the reason above.
 these from being editable — a time picker per window is a small amount of code. What
 stops it is that the write would not reach the appliance: it would arrive labelled
 `grSetVacDate` and be dropped. The moment the `operationName` the app uses for a given
-group is known, that group becomes writable. See *Reporting a new model* below for how to
-harvest it.
+group is known, that group becomes writable.
+
+That name cannot be read anywhere. Five captures spanning a month confirm it: the command
+definition always advertises `grSetVacDate` (it did not budge when the anti-legionella
+hour was changed from the app and reached the appliance), the shadow mirrors the same
+value, and the command history records **program starts only** — five entries, every one
+a `startProgram`. So the remaining route is to try candidates, which is what
+`addhon.send_command` is for (see below).
 
 `opp1EcoDays` is reported as a hex bitmask (`7F` = all seven days) and is exposed
 **raw**: only the all-days value has ever been observed, so which bit is which weekday
@@ -182,6 +188,38 @@ a heat pump water heater is specified for, so either the counter is not kWh or t
 integer-truncated inputs understate consumption. Until that is settled it is not offered
 to the Energy dashboard, where adding it would inflate the household total.
 
+## Trying an operation name: `addhon.send_command`
+
+A diagnostic service that sends **one raw command to one appliance**, deliberately
+ungated — the one place in the integration that is. Everything else refuses a write the
+appliance would swallow; this exists precisely to make that write and see what happens.
+
+```yaml
+action: addhon.send_command
+target:
+  device_id: <your water heater>
+data:
+  command: settings
+  parameters:
+    operationName: grSetSterilization   # the candidate under test
+    sterilizationTime: "12:00"
+```
+
+Then check the entity (or the next diagnostics dump): if `sterilizationTime` moved, the
+name is right. A wrong name is the same no-op the appliance already performs today, so
+the cost of a miss is nothing. Parameter values still go through the engine's own
+setters, so a range or enum parameter rejects an out-of-schema value exactly as it would
+from an entity.
+
+Naming pattern, from the one confirmed operation: `grSet` + the thing it sets
+(`grSetVacDate`). Plausible siblings to try: `grSetSterilization`,
+`grSetSterilizationTime`, `grSetTiming`, `grSetTimingPower`, `grSetOppEco`,
+`grSetSilent`, `grSetOnOff`.
+
+**Every name that works belongs in `SETTINGS_OPERATION_PARAMS` in `hon_commands.py`**,
+mapped to the parameters it carries. That is what turns the matching controls from
+read-only sensors into real entities.
+
 ## Reporting a new model
 
 `custom_components/addhon`'s diagnostics dump is the input for everything above.
@@ -193,13 +231,12 @@ operations does `settings` accept?**
   appliance it answered one question and closed it — `settings`' hidden `setConfig`
   category is only cloud endpoints, so the other operations are not there.
 - `command_history` (v5.23.0): the envelopes actually **sent** to the appliance, with a
-  `source` field saying whether each came from the hOn app or from this integration. The
-  command definition only ever shows the operation the appliance is currently pinned to;
-  the app's envelopes are the only place the others appear.
+  `source` field saying whether each came from the hOn app or from this integration.
 
-So: change a setting in the hOn app (the timer, an off-peak window, the anti-legionella
-hour), **reload the integration** so the command history is re-fetched, then download the
-device diagnostics and read the `operationName` of the `settings` entries whose `source`
-is `app`. Each one learned is one more group of parameters that can become writable —
-add it to `SETTINGS_OPERATION_PARAMS` in `hon_commands.py` and the gate opens for exactly
-those fields.
+On the HP250M7C-F9 both came back negative, which is itself the finding: the hidden
+`setConfig` category holds only cloud endpoints, and the history records **program starts
+only** (five `startProgram` entries, no `settings` command from the app even after one
+was demonstrably performed). The operation names are not readable — they have to be
+tried, with `addhon.send_command` above.
+
+On another model either section may well answer directly, which is why both are dumped.

@@ -8,7 +8,11 @@ from typing import NoReturn
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 
 try:
     # In real Home Assistant these symbols always exist. The import is tolerant
@@ -34,7 +38,10 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SCAN_INTERVAL,
+    ATTR_COMMAND,
+    ATTR_PARAMETERS,
     SERVICE_REFRESH,
+    SERVICE_SEND_COMMAND,
     SERVICE_SET_LOG_LEVEL,
     SERVICE_SET_MQTT_LOG_LEVEL,
 )
@@ -66,7 +73,13 @@ def _async_register_services(hass: HomeAssistant) -> None:
     mqtt_service_exists = hass.services.has_service(DOMAIN, SERVICE_SET_MQTT_LOG_LEVEL)
     log_service_exists = hass.services.has_service(DOMAIN, SERVICE_SET_LOG_LEVEL)
     refresh_service_exists = hass.services.has_service(DOMAIN, SERVICE_REFRESH)
-    if mqtt_service_exists and log_service_exists and refresh_service_exists:
+    send_service_exists = hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND)
+    if (
+        mqtt_service_exists
+        and log_service_exists
+        and refresh_service_exists
+        and send_service_exists
+    ):
         return
 
     import voluptuous as vol
@@ -126,6 +139,86 @@ def _async_register_services(hass: HomeAssistant) -> None:
             if isinstance(result, Exception):
                 _LOGGER.warning("Refresh service: a coordinator refresh failed: %s", result)
 
+    async def _handle_send_command(call: ServiceCall) -> None:
+        """Send ONE raw command to ONE appliance. Diagnostic, and deliberately ungated.
+
+        Every other control in this integration is capability-gated, and the settings
+        writes are additionally refused when the command is pinned to an operation that
+        would swallow them (hon_commands.settings_write_blocked). This service is the
+        exception, and it is the reason it exists: on an appliance whose `settings`
+        command performs a single operation named by a fixed `operationName`, the cloud
+        advertises ONLY the operation it is currently pinned to. The others appear in no
+        schema, in no attribute and -- as five captures of a real HP250M7C-F9 showed --
+        in no command history either, which records program starts only. They can be
+        tried, and nothing else.
+
+        So: pass the parameters you want AND the `operationName` you are testing. A wrong
+        operation name is the same no-op the integration is trying to avoid shipping; a
+        right one is a discovery, and it belongs in
+        hon_commands.SETTINGS_OPERATION_PARAMS so the affected controls become real.
+
+        Parameter values still go through the engine's own setters, so a range or enum
+        parameter rejects an out-of-schema value exactly as it would from an entity.
+        """
+        from homeassistant.helpers import device_registry as dr
+
+        from .hon_commands import async_send_command
+
+        registry = dr.async_get(hass)
+        command_name = call.data[ATTR_COMMAND]
+        parameters = {
+            str(key): str(value)
+            for key, value in (call.data.get(ATTR_PARAMETERS) or {}).items()
+        }
+        if not parameters:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="send_command_no_parameters",
+            )
+        device_ids = call.data.get("device_id") or []
+        if isinstance(device_ids, str):
+            device_ids = [device_ids]
+
+        for device_id in device_ids:
+            device = registry.async_get(device_id)
+            appliance_ids = {
+                identifier
+                for domain, identifier in (device.identifiers if device else set())
+                if domain == DOMAIN
+            }
+            sent = False
+            for entry_data in hass.data.get(DOMAIN, {}).values():
+                if not isinstance(entry_data, dict):
+                    continue
+                coordinator = entry_data.get("coordinator")
+                data = getattr(coordinator, "data", None)
+                if not isinstance(data, dict):
+                    continue
+                for appliance_id in appliance_ids & set(data):
+                    appliance = data[appliance_id].get("appliance")
+                    _LOGGER.info(
+                        "send_command service: %s %s -> id=%s",
+                        command_name,
+                        sorted(parameters),
+                        redact_id(appliance_id),
+                    )
+                    await async_send_command(
+                        hass,
+                        entry_data.get("client"),
+                        appliance,
+                        command_name,
+                        parameters,
+                    )
+                    sent = True
+                    if coordinator is not None:
+                        await coordinator.async_request_refresh()
+            if not sent:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="send_command_unknown_device",
+                    translation_placeholders={"device": device_id},
+                )
+
     level_schema = vol.Schema(
         {vol.Required(ATTR_LEVEL, default="debug"): vol.In(tuple(MQTT_LOG_LEVELS))}
     )
@@ -152,6 +245,25 @@ def _async_register_services(hass: HomeAssistant) -> None:
             DOMAIN,
             SERVICE_REFRESH,
             _handle_refresh,
+        )
+
+    if not send_service_exists:
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_SEND_COMMAND,
+            _handle_send_command,
+            # Plain voluptuous, no homeassistant.helpers.config_validation: this
+            # module is imported by the test harness without HA's helper package, and
+            # the handler coerces the shapes it needs anyway.
+            schema=vol.Schema(
+                {
+                    # `object` accepts both shapes a device target arrives in (one
+                    # id or a list); the handler normalises them.
+                    vol.Required("device_id"): object,
+                    vol.Required(ATTR_COMMAND, default="settings"): str,
+                    vol.Required(ATTR_PARAMETERS): dict,
+                }
+            ),
         )
 
 
@@ -726,7 +838,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Unload debug: no HonClient to close for entry=%s", entry.entry_id)
         # Last entry removed: remove the global debug services.
         if not hass.data.get(DOMAIN):
-            for service in (SERVICE_SET_MQTT_LOG_LEVEL, SERVICE_SET_LOG_LEVEL, SERVICE_REFRESH):
+            for service in (
+                SERVICE_SET_MQTT_LOG_LEVEL,
+                SERVICE_SET_LOG_LEVEL,
+                SERVICE_REFRESH,
+                SERVICE_SEND_COMMAND,
+            ):
                 if hass.services.has_service(DOMAIN, service):
                     hass.services.async_remove(DOMAIN, service)
                     _LOGGER.debug("Unload debug: removed service %s", service)
