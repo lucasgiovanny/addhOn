@@ -724,6 +724,8 @@ def _appliance_block(
     commands = _command_schema(appliance)
     command_categories = _command_categories(appliance)
     command_history = _command_history(appliance)
+    command_payload = getattr(appliance, "command_payload", None)
+    command_payload = dict(command_payload) if isinstance(command_payload, Mapping) else {}
     model_attributes = _model_attributes(appliance)
     coverage = _coverage(app_type, attributes, statistics, appliance)
     future = _future_capabilities(app_type, attributes, appliance)
@@ -759,6 +761,10 @@ def _appliance_block(
         # sections say what the schema currently offers; this one says what the appliance
         # has been observed to accept.
         "command_history": command_history,
+        # Every top-level key the commands endpoint returned and what became of it, so a
+        # command the appliance advertises but this integration fails to parse cannot
+        # stay invisible.
+        "command_payload": command_payload,
         "coverage": coverage,
         # Next to coverage on purpose: one says what the code could map for this
         # type, the other what Home Assistant actually holds. Reading them together

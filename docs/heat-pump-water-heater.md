@@ -41,7 +41,9 @@ That is why:
 - the **target temperature** is written through `startProgram` (fixed in v5.10.0 after
   the setpoint kept reverting on the next poll);
 - **power** is written through `startProgram` too (fixed in v5.22.0 — before that `off`
-  did nothing at all, and `onOffStatus` stayed `1` across all four dumps);
+  did nothing at all, and `onOffStatus` stayed `1` across four dumps). **Confirmed live**
+  on 2026-08-25: a `startProgram` carrying `onOffStatus: "0"` was accepted and the
+  appliance reported itself off;
 - the **vacation window** works, because it *is* the pinned operation;
 - the remaining `settings` toggles and setpoints (boost, silent, child lock,
   anti-legionella enable/temperature, the PV/SG/HC setpoints) **read** correctly but
@@ -188,11 +190,78 @@ a heat pump water heater is specified for, so either the counter is not kWh or t
 integer-truncated inputs understate consumption. Until that is settled it is not offered
 to the Energy dashboard, where adding it would inflate the household total.
 
-## Trying an operation name: `addhon.send_command`
+## The holiday window
+
+The one part of the `settings` command that *is* writable, because it is the operation
+the command is pinned to. Two `date` entities plus a button:
+
+| Entity | What it does |
+|---|---|
+| *Vacation start* / *Vacation end* | the two halves of the window |
+| *Clear vacation window* (button) | cancels it |
+
+The appliance spells "no window" as **2000-01-01 on both halves** — that is what the
+captures show once a window is cleared from the app, with `machMode` back on the normal
+program. So:
+
+- both dates report **no value** when they hold the sentinel, rather than a holiday in
+  the year 2000;
+- setting one half of a window that does not exist yet writes **both**, as a one-day
+  window you then stretch. Without that the two entities dead-lock each other: the
+  ordering guard refuses a start later than the (unset) end, so a window could only ever
+  be started from its end date;
+- the button writes the sentinel to both halves in one command, which is how the app
+  cancels it. Home Assistant has no "empty" input for a `date` entity, so without the
+  button the only way to cancel from Home Assistant would be to type 2000-01-01 by hand.
+
+The window is scheduled BY DATES and is distinct from the `vac` program, which the
+`water_heater` entity's away toggle starts immediately. The two compose: inside a
+scheduled window the appliance runs the vac program by itself, which is why the entity
+reports `vac` while the configured program stays put.
+
+## Trying an operation name
+
+Two services, both diagnostic and both deliberately ungated — the only places in the
+integration that are. Everything else refuses a write the appliance would swallow; these
+exist precisely to make that write and see what happens.
+
+### `addhon.probe_settings_operation` — the automated sweep
 
 A diagnostic service that sends **one raw command to one appliance**, deliberately
 ungated — the one place in the integration that is. Everything else refuses a write the
 appliance would swallow; this exists precisely to make that write and see what happens.
+
+Give it a parameter and a value it does not currently hold. It sends each candidate
+operation name in turn, waits for the appliance to apply and the shadow to catch up,
+reads the parameter back, and stops at the first one that moved it. The result arrives as
+a notification.
+
+```yaml
+action: addhon.probe_settings_operation
+target:
+  device_id: <your water heater>
+data:
+  parameter: sterilizationTime
+  value: "07:00"
+```
+
+The candidate ladder is derived from the parameter name, most likely first:
+
+| Rung | `vacStartDate` | `timingPowerOn` |
+|---|---|---|
+| the whole name | `grSetVacStartDate` | `grSetTimingPowerOn` |
+| first + last word | **`grSetVacDate`** | `grSetTimingOn` |
+| prefixes, longest first | `grSetVacStart`, `grSetVac` | `grSetTimingPower`, `grSetTiming` |
+
+The second rung is what produces `grSetVacDate`, the one operation name ever confirmed —
+which is the only evidence the pattern rests on, so pass your own list with `operations:`
+when you have a better idea.
+
+The probe refuses to start when the parameter is not mirrored in the shadow (the result
+could not be observed) or already holds the target value (every candidate would look like
+a hit).
+
+### `addhon.send_command` — one candidate, by hand
 
 ```yaml
 action: addhon.send_command
@@ -205,16 +274,9 @@ data:
     sterilizationTime: "12:00"
 ```
 
-Then check the entity (or the next diagnostics dump): if `sterilizationTime` moved, the
-name is right. A wrong name is the same no-op the appliance already performs today, so
-the cost of a miss is nothing. Parameter values still go through the engine's own
-setters, so a range or enum parameter rejects an out-of-schema value exactly as it would
-from an entity.
-
-Naming pattern, from the one confirmed operation: `grSet` + the thing it sets
-(`grSetVacDate`). Plausible siblings to try: `grSetSterilization`,
-`grSetSterilizationTime`, `grSetTiming`, `grSetTimingPower`, `grSetOppEco`,
-`grSetSilent`, `grSetOnOff`.
+A wrong name is the same no-op the appliance already performs today, so the cost of a
+miss is nothing. Parameter values still go through the engine's own setters, so a range
+or enum parameter rejects an out-of-schema value exactly as it would from an entity.
 
 **Every name that works belongs in `SETTINGS_OPERATION_PARAMS` in `hon_commands.py`**,
 mapped to the parameters it carries. That is what turns the matching controls from
@@ -232,6 +294,10 @@ operations does `settings` accept?**
   category is only cloud endpoints, so the other operations are not there.
 - `command_history` (v5.23.0): the envelopes actually **sent** to the appliance, with a
   `source` field saying whether each came from the hOn app or from this integration.
+- `command_payload` (v5.25.0): every top-level key the commands endpoint returned and
+  what became of it — `command`, `additional_data` or `unparsed`. It answers a question
+  none of the others can: whether the appliance advertises a command this integration
+  never sees.
 
 On the HP250M7C-F9 both came back negative, which is itself the finding: the hidden
 `setConfig` category holds only cloud endpoints, and the history records **program starts

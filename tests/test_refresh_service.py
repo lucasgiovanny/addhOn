@@ -107,6 +107,7 @@ from custom_components.addhon.const import (  # noqa: E402
     DOMAIN,
     SERVICE_REFRESH,
     SERVICE_SET_LOG_LEVEL,
+    SERVICE_PROBE_SETTINGS_OPERATION,
     SERVICE_SEND_COMMAND,
     SERVICE_SET_MQTT_LOG_LEVEL,
 )
@@ -315,6 +316,195 @@ class SendCommandServiceTest(unittest.IsolatedAsyncioTestCase):
             undo()
         self.assertEqual(ctx.exception.translation_key, "send_command_unknown_device")
         self.assertEqual(sent, [])
+
+
+class OperationCandidateTest(unittest.TestCase):
+    """The ladder of operation names the probe tries, derived from the parameter."""
+
+    @staticmethod
+    def _candidates(parameter):
+        import importlib
+
+        module = importlib.import_module("custom_components.addhon.hon_commands")
+        return module.settings_operation_candidates(parameter)
+
+    def test_it_derives_the_one_confirmed_name(self) -> None:
+        # grSetVacDate is the operation the HP250M7C-F9 pins its settings command to, and
+        # the only name ever confirmed. The first-and-last-word rung is what produces it.
+        self.assertIn("grSetVacDate", self._candidates("vacStartDate"))
+        self.assertIn("grSetVacDate", self._candidates("vacEndDate"))
+
+    def test_the_whole_name_comes_first(self) -> None:
+        self.assertEqual(
+            self._candidates("sterilizationTime")[0], "grSetSterilizationTime"
+        )
+
+    def test_prefixes_follow_longest_first(self) -> None:
+        self.assertEqual(
+            self._candidates("timingPowerOn"),
+            ["grSetTimingPowerOn", "grSetTimingOn", "grSetTimingPower", "grSetTiming"],
+        )
+
+    def test_there_are_no_duplicates(self) -> None:
+        for parameter in ("vacStartDate", "sterilizationTime", "onOffStatus"):
+            with self.subTest(parameter=parameter):
+                candidates = self._candidates(parameter)
+                self.assertEqual(len(candidates), len(set(candidates)))
+
+    def test_an_empty_name_yields_nothing(self) -> None:
+        self.assertEqual(self._candidates(""), [])
+
+
+class ProbeSettingsOperationTest(unittest.IsolatedAsyncioTestCase):
+    """The probe: send a candidate, wait, read the parameter back, stop on the first hit."""
+
+    WINNER = "grSetSterilization"
+
+    class _Registry:
+        def async_get(self, device_id):
+            if device_id != "dev-1":
+                return None
+            return type("Device", (), {"identifiers": {(DOMAIN, "app-1")}})()
+
+    def _hass(self, initial="22:00"):
+        coordinator = FakeCoordinator()
+        coordinator.data = {
+            "app-1": {
+                "appliance": object(),
+                "type": "HW",
+                "attributes": {"sterilizationTime": initial},
+            }
+        }
+
+        async def _refresh():
+            coordinator.refreshes += 1
+
+        coordinator.async_refresh = _refresh
+        hass = FakeHass({DOMAIN: {"e1": {"coordinator": coordinator, "client": object()}}})
+        _async_register_services(hass)
+        return hass, coordinator
+
+    def _patch(self, coordinator, tried, *, winner=WINNER):
+        import importlib
+        import sys
+        import types
+
+        dr = types.ModuleType("homeassistant.helpers.device_registry")
+        dr.async_get = lambda _hass: self._Registry()
+        helpers = sys.modules["homeassistant.helpers"]
+        previous_dr = getattr(helpers, "device_registry", None)
+        helpers.device_registry = dr
+        sys.modules["homeassistant.helpers.device_registry"] = dr
+
+        components = sys.modules.setdefault(
+            "homeassistant.components", types.ModuleType("homeassistant.components")
+        )
+        pn = types.ModuleType("homeassistant.components.persistent_notification")
+        self.notifications = []
+        pn.async_create = lambda _hass, message, title=None, notification_id=None: (
+            self.notifications.append(message)
+        )
+        previous_pn = getattr(components, "persistent_notification", None)
+        components.persistent_notification = pn
+        sys.modules["homeassistant.components.persistent_notification"] = pn
+
+        hon_commands = importlib.import_module("custom_components.addhon.hon_commands")
+        original = hon_commands.async_send_command
+
+        async def _send(_hass, _client, _appliance, _command, params):
+            tried.append(params["operationName"])
+            if params["operationName"] == winner:
+                coordinator.data["app-1"]["attributes"]["sterilizationTime"] = params[
+                    "sterilizationTime"
+                ]
+
+        hon_commands.async_send_command = _send
+        return lambda: (
+            setattr(helpers, "device_registry", previous_dr),
+            setattr(components, "persistent_notification", previous_pn),
+            setattr(hon_commands, "async_send_command", original),
+        )
+
+    def _call(self, **data):
+        call = FakeServiceCall()
+        call.data = {"command": "settings", "settle": 0, **data}
+        return call
+
+    async def _run(self, hass, tried, **data):
+        payload = {
+            "device_id": "dev-1",
+            "parameter": "sterilizationTime",
+            "value": "07:00",
+        }
+        payload.update(data)
+        await hass.services.handlers[(DOMAIN, SERVICE_PROBE_SETTINGS_OPERATION)](
+            self._call(**payload)
+        )
+
+    async def test_it_stops_at_the_first_candidate_that_works(self) -> None:
+        hass, coordinator = self._hass()
+        tried: list = []
+        undo = self._patch(coordinator, tried)
+        try:
+            await self._run(hass, tried)
+        finally:
+            undo()
+        # The whole name is tried first and misses; the shorter one wins and ends it.
+        self.assertEqual(tried, ["grSetSterilizationTime", self.WINNER])
+        self.assertEqual(
+            coordinator.data["app-1"]["attributes"]["sterilizationTime"], "07:00"
+        )
+        self.assertIn(self.WINNER, self.notifications[0])
+
+    async def test_an_explicit_candidate_list_wins_over_the_derived_one(self) -> None:
+        hass, coordinator = self._hass()
+        tried: list = []
+        undo = self._patch(coordinator, tried, winner="grSetWhatever")
+        try:
+            await self._run(hass, tried, operations=["grSetNope", "grSetWhatever"])
+        finally:
+            undo()
+        self.assertEqual(tried, ["grSetNope", "grSetWhatever"])
+
+    async def test_every_candidate_missing_is_reported_not_hidden(self) -> None:
+        hass, coordinator = self._hass()
+        tried: list = []
+        undo = self._patch(coordinator, tried, winner="grSetNothingMatches")
+        try:
+            await self._run(hass, tried)
+        finally:
+            undo()
+        self.assertEqual(tried, ["grSetSterilizationTime", "grSetSterilization"])
+        self.assertIn("None of the", self.notifications[0])
+
+    async def test_an_unreported_parameter_is_refused_before_writing(self) -> None:
+        from homeassistant.exceptions import HomeAssistantError
+
+        hass, coordinator = self._hass()
+        tried: list = []
+        undo = self._patch(coordinator, tried)
+        try:
+            with self.assertRaises(HomeAssistantError) as ctx:
+                await self._run(hass, tried, parameter="notReported")
+        finally:
+            undo()
+        self.assertEqual(ctx.exception.translation_key, "probe_parameter_not_reported")
+        self.assertEqual(tried, [])
+
+    async def test_a_value_already_in_place_is_refused(self) -> None:
+        # Otherwise the FIRST candidate reads as a hit and the answer is meaningless.
+        from homeassistant.exceptions import HomeAssistantError
+
+        hass, coordinator = self._hass(initial="07:00")
+        tried: list = []
+        undo = self._patch(coordinator, tried)
+        try:
+            with self.assertRaises(HomeAssistantError) as ctx:
+                await self._run(hass, tried)
+        finally:
+            undo()
+        self.assertEqual(ctx.exception.translation_key, "probe_value_already_set")
+        self.assertEqual(tried, [])
 
 
 class RefreshServiceRegistrationTest(unittest.TestCase):

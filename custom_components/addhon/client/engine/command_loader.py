@@ -42,6 +42,7 @@ class HonCommandLoader:
         self._favourites: list[dict[str, Any]] = []
         self._command_history: list[dict[str, Any]] = []
         self._commands: dict[str, HonCommand] = {}
+        self._command_payload: dict[str, str] = {}
         self._appliance_data: dict[str, Any] = {}
         self._additional_data: dict[str, Any] = {}
 
@@ -66,6 +67,17 @@ class HonCommandLoader:
     @property
     def additional_data(self) -> dict[str, Any]:
         return self._additional_data
+
+    @property
+    def command_payload(self) -> dict[str, str]:
+        """Top-level key of the commands payload -> what became of it.
+
+        "command" (parsed, in `commands`), "additional_data" (a non-dict value, kept
+        aside) or "unparsed" (a dict that matched neither shape and was dropped). It
+        answers a question no other dump section can: whether the appliance advertises a
+        command this integration never sees.
+        """
+        return self._command_payload
 
     @property
     def command_history(self) -> list[dict[str, Any]]:
@@ -116,9 +128,19 @@ class HonCommandLoader:
 
     def _get_commands(self) -> None:
         commands = []
+        self._command_payload = {}
         for name, data in self._api_commands.items():
-            if command := self._parse_command(data, name):
+            command = self._parse_command(data, name)
+            if command is not None:
                 commands.append(command)
+                self._command_payload[name] = "command"
+            elif not isinstance(data, dict):
+                self._command_payload[name] = "additional_data"
+            else:
+                # A dict that is neither a command nor a set of categories. Dropped
+                # silently until now, which made it impossible to tell "the appliance
+                # offers nothing else" from "we failed to parse what it offers".
+                self._command_payload[name] = "unparsed"
         self._commands = {c.name: c for c in commands}
 
     def _parse_command(

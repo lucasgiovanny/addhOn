@@ -111,6 +111,63 @@ def settings_operation(appliance, command_name: str = "settings") -> str | None:
     return text or None
 
 
+# Prefix every observed settings operation uses ("grSetVacDate" is the one confirmed
+# name). The probe service builds its candidate ladder from it.
+SETTINGS_OPERATION_PREFIX = "grSet"
+
+
+def _camel_words(name: str) -> list[str]:
+    """`name` split into its camelCase words, each capitalised.
+
+    "vacStartDate" -> ["Vac", "Start", "Date"]; "opp1EcoStartTime1" keeps its digits
+    attached to the word they follow.
+    """
+    words: list[str] = []
+    current = ""
+    for char in name:
+        if char.isupper() and current and not current[-1].isdigit():
+            words.append(current)
+            current = char
+        else:
+            current += char
+    if current:
+        words.append(current)
+    return [word[:1].upper() + word[1:] for word in words if word]
+
+
+def settings_operation_candidates(parameter: str) -> list[str]:
+    """Operation names worth TRYING for `parameter`, most likely first.
+
+    There is no way to read the operation a settings parameter belongs to: the cloud
+    advertises only the one the command is currently pinned to, the shadow mirrors that
+    same value, and the command history records program starts only (five captures of a
+    real HP250M7C-F9 agree). So the names are guessed from the one confirmed example and
+    tried against the appliance -- see the probe service.
+
+    The ladder, in order:
+      1. the whole parameter name  -- vacStartDate -> grSetVacStartDate
+      2. its first and last words  -- vacStartDate -> grSetVacDate  (the confirmed one)
+      3. its prefixes, longest first -- timingPowerOn -> grSetTimingPower, grSetTiming
+
+    Deduplicated, order preserved. A caller with better information passes its own list.
+    """
+    words = _camel_words(parameter)
+    if not words:
+        return []
+    candidates = ["".join([SETTINGS_OPERATION_PREFIX, *words])]
+    if len(words) > 2:
+        candidates.append(SETTINGS_OPERATION_PREFIX + words[0] + words[-1])
+    for length in range(len(words) - 1, 0, -1):
+        candidates.append("".join([SETTINGS_OPERATION_PREFIX, *words[:length]]))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
 def settings_write_blocked(
     appliance, param_name: str, command_name: str = "settings"
 ) -> str | None:

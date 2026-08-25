@@ -1059,6 +1059,9 @@
       },
       "reset_debug": {
         "name": "Reset debug"
+      },
+      "clear_vacation": {
+        "name": "Clear vacation window"
       }
     },
     "fan": {
@@ -1082,6 +1085,12 @@
     },
     "invalid_setpoint": {
       "message": "Value {value} is not allowed (allowed: {allowed})."
+    },
+    "probe_parameter_not_reported": {
+      "message": "The appliance does not report \"{parameter}\", so the probe could not tell whether a candidate worked."
+    },
+    "probe_value_already_set": {
+      "message": "\"{parameter}\" already reads {value}: pick a different value, or every candidate would look like a hit."
     },
     "program_not_found": {
       "message": "Program \"{program}\" was not found."

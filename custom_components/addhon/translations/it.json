@@ -1059,6 +1059,9 @@
       },
       "reset_debug": {
         "name": "Reset debug"
+      },
+      "clear_vacation": {
+        "name": "Cancella periodo di vacanza"
       }
     },
     "fan": {
@@ -1082,6 +1085,12 @@
     },
     "invalid_setpoint": {
       "message": "Il valore {value} non è ammesso (ammessi: {allowed})."
+    },
+    "probe_parameter_not_reported": {
+      "message": "L'elettrodomestico non riporta \"{parameter}\", quindi la sonda non può verificare se un candidato ha funzionato."
+    },
+    "probe_value_already_set": {
+      "message": "\"{parameter}\" vale già {value}: scegli un altro valore, altrimenti ogni candidato sembrerebbe corretto."
     },
     "program_not_found": {
       "message": "Programma \"{program}\" non trovato."

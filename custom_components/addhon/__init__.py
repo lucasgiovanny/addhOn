@@ -39,7 +39,13 @@ from .const import (
     PLATFORMS,
     SCAN_INTERVAL,
     ATTR_COMMAND,
+    ATTR_OPERATIONS,
+    ATTR_PARAMETER,
     ATTR_PARAMETERS,
+    ATTR_SETTLE,
+    ATTR_VALUE,
+    PROBE_SETTLE_DEFAULT,
+    SERVICE_PROBE_SETTINGS_OPERATION,
     SERVICE_REFRESH,
     SERVICE_SEND_COMMAND,
     SERVICE_SET_LOG_LEVEL,
@@ -59,6 +65,46 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @callback
+def _target_appliances(hass: HomeAssistant, registry, device_ids):
+    """Yield (entry_data, appliance_id, appliance, coordinator) for the targeted devices.
+
+    Shared by the two diagnostic write services. A device that is not one of this
+    integration's appliances is an ERROR rather than a silent no-op: a service that
+    quietly did nothing is exactly the failure mode these services exist to diagnose.
+    """
+    if isinstance(device_ids, str):
+        device_ids = [device_ids]
+    for device_id in device_ids or []:
+        device = registry.async_get(device_id)
+        appliance_ids = {
+            identifier
+            for domain, identifier in (device.identifiers if device else set())
+            if domain == DOMAIN
+        }
+        found = False
+        for entry_data in hass.data.get(DOMAIN, {}).values():
+            if not isinstance(entry_data, dict):
+                continue
+            coordinator = entry_data.get("coordinator")
+            data = getattr(coordinator, "data", None)
+            if not isinstance(data, dict):
+                continue
+            for appliance_id in appliance_ids & set(data):
+                found = True
+                yield (
+                    entry_data,
+                    appliance_id,
+                    data[appliance_id].get("appliance"),
+                    coordinator,
+                )
+        if not found:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="send_command_unknown_device",
+                translation_placeholders={"device": device_id},
+            )
+
+
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register (only once) the service for the MQTT log level.
 
@@ -74,11 +120,15 @@ def _async_register_services(hass: HomeAssistant) -> None:
     log_service_exists = hass.services.has_service(DOMAIN, SERVICE_SET_LOG_LEVEL)
     refresh_service_exists = hass.services.has_service(DOMAIN, SERVICE_REFRESH)
     send_service_exists = hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND)
+    probe_service_exists = hass.services.has_service(
+        DOMAIN, SERVICE_PROBE_SETTINGS_OPERATION
+    )
     if (
         mqtt_service_exists
         and log_service_exists
         and refresh_service_exists
         and send_service_exists
+        and probe_service_exists
     ):
         return
 
@@ -175,49 +225,20 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 translation_domain=DOMAIN,
                 translation_key="send_command_no_parameters",
             )
-        device_ids = call.data.get("device_id") or []
-        if isinstance(device_ids, str):
-            device_ids = [device_ids]
-
-        for device_id in device_ids:
-            device = registry.async_get(device_id)
-            appliance_ids = {
-                identifier
-                for domain, identifier in (device.identifiers if device else set())
-                if domain == DOMAIN
-            }
-            sent = False
-            for entry_data in hass.data.get(DOMAIN, {}).values():
-                if not isinstance(entry_data, dict):
-                    continue
-                coordinator = entry_data.get("coordinator")
-                data = getattr(coordinator, "data", None)
-                if not isinstance(data, dict):
-                    continue
-                for appliance_id in appliance_ids & set(data):
-                    appliance = data[appliance_id].get("appliance")
-                    _LOGGER.info(
-                        "send_command service: %s %s -> id=%s",
-                        command_name,
-                        sorted(parameters),
-                        redact_id(appliance_id),
-                    )
-                    await async_send_command(
-                        hass,
-                        entry_data.get("client"),
-                        appliance,
-                        command_name,
-                        parameters,
-                    )
-                    sent = True
-                    if coordinator is not None:
-                        await coordinator.async_request_refresh()
-            if not sent:
-                raise HomeAssistantError(
-                    translation_domain=DOMAIN,
-                    translation_key="send_command_unknown_device",
-                    translation_placeholders={"device": device_id},
-                )
+        for entry_data, appliance_id, appliance, coordinator in _target_appliances(
+            hass, registry, call.data.get("device_id")
+        ):
+            _LOGGER.info(
+                "send_command service: %s %s -> id=%s",
+                command_name,
+                sorted(parameters),
+                redact_id(appliance_id),
+            )
+            await async_send_command(
+                hass, entry_data.get("client"), appliance, command_name, parameters
+            )
+            if coordinator is not None:
+                await coordinator.async_request_refresh()
 
     level_schema = vol.Schema(
         {vol.Required(ATTR_LEVEL, default="debug"): vol.In(tuple(MQTT_LOG_LEVELS))}
@@ -247,6 +268,107 @@ def _async_register_services(hass: HomeAssistant) -> None:
             _handle_refresh,
         )
 
+    async def _handle_probe_settings_operation(call: ServiceCall) -> None:
+        """Try a ladder of `operationName` candidates until the appliance honours one.
+
+        The manual version of this is `send_command`, one candidate at a time. It exists
+        because the operation a settings parameter belongs to CANNOT be read: the cloud
+        advertises only the operation the command is pinned to, the shadow mirrors that
+        same value, and the command history records program starts only. The names have
+        to be tried, and trying is exactly what this automates.
+
+        Each round sends {operationName: candidate, parameter: value}, waits for the
+        appliance to apply and the shadow to catch up, then reads the parameter back. The
+        first candidate that moves it is the answer -- and belongs in
+        hon_commands.SETTINGS_OPERATION_PARAMS, which is what turns the read-only
+        controls for that group into real ones.
+
+        Refuses up front when the parameter is not mirrored in the shadow (the result
+        could not be observed) or already holds the target value (every candidate would
+        look like a hit).
+        """
+        from homeassistant.components import persistent_notification
+        from homeassistant.helpers import device_registry as dr
+
+        from .hon_commands import async_send_command, settings_operation_candidates
+
+        registry = dr.async_get(hass)
+        command_name = call.data[ATTR_COMMAND]
+        parameter = call.data[ATTR_PARAMETER]
+        value = str(call.data[ATTR_VALUE])
+        settle = float(call.data.get(ATTR_SETTLE, PROBE_SETTLE_DEFAULT))
+        candidates = [
+            str(item) for item in (call.data.get(ATTR_OPERATIONS) or [])
+        ] or settings_operation_candidates(parameter)
+
+        for entry_data, appliance_id, appliance, coordinator in _target_appliances(
+            hass, registry, call.data.get("device_id")
+        ):
+            def _reported() -> str | None:
+                data = getattr(coordinator, "data", None) or {}
+                attributes = (data.get(appliance_id) or {}).get("attributes") or {}
+                raw = attributes.get(parameter)
+                return None if raw is None else str(raw).strip()
+
+            before = _reported()
+            if before is None:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="probe_parameter_not_reported",
+                    translation_placeholders={"parameter": parameter},
+                )
+            if before == value:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="probe_value_already_set",
+                    translation_placeholders={"parameter": parameter, "value": value},
+                )
+
+            found: str | None = None
+            tried: list[str] = []
+            for candidate in candidates:
+                tried.append(candidate)
+                _LOGGER.info(
+                    "probe_settings_operation: trying '%s' for %s=%s id=%s",
+                    candidate,
+                    parameter,
+                    value,
+                    redact_id(appliance_id),
+                )
+                await async_send_command(
+                    hass,
+                    entry_data.get("client"),
+                    appliance,
+                    command_name,
+                    {"operationName": candidate, parameter: value},
+                )
+                await asyncio.sleep(settle)
+                refresh = getattr(coordinator, "async_refresh", None)
+                if refresh is not None:
+                    await refresh()
+                if _reported() == value:
+                    found = candidate
+                    break
+
+            message = (
+                f"`{parameter}` moved to `{value}` with **operationName "
+                f"`{found}`**. Add it to SETTINGS_OPERATION_PARAMS to make the "
+                f"matching controls writable."
+                if found
+                else (
+                    f"None of the {len(tried)} candidates moved `{parameter}`: "
+                    f"{', '.join(tried)}. Try other names, or the operation may not be "
+                    f"reachable from the cloud at all."
+                )
+            )
+            _LOGGER.info("probe_settings_operation: %s", message)
+            persistent_notification.async_create(
+                hass,
+                message,
+                title="addhOn: settings operation probe",
+                notification_id=f"addhon_probe_{parameter}",
+            )
+
     if not send_service_exists:
         hass.services.async_register(
             DOMAIN,
@@ -262,6 +384,23 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     vol.Required("device_id"): object,
                     vol.Required(ATTR_COMMAND, default="settings"): str,
                     vol.Required(ATTR_PARAMETERS): dict,
+                }
+            ),
+        )
+
+    if not probe_service_exists:
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_PROBE_SETTINGS_OPERATION,
+            _handle_probe_settings_operation,
+            schema=vol.Schema(
+                {
+                    vol.Required("device_id"): object,
+                    vol.Required(ATTR_PARAMETER): str,
+                    vol.Required(ATTR_VALUE): object,
+                    vol.Required(ATTR_COMMAND, default="settings"): str,
+                    vol.Optional(ATTR_OPERATIONS): object,
+                    vol.Optional(ATTR_SETTLE, default=PROBE_SETTLE_DEFAULT): object,
                 }
             ),
         )
@@ -843,6 +982,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 SERVICE_SET_LOG_LEVEL,
                 SERVICE_REFRESH,
                 SERVICE_SEND_COMMAND,
+                SERVICE_PROBE_SETTINGS_OPERATION,
             ):
                 if hass.services.has_service(DOMAIN, service):
                     hass.services.async_remove(DOMAIN, service)

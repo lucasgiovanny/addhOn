@@ -1059,6 +1059,9 @@
       },
       "reset_debug": {
         "name": "Repor depuração"
+      },
+      "clear_vacation": {
+        "name": "Limpar janela de férias"
       }
     },
     "fan": {
@@ -1082,6 +1085,12 @@
     },
     "invalid_setpoint": {
       "message": "O valor {value} não é permitido (permitidos: {allowed})."
+    },
+    "probe_parameter_not_reported": {
+      "message": "O aparelho não reporta \"{parameter}\", por isso a sondagem não consegue verificar se algum candidato resultou."
+    },
+    "probe_value_already_set": {
+      "message": "\"{parameter}\" já está em {value}: escolhe outro valor, senão qualquer candidato pareceria certo."
     },
     "program_not_found": {
       "message": "O programa \"{program}\" não foi encontrado."

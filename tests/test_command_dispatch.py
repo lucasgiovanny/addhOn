@@ -28,6 +28,10 @@ _EXPECTED_LEGACY_CALL_EDGES = {
         "async_send_settings": ("async_send_command",),
     },
     "button.py": {
+        # The water heater's "clear vacation window" button: an ordinary settings write
+        # (both halves of the window set to the appliance's unset sentinel), on the same
+        # legacy path as every other settings-backed control.
+        "HonClearVacationButton.async_press": ("async_send_command",),
         "HonProgramCommandButton.async_press._do": (
             "client.run_command_sync->_inner",
         ),

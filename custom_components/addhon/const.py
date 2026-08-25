@@ -130,6 +130,17 @@ SERVICE_REFRESH = "refresh"
 SERVICE_SEND_COMMAND = "send_command"
 ATTR_COMMAND = "command"
 ATTR_PARAMETERS = "parameters"
+# Automated version of the same hunt: try a ladder of candidate operation names against
+# one parameter and report which one the appliance actually honoured.
+SERVICE_PROBE_SETTINGS_OPERATION = "probe_settings_operation"
+ATTR_PARAMETER = "parameter"
+ATTR_VALUE = "value"
+ATTR_OPERATIONS = "operations"
+ATTR_SETTLE = "settle"
+# Seconds to wait between sending a candidate and reading the shadow back. The appliance
+# applies over MQTT and the cloud shadow follows; too short and a working operation reads
+# as a miss.
+PROBE_SETTLE_DEFAULT = 12
 
 # Option keys (entry.options) of the two debug toggles exposed in the
 # Configure/Options screen of the integration. They persist across restarts and

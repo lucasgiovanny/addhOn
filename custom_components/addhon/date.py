@@ -60,6 +60,13 @@ _LOGGER = logging.getLogger(__name__)
 VAC_START_PARAM = "vacStartDate"
 VAC_END_PARAM = "vacEndDate"
 
+# How the appliance spells "no window scheduled". Ground truth: the 2026-08 captures show
+# a real window (2026-08-18 -> 2026-08-22, with machMode on the vac program) and then
+# BOTH halves back at this date once it was cleared from the app, with machMode back to
+# the normal program. It is not a date anyone schedules a holiday for, so it is reported
+# as no value at all rather than as a holiday in the year 2000.
+VAC_UNSET_DATE = "2000-01-01"
+
 
 @dataclass(frozen=True, kw_only=True)
 class HonDateEntityDescription(DateEntityDescription):
@@ -163,12 +170,20 @@ class HonVacationDate(HonBaseEntity, DateEntity):
         )
 
     def _shadow_date(self, param: str) -> date | None:
-        """Shadow attribute as a date, or None when absent/unparseable (never a guess)."""
+        """Shadow attribute as a date, or None when absent, unparseable or UNSET.
+
+        The unset sentinel is folded in here on purpose, so every caller -- the state, the
+        ordering guard and the pair completion below -- agrees on what "no window" means
+        and none of them has to special-case it.
+        """
         raw = self._get_attr(param)
         if raw is None:
             return None
+        text = str(raw).strip()
+        if text == VAC_UNSET_DATE:
+            return None
         try:
-            return date.fromisoformat(str(raw).strip())
+            return date.fromisoformat(text)
         except ValueError:
             _LOGGER.debug("Date debug: '%s' not an ISO date raw=%r", param, raw)
             return None
@@ -213,18 +228,33 @@ class HonVacationDate(HonBaseEntity, DateEntity):
                 translation_key="appliance_or_client_unavailable",
             )
         self._validate_window(value)
-        param = self.entity_description.param
+        description = self.entity_description
+        param = description.param
         send_value = value.isoformat()
+        params = {param: send_value}
+        # Setting one half of a window that does not exist yet writes BOTH, as a one-day
+        # window the user then stretches. Without this the entities dead-lock each other:
+        # the ordering guard refuses a start later than the (unset) end, so a window could
+        # only ever be started from its END date -- which is not how anyone thinks about
+        # booking a holiday.
+        sibling = VAC_END_PARAM if description.is_start else VAC_START_PARAM
+        if self._shadow_date(sibling) is None:
+            params[sibling] = send_value
+            _LOGGER.debug(
+                "Date debug: %s was unset, opening a one-day window on %s id=%s",
+                sibling,
+                send_value,
+                redact_id(self._appliance_id),
+            )
         try:
             _LOGGER.debug(
-                "Date debug: set %s=%s (cmd=%s) id=%s",
-                param,
-                send_value,
+                "Date debug: set %s (cmd=%s) id=%s",
+                params,
                 self._command_name,
                 redact_id(self._appliance_id),
             )
             await async_send_command(
-                self.hass, client, appliance, self._command_name, {param: send_value}
+                self.hass, client, appliance, self._command_name, params
             )
             await self._async_request_command_refresh()
         except HomeAssistantError:

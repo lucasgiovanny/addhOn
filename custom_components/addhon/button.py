@@ -15,7 +15,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .base_entity import HonAccountEntity, HonBaseEntity
 from .const import (
+    APPLIANCE_HW,
     APPLIANCE_WASH_GROUP,
+    APPLIANCE_WH,
     CONF_ENABLE_DEBUG,
     CONF_ENABLE_MQTT_DEBUG,
     DOMAIN,
@@ -23,7 +25,9 @@ from .const import (
     PROGRAM_PENDING_OPTIONS,
     PROGRAM_PENDING_STORE,
 )
+from .date import VAC_END_PARAM, VAC_START_PARAM, VAC_UNSET_DATE
 from .debug_utils import command_names, param_snapshot, redact_id, redact_store
+from .hon_commands import async_send_command, find_settings_param
 from .logging_utils import reset_integration_log_level, silence_mqtt_noise
 from .param_rollback import restore_params, snapshot_params
 from .program_options import apply_pending_options
@@ -83,11 +87,87 @@ async def async_setup_entry(
                     command_parameters={"onOffStatus": "0"},
                 )
             )
+    # Water heater: clear the scheduled holiday window. A `date` entity cannot be
+    # emptied from the UI -- Home Assistant has no "no date" input -- so without this the
+    # only way to cancel a window from Home Assistant would be to type the appliance's
+    # own unset sentinel by hand. Gated on both halves being writable, like the dates.
+    for appliance_id, data in coordinator.data.items():
+        if data.get("type") not in (APPLIANCE_HW, APPLIANCE_WH):
+            continue
+        appliance = data.get("appliance")
+        found = [
+            find_settings_param(appliance, param)
+            for param in (VAC_START_PARAM, VAC_END_PARAM)
+        ]
+        if any(item is None for item in found):
+            _LOGGER.debug(
+                "Button debug: no vacation clear button for id=%s (window not writable)",
+                redact_id(appliance_id),
+            )
+            continue
+        entities.append(
+            HonClearVacationButton(
+                coordinator, appliance_id, client, command_name=found[0][0]
+            )
+        )
+        _LOGGER.info(
+            "Added vacation clear button: id=%s", redact_id(appliance_id)
+        )
+
     # Account-level debug action buttons (one set per config entry).
     sw_version = entry_data.get("integration_version")
     entities.append(HonForceRefreshButton(coordinator, entry, sw_version))
     entities.append(HonResetDebugButton(entry, sw_version))
     async_add_entities(entities)
+
+
+class HonClearVacationButton(HonBaseEntity, ButtonEntity):
+    """Cancel the appliance's scheduled holiday window.
+
+    Writes the appliance's own "no window" sentinel to BOTH halves in one command, which
+    is what the official app does when the window is removed (the 2026-08 captures show
+    both dates back at that value and machMode back on the normal program). Sending both
+    together also keeps the pair valid at every instant -- a half-cleared window would
+    briefly read as inverted.
+    """
+
+    _attr_translation_key = "clear_vacation"
+    _attr_icon = "mdi:calendar-remove"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, appliance_id: str, client=None, *,
+                 command_name: str) -> None:
+        super().__init__(coordinator, appliance_id, client)
+        self._command_name = command_name
+        self._attr_unique_id = f"{appliance_id}_clear_vacation"
+
+    async def async_press(self) -> None:
+        appliance = self._appliance
+        client = self._hon_client
+        if not appliance or not client:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="appliance_or_client_unavailable",
+            )
+        params = {VAC_START_PARAM: VAC_UNSET_DATE, VAC_END_PARAM: VAC_UNSET_DATE}
+        try:
+            _LOGGER.info(
+                "Button: clearing the vacation window id=%s",
+                redact_id(self._appliance_id),
+            )
+            await async_send_command(
+                self.hass, client, appliance, self._command_name, params
+            )
+            await self._async_request_command_refresh()
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            _LOGGER.error("Clear vacation button: %s", err, exc_info=True)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_error",
+                translation_placeholders={"error": str(err)},
+            ) from err
 
 
 class HonProgramCommandButton(HonBaseEntity, ButtonEntity):

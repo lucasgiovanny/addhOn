@@ -334,6 +334,70 @@ class WriteTest(unittest.TestCase):
         self.assertEqual(commands["settings"].send_calls, 1)
 
 
+class UnsetWindowTest(unittest.TestCase):
+    """How "no holiday scheduled" is read and written (v5.25.0).
+
+    The appliance spells it 2000-01-01 on BOTH halves: the 2026-08 captures show a real
+    window (2026-08-18 -> 2026-08-22, machMode on the vac program) and then both dates
+    back at that value once it was cleared from the app, machMode back to normal.
+    """
+
+    UNSET = "2000-01-01"
+
+    def test_the_sentinel_reads_as_no_value(self) -> None:
+        # NOT as a holiday in the year 2000, which is what the entity used to show.
+        entities, _ = _setup(
+            attributes=_attrs(vacStartDate=self.UNSET, vacEndDate=self.UNSET)
+        )
+        for entity in entities:
+            with self.subTest(key=entity.entity_description.key):
+                self.assertIsNone(entity.native_value)
+
+    def test_setting_the_start_of_an_unset_window_opens_a_one_day_window(self) -> None:
+        # Without this the two entities dead-lock: the ordering guard refuses a start
+        # later than the (unset) end, so a window could only be started from its END.
+        import datetime
+
+        commands = _hw_commands()
+        entities, commands = _setup(
+            commands=commands,
+            attributes=_attrs(vacStartDate=self.UNSET, vacEndDate=self.UNSET),
+        )
+        start = next(
+            e for e in entities if e.entity_description.key == "vacation_start_date"
+        )
+        asyncio.run(start.async_set_value(datetime.date(2026, 9, 1)))
+        params = commands["settings"].parameters
+        self.assertEqual(params["vacStartDate"].value, "2026-09-01")
+        self.assertEqual(params["vacEndDate"].value, "2026-09-01")
+
+    def test_setting_the_end_of_an_unset_window_does_the_same(self) -> None:
+        import datetime
+
+        entities, commands = _setup(
+            attributes=_attrs(vacStartDate=self.UNSET, vacEndDate=self.UNSET)
+        )
+        end = next(
+            e for e in entities if e.entity_description.key == "vacation_end_date"
+        )
+        asyncio.run(end.async_set_value(datetime.date(2026, 9, 5)))
+        params = commands["settings"].parameters
+        self.assertEqual(params["vacStartDate"].value, "2026-09-05")
+        self.assertEqual(params["vacEndDate"].value, "2026-09-05")
+
+    def test_an_existing_window_is_not_touched_on_the_other_side(self) -> None:
+        import datetime
+
+        entities, commands = _setup()  # 2026-08-18 -> 2026-08-22
+        end = next(
+            e for e in entities if e.entity_description.key == "vacation_end_date"
+        )
+        asyncio.run(end.async_set_value(datetime.date(2026, 8, 25)))
+        params = commands["settings"].parameters
+        self.assertEqual(params["vacStartDate"].value, "2026-08-18")
+        self.assertEqual(params["vacEndDate"].value, "2026-08-25")
+
+
 class OrderingGuardTest(unittest.TestCase):
     def _assert_refused(self, entity, value, commands) -> None:
         from homeassistant.exceptions import HomeAssistantError

@@ -55,6 +55,7 @@ class HonAppliance:
         self._zone = zone
         self._additional_data: dict[str, Any] = {}
         self._command_history: list[dict[str, Any]] = []
+        self._command_payload: dict[str, str] = {}
         self._last_update: Optional[datetime] = None
         self._default_setting = HonParameter("", {}, "")
         self._connection = (
@@ -193,6 +194,12 @@ class HonAppliance:
         return self._additional_data
 
     @property
+    def command_payload(self) -> dict[str, str]:
+        """What the commands payload offered and what became of each entry (see
+        HonCommandLoader.command_payload)."""
+        return self._command_payload
+
+    @property
     def command_history(self) -> list[dict[str, Any]]:
         """Accepted-command history from the last command load (see HonCommandLoader).
 
@@ -279,6 +286,7 @@ class HonAppliance:
         self._additional_data = command_loader.additional_data
         self._appliance_model = command_loader.appliance_data
         self._command_history = command_loader.command_history
+        self._command_payload = command_loader.command_payload
         self.sync_params_to_command("settings")
 
     async def load_attributes(self) -> None:

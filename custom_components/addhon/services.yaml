@@ -46,3 +46,39 @@ send_command:
       example: '{"operationName": "grSetVacDate", "vacStartDate": "2026-09-01"}'
       selector:
         object:
+
+probe_settings_operation:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: addhon
+    parameter:
+      required: true
+      example: sterilizationTime
+      selector:
+        text:
+    value:
+      required: true
+      example: "07:00"
+      selector:
+        text:
+    command:
+      required: false
+      default: settings
+      selector:
+        text:
+    operations:
+      required: false
+      example: '["grSetSterilizationTime", "grSetSterilization"]'
+      selector:
+        object:
+    settle:
+      required: false
+      default: 12
+      selector:
+        number:
+          min: 3
+          max: 60
+          unit_of_measurement: s

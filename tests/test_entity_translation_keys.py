@@ -293,7 +293,15 @@ def _collect_code_keys() -> dict[str, set[str]]:
         | {d.translation_key for d in select._PROGRAM_OPTION_SELECTS}
         | {d.translation_key for d in select._AC_DIRECTION_SELECTS}
     )
-    used["button"] = {"start_program", "stop_program", "force_refresh", "reset_debug"}
+    # Fixed-key buttons: they set _attr_translation_key on the class rather than
+    # carrying a description row, so there is no table to read them from.
+    used["button"] = {
+        "start_program",
+        "stop_program",
+        "force_refresh",
+        "reset_debug",
+        "clear_vacation",
+    }
     # Vacation-window dates (HW/WH): translation_key defaults from description.key.
     used["date"] = {_tk(d) for descs in date.DATES.values() for d in descs}
     # Water heater (HW/WH): one fixed-key entity. Its `name` comes from the device
