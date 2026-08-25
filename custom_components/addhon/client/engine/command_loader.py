@@ -170,7 +170,11 @@ class HonCommandLoader:
         )
 
     def _set_last_category(
-        self, command: HonCommand, name: str, parameters: dict[str, Any]
+        self,
+        command: HonCommand,
+        name: str,
+        parameters: dict[str, Any],
+        program_name: str = "",
     ) -> HonCommand:
         """Point `name` at the category the last accepted command used.
 
@@ -188,6 +192,17 @@ class HonCommandLoader:
             category = self._clean_name(str(program))
         elif (category := parameters.pop("category", None)) is not None:
             category = str(category)
+        elif program_name:
+            # The command's own programName, when the payload names no category at all.
+            # For a category-split startProgram the program is carried BY the category
+            # (api.send_command derives programName from the active category's name), so
+            # such a payload legitimately has no `program` parameter -- live-observed on a
+            # heat pump water heater, whose accepted commands read
+            # {machMode, onOffStatus, tempSel} next to programName "PROGRAMS.HW.AUTO".
+            # Without this the recovery gave up and the schema's FIRST category stayed
+            # active, so the next write would have re-labelled the appliance with a
+            # program it was not running.
+            category = self._clean_name(str(program_name))
         else:
             return command
         # Same guard as the category setter: an unknown category leaves the default in
@@ -206,8 +221,11 @@ class HonCommandLoader:
             if (last_index := self._get_last_command_index(name)) is None:
                 continue
             last_command = self._command_history[last_index]
-            parameters = last_command.get("command", {}).get("parameters", {})
-            command = self._set_last_category(command, name, parameters)
+            last = last_command.get("command", {})
+            parameters = last.get("parameters", {})
+            command = self._set_last_category(
+                command, name, parameters, str(last.get("programName") or "")
+            )
             for key, data in command.settings.items():
                 if parameters.get(key) is None:
                     continue

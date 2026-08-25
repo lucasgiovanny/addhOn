@@ -394,6 +394,77 @@ class LastCategoryRecoveryTest(unittest.TestCase):
         )
 
 
+class ProgramNameRecoveryTest(unittest.TestCase):
+    """Recovery from the command's `programName` when the payload names no category.
+
+    Live finding on a heat pump water heater: for a category-split startProgram the
+    program is carried BY the category (api.send_command derives `programName` from the
+    active category's own name), so the accepted payload legitimately has no `program`
+    parameter -- its history reads {machMode, onOffStatus, tempSel} next to
+    programName "PROGRAMS.HW.AUTO". The recovery then gave up and the schema's FIRST
+    category stayed active, so the next write would have re-labelled the appliance with
+    a program it was not running.
+    """
+
+    def _recovered(self, history):
+        return _build(NaAppliance, DictApi(_RICH_COMMANDS, history=history))
+
+    @staticmethod
+    def _entry(program_name, parameters=None):
+        return [
+            {
+                "command": {
+                    "commandName": "startProgram",
+                    "programName": program_name,
+                    "parameters": parameters or {"tempSel": "63"},
+                }
+            }
+        ]
+
+    def test_program_name_selects_the_category(self) -> None:
+        app = self._recovered(self._entry("PROGRAMS.REF.SUPER_FREEZE"))
+        self.assertEqual(
+            "PROGRAMS.REF.SUPER_FREEZE", app.commands["startProgram"].category
+        )
+
+    def test_it_differs_from_the_default_category(self) -> None:
+        # The regression guard: without the fallback the default (first) category
+        # survives untouched.
+        default = _build(NaAppliance, DictApi(_RICH_COMMANDS))
+        self.assertNotEqual(
+            default.commands["startProgram"].category,
+            self._recovered(self._entry("PROGRAMS.REF.SUPER_FREEZE"))
+            .commands["startProgram"]
+            .category,
+        )
+
+    def test_a_program_parameter_still_wins(self) -> None:
+        # The payload is the stronger signal where it exists; programName is the fallback.
+        history = self._entry(
+            "PROGRAMS.REF.SUPER_FREEZE", {"program": "PROGRAMS.REF.SUPER_COOL"}
+        )
+        app = self._recovered(history)
+        self.assertEqual(
+            "PROGRAMS.REF.SUPER_COOL", app.commands["startProgram"].category
+        )
+
+    def test_an_unknown_program_name_keeps_the_default(self) -> None:
+        default = _build(NaAppliance, DictApi(_RICH_COMMANDS))
+        self.assertEqual(
+            default.commands["startProgram"].category,
+            self._recovered(self._entry("PROGRAMS.REF.GONE"))
+            .commands["startProgram"]
+            .category,
+        )
+
+    def test_no_program_name_at_all_keeps_the_default(self) -> None:
+        default = _build(NaAppliance, DictApi(_RICH_COMMANDS))
+        self.assertEqual(
+            default.commands["startProgram"].category,
+            self._recovered(self._entry(None)).commands["startProgram"].category,
+        )
+
+
 class ClusterBehaviorTest(unittest.TestCase):
     def test_send_prstr_and_programrules(self) -> None:
         snap = _native_snapshot()

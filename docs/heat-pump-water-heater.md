@@ -13,6 +13,22 @@ The appliance exposes exactly two commands, and they are not equal.
 | `startProgram` | `program` (auto / eco / elec / vac), `tempSel`, `onOffStatus`, `machMode` |
 | `settings` | everything else — **but only for one operation at a time** |
 
+`settings` is split into two categories, and only the first is useful: `setParameters`
+holds the 43 parameters above, `setConfig` holds `httpEndpoint` and `mqttEndpoint`
+(cloud plumbing). So there is no second operation hiding behind the category selector —
+confirmed on the 2026-08-25 dump.
+
+`startProgram` is split into one category **per program** (`auto` / `eco` / `elec` /
+`vac`), and this is load-bearing: the program travels as the command's `programName`,
+derived from the active category, **not** as a payload parameter. The appliance's own
+accepted commands read `{machMode, onOffStatus, tempSel}` next to
+`programName: "PROGRAMS.HW.AUTO"`. Two consequences, both fixed in v5.23.1:
+
+- every setpoint or power write re-asserts the program the appliance *reports*, so the
+  envelope can never tell a unit running `eco` to start `auto`;
+- the command loader now recovers the active category from `programName` when the
+  payload names none, instead of leaving the schema's first category selected.
+
 `settings` declares `operationName` as a **mandatory `fixed` parameter offering a single
 value**, and on this model that value is `grSetVacDate` on every capture, a month apart.
 Since `command.send()` transmits the whole parameter group, *every* write through
@@ -174,8 +190,8 @@ Two sections exist specifically to answer the one question still open — **whic
 operations does `settings` accept?**
 
 - `command_categories` (v5.22.0): the command categories the active one hides. On this
-  appliance `settings` enumerates both `setConfig` and `setParameters` while only one is
-  ever loaded.
+  appliance it answered one question and closed it — `settings`' hidden `setConfig`
+  category is only cloud endpoints, so the other operations are not there.
 - `command_history` (v5.23.0): the envelopes actually **sent** to the appliance, with a
   `source` field saying whether each came from the hOn app or from this integration. The
   command definition only ever shows the operation the appliance is currently pinned to;

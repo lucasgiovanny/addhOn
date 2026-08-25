@@ -713,6 +713,82 @@ class WriteTest(unittest.TestCase):
         self.assertEqual(commands["startProgram"].parameters["onOffStatus"].value, "1")
 
 
+class StartProgramEnvelopeTest(unittest.TestCase):
+    """Every startProgram write must name the program the appliance is RUNNING.
+
+    The program rides on the command CATEGORY, not on a payload parameter:
+    api.send_command derives `programName` from the active category's own name, and the
+    real appliance's accepted commands carry only {machMode, onOffStatus, tempSel}. After
+    a restart the active category is the schema's FIRST one, so a setpoint or power write
+    sent on it would have told a device running `eco` to start `auto`.
+    """
+
+    def _entity(self, commands, running: str):
+        # Command sitting on "auto" (the schema's first), appliance actually on `running`.
+        added = asyncio.run(
+            _build(
+                "HW",
+                FakeAppliance(commands),
+                _attrs(**{"startProgram.program": running}),
+                client=FakeClient(),
+            )
+        )
+        return added[0]
+
+    def test_a_setpoint_write_re_asserts_the_running_program(self) -> None:
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        commands = _hw_commands("auto")
+        entity = self._entity(commands, "eco")
+        asyncio.run(entity.async_set_temperature(**{ATTR_TEMPERATURE: 58.0}))
+        start = commands["startProgram"]
+        self.assertEqual(start.parameters["tempSel"].value, 58)
+        self.assertEqual(start.parameters["program"].value, "eco")
+
+    def test_a_power_write_re_asserts_the_running_program(self) -> None:
+        commands = _hw_commands("auto")
+        entity = self._entity(commands, "elec")
+        asyncio.run(entity.async_turn_off())
+        start = commands["startProgram"]
+        self.assertEqual(start.parameters["onOffStatus"].value, "0")
+        self.assertEqual(start.parameters["program"].value, "elec")
+
+    def test_an_unknown_running_program_falls_back_to_a_plain_send(self) -> None:
+        # Never a guessed program: with nothing to re-assert the write goes out on the
+        # active category, exactly as before.
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        commands = _hw_commands("auto")
+        attributes = _attrs()
+        attributes.pop("startProgram.program")
+        commands["startProgram"].parameters["program"] = ProgramParam(
+            ["auto", "eco", "elec", "vac"], "auto"
+        )
+        added = asyncio.run(
+            _build("HW", FakeAppliance(commands), attributes, client=FakeClient())
+        )
+        asyncio.run(added[0].async_set_temperature(**{ATTR_TEMPERATURE: 58.0}))
+        start = commands["startProgram"]
+        self.assertEqual(start.parameters["tempSel"].value, 58)
+        self.assertEqual(start.parameters["program"].value, "auto")
+
+    def test_a_settings_setpoint_is_not_routed_through_start_program(self) -> None:
+        # A model whose setpoint lives on an unpinned settings command keeps the plain
+        # path: there is no program envelope to worry about there.
+        from homeassistant.const import ATTR_TEMPERATURE
+
+        commands = _hw_commands(pinned_operation=None)
+        del commands["startProgram"].parameters["tempSel"]
+        added = asyncio.run(
+            _build("HW", FakeAppliance(commands), _attrs(), client=FakeClient())
+        )
+        entity = added[0]
+        self.assertEqual(entity._temp_command, "settings")
+        asyncio.run(entity.async_set_temperature(**{ATTR_TEMPERATURE: 60.0}))
+        self.assertEqual(commands["settings"].parameters["tempSel"].value, 60)
+        self.assertEqual(commands["startProgram"].send_calls, 0)
+
+
 class PowerCommandResolutionTest(unittest.TestCase):
     """Where the power flag is written -- the v5.22.0 fix.
 

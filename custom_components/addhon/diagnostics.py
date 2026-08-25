@@ -377,12 +377,15 @@ def _command_categories(appliance) -> dict:
         categories = getattr(cmd, "categories", None)
         if not isinstance(categories, Mapping) or len(categories) < 2:
             continue
-        active = getattr(cmd, "category", None)
         per_category: dict = {}
         for cat_name, cat in categories.items():
             params = getattr(cat, "parameters", None)
             per_category[str(cat_name)] = {
-                "active": cat_name == active,
+                # By OBJECT IDENTITY, not by name: the dict key is the cleaned category
+                # name ("auto") while the command's own `category` is the raw one it was
+                # loaded under ("PROGRAMS.HW.AUTO"), so comparing the two marked every
+                # category inactive.
+                "active": cat is cmd,
                 "parameters": (
                     {str(p_name): _param_schema(p) for p_name, p in params.items()}
                     if isinstance(params, Mapping)

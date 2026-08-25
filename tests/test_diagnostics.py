@@ -535,21 +535,32 @@ class CommandCategoriesTest(unittest.TestCase):
     operations the appliance really accepts cannot be confirmed from the active category.
     """
 
-    class _Categorised:
-        def __init__(self, parameters, categories, category):
-            self.parameters = parameters
-            self.categories = categories
+    class _Categorised(FakeCommand):
+        """A command that knows its siblings, as the engine builds them: every category
+        shares ONE `categories` dict, and appliance.commands holds one of the category
+        objects itself (the loader keeps `setParameters` where it exists).
+
+        `category` is the RAW name the category was loaded under, which is why the active
+        one cannot be found by comparing it to the cleaned dict key.
+        """
+
+        def __init__(self, parameters, category):
+            super().__init__(parameters)
             self.category = category
+            self.categories = {}
 
     def _appliance(self):
-        set_config = FakeCommand({"operationName": FakeParam(value="grSetOnOff")})
-        set_parameters = FakeCommand({"operationName": FakeParam(value="grSetVacDate")})
-        settings = self._Categorised(
-            set_parameters.parameters,
-            {"setConfig": set_config, "setParameters": set_parameters},
-            "setParameters",
+        set_config = self._Categorised(
+            {"operationName": FakeParam(value="grSetOnOff")}, "SETCONFIG"
         )
-        return FakeAppliance(commands={"settings": settings})
+        set_parameters = self._Categorised(
+            {"operationName": FakeParam(value="grSetVacDate")}, "SETPARAMETERS"
+        )
+        shared = {"setConfig": set_config, "setParameters": set_parameters}
+        set_config.categories = shared
+        set_parameters.categories = shared
+        # What the loader leaves in appliance.commands: the category object itself.
+        return FakeAppliance(commands={"settings": set_parameters})
 
     def test_hidden_categories_are_dumped(self):
         out = diagnostics._command_categories(self._appliance())
@@ -561,6 +572,10 @@ class CommandCategoriesTest(unittest.TestCase):
         )
 
     def test_the_active_category_is_marked(self):
+        # Matched by IDENTITY: the raw `category` name ("SETPARAMETERS") never equals the
+        # cleaned dict key ("setParameters"), so a name comparison marked every category
+        # inactive -- which is exactly what the first real dump showed for startProgram's
+        # four program categories.
         out = diagnostics._command_categories(self._appliance())
         self.assertIs(out["settings"]["setParameters"]["active"], True)
         self.assertIs(out["settings"]["setConfig"]["active"], False)

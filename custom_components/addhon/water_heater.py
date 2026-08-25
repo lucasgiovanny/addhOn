@@ -27,6 +27,15 @@ WRITE PATHS (ground-truthed on a real HP250M7C-F9, see number.py / select.py):
   HW `settings` command is silently ignored (live-verified: the device reverted the
   setpoint on the next poll) while the app writes mode+temperature via startProgram;
 - the operating mode is a startProgram PROGRAM, sent via async_send_program (swap-aware);
+- EVERY startProgram write re-asserts the running program (v5.23.1). The program is
+  carried by the command CATEGORY, not by a payload parameter: api.send_command derives
+  `programName` from the active category's own name, and the appliance's command history
+  shows the transmitted parameters are only machMode/onOffStatus/tempSel. So a write sent
+  on whatever category happens to be active tells the appliance to run THAT program --
+  and after a restart the active one is the schema's first (`auto`), because the loader
+  can only recover the category from a `program`/`category` key these payloads do not
+  carry. Selecting the reported program first makes the envelope match what the appliance
+  is actually running, which is also the shape the app sends;
 - POWER is resolved the same way, on `startProgram` FIRST (v5.22.0). It used to go
   through `settings`, and did nothing at all: that command declares `operationName` as a
   MANDATORY fixed parameter pinned to "grSetVacDate" -- identical across four diagnostics
@@ -443,11 +452,13 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         # validates the step. An integer serializes as "55", never "55.0" (an enum/range
         # setter rejects the latter).
         send_value = str(int(number)) if number.is_integer() else str(number)
-        await self._async_send(
-            {HW_TEMP_PARAM: send_value},
-            self._temp_command,
-            f"{HW_TEMP_PARAM}={send_value}",
-        )
+        what = f"{HW_TEMP_PARAM}={send_value}"
+        if self._temp_command == STARTPROGRAM_COMMAND:
+            # Same rule as the power write: the setpoint travels in an envelope that also
+            # names a program, so it must name the RUNNING one.
+            await self._async_write_start_program({HW_TEMP_PARAM: send_value}, what)
+        else:
+            await self._async_send({HW_TEMP_PARAM: send_value}, self._temp_command, what)
         await self._async_request_command_refresh()
 
     # --- power -------------------------------------------------------------------
@@ -481,11 +492,40 @@ class HonWaterHeater(HonBaseEntity, WaterHeaterEntity):
         """Send onOffStatus WITHOUT refreshing (the callers batch the refresh)."""
         if self._on_off_command is None:
             return
-        await self._async_send(
-            {HW_ON_OFF_PARAM: value},
-            self._on_off_command,
-            f"{HW_ON_OFF_PARAM}={value}",
+        what = f"{HW_ON_OFF_PARAM}={value}"
+        if self._power_on_start_program:
+            await self._async_write_start_program({HW_ON_OFF_PARAM: value}, what)
+            return
+        await self._async_send({HW_ON_OFF_PARAM: value}, self._on_off_command, what)
+
+    async def _async_write_start_program(self, params: dict[str, str], what: str) -> None:
+        """Apply `params` to startProgram and send it, RE-ASSERTING the running program.
+
+        See the module docstring: the program rides on the command CATEGORY, so sending
+        on the wrong one silently changes the appliance's mode. Selecting the mode the
+        appliance REPORTS costs nothing (it is already running it) and makes the envelope
+        honest.
+
+        Falls back to a plain send when the mode cannot be read or the device exposes no
+        program enum -- no worse than before, and never a guessed program.
+        """
+        mode = self._live_mode
+        if mode is None or self._program_param_name is None:
+            _LOGGER.debug(
+                "WaterHeater debug: %s on the active startProgram category (mode "
+                "unknown) id=%s",
+                what,
+                redact_id(self._appliance_id),
+            )
+            await self._async_send(params, STARTPROGRAM_COMMAND, what)
+            return
+        _LOGGER.debug(
+            "WaterHeater debug: %s on startProgram, re-asserting program '%s' id=%s",
+            what,
+            mode,
+            redact_id(self._appliance_id),
         )
+        await self._async_send_mode(mode, params)
 
     # --- operating mode ----------------------------------------------------------
 
