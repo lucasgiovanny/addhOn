@@ -150,20 +150,50 @@ class FixedParam:
         self.value = value
 
 
+class RangeParam:
+    """Mimics HonParameterRange: numeric only, and it REFUSES anything else -- which is
+    the whole point of the clobbering test below."""
+
+    def __init__(self, value, mn, mx, mandatory: int = 0) -> None:
+        self.min = mn
+        self.max = mx
+        self.step = 1
+        self.mandatory = mandatory
+        self._v = float(value)
+
+    @property
+    def value(self):
+        return self._v
+
+    @value.setter
+    def value(self, v):
+        self._v = float(str(v).replace(",", "."))
+
+
 class RecordingCommand:
     def __init__(self, parameters) -> None:
         self.parameters = parameters
         self.send_calls = 0
         self.sent = None
 
+    @property
+    def parameter_groups(self):
+        return {"parameters": {k: str(p.value) for k, p in self.parameters.items()}}
+
     async def send(self) -> None:
         self.send_calls += 1
-        self.sent = {k: p.value for k, p in self.parameters.items()}
+        self.sent = {k: str(p.value) for k, p in self.parameters.items()}
+
+    async def send_parameters(self, params) -> None:
+        self.send_calls += 1
+        self.sent = dict(params)
 
 
 class FakeAppliance:
-    def __init__(self, commands) -> None:
+    def __init__(self, commands, reported: dict | None = None) -> None:
         self.commands = commands
+        # The device shadow, as the engine holds it.
+        self.attributes = {"parameters": dict(reported or {})}
 
 
 class FakeClient:
@@ -332,6 +362,101 @@ class WriteTest(unittest.TestCase):
         start = _entity(added, "vacation_start_date")
         asyncio.run(start.async_set_value(datetime.date(2026, 8, 22)))
         self.assertEqual(commands["settings"].send_calls, 1)
+
+
+class MistypedParameterPreservationTest(unittest.TestCase):
+    """A settings write must not wipe the parameters the cloud schema mistypes.
+
+    The command sends its whole parameter group, so every write re-sends the fields it is
+    not there to change. On the HP250M7C-F9 the cloud declares `timingPowerOn` /
+    `timingPowerOff` as range[0,1] and `opp1EcoDays` as range[0,40], while the appliance
+    reports "00:00" and "7F". The load-time sync cannot adopt those, the parameter keeps
+    its schema default of 0, and the write sends that 0 -- wiping a timer or a day mask
+    set in the app. Live-observed on 2026-08-25: writing an off-peak window took both
+    timer times from "00:00" to something that is no longer a clock reading.
+    """
+
+    def _appliance(self):
+        commands = {
+            "settings": RecordingCommand(
+                {
+                    "operationName": FixedParam("grSetVacDate"),
+                    "vacStartDate": FixedParam("2000-01-01"),
+                    # Mistyped by the cloud: a clock reading declared as a 0/1 range, and
+                    # a hex day mask declared as a 0..40 range.
+                    "timingPowerOn": RangeParam(0, 0, 1, mandatory=1),
+                    "opp1EcoDays": RangeParam(0, 0, 40, mandatory=1),
+                    # Correctly typed: must keep the COMMAND's value, not the shadow's.
+                    "tempSel": RangeParam(63, 35, 75),
+                }
+            )
+        }
+        reported = {
+            "timingPowerOn": "09:00",
+            "opp1EcoDays": "7F",
+            # An off-grid reading, which is why a correctly typed range must NOT be
+            # overridden from the shadow: sending 62.8 raw would be rejected.
+            "tempSel": "62.8",
+        }
+        return FakeAppliance(commands, reported), commands
+
+    def test_only_the_mistyped_parameters_are_preserved(self) -> None:
+        from custom_components.addhon.hon_commands import shadow_overrides
+
+        appliance, commands = self._appliance()
+        self.assertEqual(
+            shadow_overrides(commands["settings"], appliance, set()),
+            {"timingPowerOn": "09:00", "opp1EcoDays": "7F"},
+        )
+
+    def test_a_parameter_being_written_is_never_overridden(self) -> None:
+        from custom_components.addhon.hon_commands import shadow_overrides
+
+        appliance, commands = self._appliance()
+        overrides = shadow_overrides(
+            commands["settings"], appliance, {"timingPowerOn"}
+        )
+        self.assertNotIn("timingPowerOn", overrides)
+
+    def test_the_send_carries_the_appliance_values(self) -> None:
+        from custom_components.addhon.hon_commands import async_send_command
+
+        appliance, commands = self._appliance()
+        asyncio.run(
+            async_send_command(
+                FakeHass(), FakeClient(), appliance, "settings",
+                {"vacStartDate": "2026-09-01"},
+            )
+        )
+        sent = commands["settings"].sent
+        self.assertEqual(sent["vacStartDate"], "2026-09-01")
+        self.assertEqual(sent["timingPowerOn"], "09:00")
+        self.assertEqual(sent["opp1EcoDays"], "7F")
+        # The correctly typed setpoint keeps the command's on-grid value.
+        self.assertEqual(sent["tempSel"], "63.0")
+
+    def test_an_appliance_with_nothing_mistyped_sends_normally(self) -> None:
+        # No overrides -> the ordinary command.send() path, byte for byte as before.
+        from custom_components.addhon.hon_commands import async_send_command
+
+        commands = {
+            "settings": RecordingCommand({"lightStatus": RangeParam(0, 0, 1)})
+        }
+        appliance = FakeAppliance(commands, {"lightStatus": "0"})
+        asyncio.run(
+            async_send_command(
+                FakeHass(), FakeClient(), appliance, "settings", {"lightStatus": "1"}
+            )
+        )
+        self.assertEqual(commands["settings"].sent, {"lightStatus": "1.0"})
+
+    def test_an_appliance_that_reports_nothing_is_untouched(self) -> None:
+        from custom_components.addhon.hon_commands import shadow_overrides
+
+        commands = {"settings": RecordingCommand({"timingPowerOn": RangeParam(0, 0, 1)})}
+        self.assertEqual(
+            shadow_overrides(commands["settings"], FakeAppliance(commands), set()), {}
+        )
 
 
 class UnsetWindowTest(unittest.TestCase):

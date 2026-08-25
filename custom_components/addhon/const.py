@@ -8,7 +8,7 @@ DOMAIN = "addhon"
 # Supported platforms
 PLATFORMS = [
     "climate", "water_heater", "sensor", "binary_sensor", "switch", "select",
-    "button", "number", "fan", "date",
+    "button", "number", "fan", "date", "time",
 ]
 
 # Update interval in seconds

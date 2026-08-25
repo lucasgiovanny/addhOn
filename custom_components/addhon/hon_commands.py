@@ -76,16 +76,26 @@ def find_settings_param(
 # belong to `operationName` and silently drops everything else in the same payload.
 SETTINGS_OPERATION_PARAM = "operationName"
 
-# Parameters each KNOWN operation actually writes. An operation absent from this table is
-# never treated as blocking: "not ground-truthed" is not "writes nothing".
-SETTINGS_OPERATION_PARAMS: dict[str, frozenset[str]] = {
-    # Heat pump water heater (HP250M7C-F9): the app schedules holiday BY DATES through
-    # this operation, and it is the operation the cloud pins the whole `settings` command
-    # to on that model. Live-verified in both directions: a vacation window written from
-    # Home Assistant reaches the device (v5.19.0), while a tempSel (v5.10) and an
-    # onOffStatus (v5.22.0) sent in the very same payload are silently dropped.
-    "grSetVacDate": frozenset({"vacStartDate", "vacEndDate"}),
-}
+# WHAT A PINNED SETTINGS COMMAND ACTUALLY WRITES: its MANDATORY parameters.
+#
+# Five live data points on a real HP250M7C-F9, and they agree perfectly:
+#
+#   vacStartDate / vacEndDate   mandatory 1   written OK   (v5.19.0)
+#   opp1EcoStartTime1 / EndTime1 mandatory 1  written OK   (2026-08-25, 11:00-16:00)
+#   tempSel                     mandatory 0   dropped      (v5.10, live-verified)
+#   onOffStatus                 mandatory 0   dropped      (v5.22.0, live-verified)
+#   sterilizationTime           mandatory 0   dropped      (probed twice, 2026-08-25)
+#
+# So the rule is NOT "only the operation the command is named after": it is "the
+# mandatory group". On this appliance that group is exactly the schedule subsystem --
+# the holiday window, the off-peak windows of both period groups, their day mask, the
+# quiet windows and the daily power timer -- and none of the temperature, boost, quiet or
+# anti-legionella toggles, which are the ones that never worked. The operation name turned
+# out to be a red herring: overriding it changed nothing in either direction.
+#
+# Read off the live schema rather than hard-coded, so a model whose settings command is a
+# free write (no pinned operationName) is never gated, and one that marks a different
+# group mandatory gates itself correctly.
 
 
 def settings_operation(appliance, command_name: str = "settings") -> str | None:
@@ -173,18 +183,24 @@ def settings_write_blocked(
 ) -> str | None:
     """The pinned operation that would SWALLOW a write of `param_name`, or None.
 
-    The capability gate for every settings-backed control: a device whose settings
-    command only performs one KNOWN operation cannot be written through it for anything
-    outside that operation, and a control that reports success while the appliance
-    ignores it is worse than no control at all.
+    The capability gate for every settings-backed control. A settings command pinned to a
+    single operation writes its MANDATORY parameter group and drops the rest (see the
+    evidence above), so a non-mandatory parameter cannot be written through it -- and a
+    control that reports success while the appliance ignores it is worse than no control.
+
+    Returns None (not blocked) whenever the command is a free write, or the parameter is
+    mandatory, or the schema does not say. Never blocks on a guess.
     """
     operation = settings_operation(appliance, command_name)
     if operation is None:
         return None
-    carried = SETTINGS_OPERATION_PARAMS.get(operation)
-    if carried is None or param_name in carried:
+    param = command_param(appliance, command_name, param_name)
+    if param is None:
         return None
-    return operation
+    mandatory = getattr(param, "mandatory", None)
+    if mandatory is None:
+        return None
+    return None if mandatory else operation
 
 
 def param_values(param) -> list[str]:
@@ -285,6 +301,73 @@ def _decimals(number: float) -> int:
     return -exponent if isinstance(exponent, int) and exponent < 0 else 0
 
 
+def _shadow_value(appliance, name: str):
+    """The appliance's OWN reading for `name`, or None when it does not report one.
+
+    Reads the same place `HonAppliance.sync_params_to_command` does, so the two agree on
+    what the appliance is saying.
+    """
+    attributes = getattr(appliance, "attributes", None)
+    if not isinstance(attributes, dict):
+        return None
+    reported = attributes.get("parameters")
+    if not isinstance(reported, dict):
+        return None
+    value = reported.get(name)
+    value = getattr(value, "value", value)
+    if value is None or value == "":
+        return None
+    return value
+
+
+def _param_accepts(param, raw) -> bool:
+    """Whether `param` can hold `raw` at all, judged from its declared shape."""
+    if param_range(param) is not None:
+        try:
+            float(str(raw).replace(",", "."))
+        except (TypeError, ValueError):
+            return False
+        return True
+    values = param_values(param)
+    if len(values) > 1:  # a real enumeration; a "fixed" param reports its single value
+        return str(raw) in values
+    return True
+
+
+def shadow_overrides(command, appliance, requested) -> dict[str, str]:
+    """Parameters whose declared type CANNOT hold the value the appliance reports.
+
+    A command sends its whole parameter group, so every send re-writes the parameters it
+    is not there to change. That is normally harmless -- they were synced from the
+    appliance at load. It is NOT harmless where the CLOUD SCHEMA IS WRONG ABOUT THE TYPE:
+    the HP250M7C-F9 declares `timingPowerOn` and `timingPowerOff` (its daily power timer)
+    as range[0,1] and `opp1EcoDays` (the off-peak day mask) as range[0,40], while the
+    appliance reports them as "00:00" and "7F". The sync cannot adopt those values, the
+    parameter keeps its schema default of 0, and every settings write sends that 0 --
+    silently wiping a timer or a day mask the user set in the app. Live-observed on
+    2026-08-25: writing an off-peak window took both timer times from "00:00" to a value
+    that is no longer a clock reading at all.
+
+    So those parameters are transmitted at the appliance's own value instead. Narrow on
+    purpose: only where the parameter demonstrably cannot hold the reading, and never for
+    one the caller is explicitly writing. Everything else keeps the command's value, and
+    that matters -- a shadow can report an OFF-GRID number for a range setpoint, and
+    sending it raw would get the whole command rejected (see sync_params_to_command).
+    """
+    parameters = getattr(command, "parameters", None)
+    if not isinstance(parameters, dict):
+        return {}
+    overrides: dict[str, str] = {}
+    for name, param in parameters.items():
+        if name in requested:
+            continue
+        raw = _shadow_value(appliance, name)
+        if raw is None or _param_accepts(param, raw):
+            continue
+        overrides[name] = str(raw)
+    return overrides
+
+
 async def async_send_command(
     hass,
     client,
@@ -335,7 +418,23 @@ async def async_send_command(
                 for key, value in params.items():
                     command_params[key].value = value
                     _LOGGER.debug("Command %s: '%s' = %s", command_name, key, value)
-                await command.send()
+                overrides = shadow_overrides(command, appliance, set(params))
+                if overrides:
+                    # Send the group explicitly, with the appliance's own values for the
+                    # parameters its schema mistypes. send_parameters (not send_exact)
+                    # keeps the optimistic shadow sync that send() would have done.
+                    payload = dict(
+                        getattr(command, "parameter_groups", {}).get("parameters", {})
+                    )
+                    payload.update(overrides)
+                    _LOGGER.debug(
+                        "Command %s: preserving %s from the appliance's own reading",
+                        command_name,
+                        sorted(overrides),
+                    )
+                    await command.send_parameters(payload)
+                else:
+                    await command.send()
             except Exception:
                 restore_params(command_params, snapshots)
                 raise

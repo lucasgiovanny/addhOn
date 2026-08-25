@@ -1116,6 +1116,38 @@
       "purifier": {
         "name": "Purifier"
       }
+    },
+    "time": {
+      "eco_window_1_start": {
+        "name": "Off-peak window 1 start"
+      },
+      "eco_window_1_end": {
+        "name": "Off-peak window 1 end"
+      },
+      "eco_window_2_start": {
+        "name": "Off-peak window 2 start"
+      },
+      "eco_window_2_end": {
+        "name": "Off-peak window 2 end"
+      },
+      "eco_window_3_start": {
+        "name": "Off-peak window 3 start"
+      },
+      "eco_window_3_end": {
+        "name": "Off-peak window 3 end"
+      },
+      "silent_window_1_start": {
+        "name": "Silent window 1 start"
+      },
+      "silent_window_1_end": {
+        "name": "Silent window 1 end"
+      },
+      "silent_window_2_start": {
+        "name": "Silent window 2 start"
+      },
+      "silent_window_2_end": {
+        "name": "Silent window 2 end"
+      }
     }
   },
   "exceptions": {

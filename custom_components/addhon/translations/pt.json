@@ -1116,6 +1116,38 @@
       "purifier": {
         "name": "Purificador"
       }
+    },
+    "time": {
+      "eco_window_1_start": {
+        "name": "Início da janela de vazio 1"
+      },
+      "eco_window_1_end": {
+        "name": "Fim da janela de vazio 1"
+      },
+      "eco_window_2_start": {
+        "name": "Início da janela de vazio 2"
+      },
+      "eco_window_2_end": {
+        "name": "Fim da janela de vazio 2"
+      },
+      "eco_window_3_start": {
+        "name": "Início da janela de vazio 3"
+      },
+      "eco_window_3_end": {
+        "name": "Fim da janela de vazio 3"
+      },
+      "silent_window_1_start": {
+        "name": "Início da janela silenciosa 1"
+      },
+      "silent_window_1_end": {
+        "name": "Fim da janela silenciosa 1"
+      },
+      "silent_window_2_start": {
+        "name": "Início da janela silenciosa 2"
+      },
+      "silent_window_2_end": {
+        "name": "Fim da janela silenciosa 2"
+      }
     }
   },
   "exceptions": {

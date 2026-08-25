@@ -141,10 +141,11 @@ class RangeParam:
     str_to_float (int() first, catches only ValueError -> a fractional float would
     be truncated; a string "5.5" stays 5.5). Used to test the truncation fix."""
 
-    def __init__(self, value, mn, mx, step) -> None:
+    def __init__(self, value, mn, mx, step, mandatory: int = 0) -> None:
         self.min = mn
         self.max = mx
         self.step = step
+        self.mandatory = mandatory
         self._v = self._coerce(value)
 
     @staticmethod
@@ -285,9 +286,14 @@ async def _build(app_type: str, appliance, attributes: dict, client=None) -> lis
 
 
 class FixedParam:
-    """Mimics HonParameterFixed: one declared value, and a setter that does not validate."""
+    """Mimics HonParameterFixed: one declared value, and a setter that does not validate.
 
-    def __init__(self, value) -> None:
+    `mandatory` matters: on a settings command pinned to one operation it is what decides
+    whether the appliance applies the parameter at all (see settings_write_blocked).
+    """
+
+    def __init__(self, value, mandatory: int = 0) -> None:
+        self.mandatory = mandatory
         self._value = str(value)
 
     @property
@@ -311,14 +317,17 @@ def _hw_commands(*, pinned_operation: str | None = "grSetVacDate") -> dict:
     outside that operation.
     """
     params = {
+        # Every auxiliary setpoint is mandatory 0 on the real schema -- which is exactly
+        # why none of them can be written through this command.
         "hcTempSel": RangeParam(65, 55, 75, 1),
         "pvTempSel": RangeParam(65, 55, 75, 1),
         "sgTempSel": RangeParam(65, 55, 75, 1),
         "sterilizationTempSel": RangeParam(70, 55, 75, 1),
     }
     if pinned_operation is not None:
-        params["operationName"] = FixedParam(pinned_operation)
-        params["vacStartDate"] = FixedParam("2000-01-01")
+        params["operationName"] = FixedParam(pinned_operation, mandatory=1)
+        # The window IS mandatory, and it is the half of this command that works.
+        params["vacStartDate"] = FixedParam("2000-01-01", mandatory=1)
     return {"settings": RecordingCommand(params)}
 
 
@@ -452,21 +461,39 @@ class PinnedSettingsWriteTest(unittest.TestCase):
         self.assertEqual(commands["settings"].send_calls, 1)
         self.assertEqual(commands["settings"].parameters["pvTempSel"].value, 70)
 
-    def test_an_unknown_operation_does_not_block(self) -> None:
+    def test_the_operation_name_itself_does_not_decide(self) -> None:
+        # The name turned out to be a red herring: what a pinned settings command writes
+        # is its MANDATORY group, whatever the operation is called.
         pv, commands = self._pv(pinned_operation="grSetSomethingNew")
-        asyncio.run(pv.async_set_native_value(70.0))
-        self.assertEqual(commands["settings"].send_calls, 1)
+        from homeassistant.exceptions import HomeAssistantError
 
-    def test_a_parameter_the_operation_does_carry_is_allowed(self) -> None:
-        # grSetVacDate writes the vacation dates: those must keep working (they are the
-        # one thing this command demonstrably does -- the window written from Home
-        # Assistant reached the real appliance).
+        with self.assertRaises(HomeAssistantError):
+            asyncio.run(pv.async_set_native_value(70.0))
+        self.assertEqual(commands["settings"].send_calls, 0)
+
+    def test_a_mandatory_parameter_is_allowed(self) -> None:
+        # The vacation window is mandatory, and it is the half of this command that
+        # demonstrably works -- the window written from Home Assistant reached the real
+        # appliance, as did an off-peak window (2026-08-25).
         from custom_components.addhon.hon_commands import settings_write_blocked
 
         appliance = FakeAppliance(_hw_commands())
         self.assertIsNone(settings_write_blocked(appliance, "vacStartDate"))
         self.assertEqual(
-            settings_write_blocked(appliance, "boostStatus"), "grSetVacDate"
+            settings_write_blocked(appliance, "pvTempSel"), "grSetVacDate"
+        )
+
+    def test_a_parameter_without_mandatory_metadata_is_never_blocked(self) -> None:
+        # Missing schema information is not evidence: never refuse on a guess.
+        from custom_components.addhon.hon_commands import settings_write_blocked
+
+        class Bare:
+            value = "1"
+
+        commands = _hw_commands()
+        commands["settings"].parameters["mystery"] = Bare()
+        self.assertIsNone(
+            settings_write_blocked(FakeAppliance(commands), "mystery")
         )
 
 

@@ -30,11 +30,27 @@ accepted commands read `{machMode, onOffStatus, tempSel}` next to
   payload names none, instead of leaving the schema's first category selected.
 
 `settings` declares `operationName` as a **mandatory `fixed` parameter offering a single
-value**, and on this model that value is `grSetVacDate` on every capture, a month apart.
-Since `command.send()` transmits the whole parameter group, *every* write through
-`settings` reaches the appliance labelled "set the vacation dates" — and the appliance
-acts on the dates and silently drops the rest. The cloud accepts the command either way,
-so nothing looks like an error.
+value** — `grSetVacDate` on every capture, a month apart — and `command.send()` transmits
+the whole parameter group, so every write reaches the appliance under that label. The
+cloud accepts it either way, so a dropped write never looks like an error.
+
+**What actually decides is the `mandatory` flag, not the operation name.** Six live data
+points, without exception:
+
+| parameter | `mandatory` | result |
+|---|---|---|
+| `vacStartDate` / `vacEndDate` | 1 | written OK (v5.19.0) |
+| `opp1EcoStartTime1` / `EndTime1` | 1 | written OK — 11:00-16:00, 2026-08-25 |
+| `tempSel` | 0 | dropped (v5.10.0, live-verified) |
+| `onOffStatus` | 0 | dropped (v5.22.0, live-verified) |
+| `sterilizationTime` | 0 | dropped (probed twice, 2026-08-25) |
+
+A pinned settings command writes its **mandatory group**. On this appliance that group is
+exactly the schedule subsystem — the holiday window, the off-peak windows of both period
+groups, their day mask, the quiet windows and the daily power timer — and none of the
+temperature, boost, quiet or anti-legionella toggles, which are the ones that never
+worked. Overriding `operationName` changed nothing in either direction: the name is a red
+herring.
 
 That is why:
 
@@ -45,10 +61,18 @@ That is why:
   on 2026-08-25: a `startProgram` carrying `onOffStatus: "0"` was accepted and the
   appliance reported itself off;
 - the **vacation window** works, because it *is* the pinned operation;
+- the **off-peak and quiet windows are writable** as `time` entities (v5.26.0), because
+  they are mandatory;
 - the remaining `settings` toggles and setpoints (boost, silent, child lock,
-  anti-legionella enable/temperature, the PV/SG/HC setpoints) **read** correctly but
-  refuse to write, with a clear error naming the operation that would swallow them.
-  Change those in the hOn app.
+  anti-legionella enable/temperature, the PV/SG/HC setpoints) are all mandatory 0: they
+  **read** correctly but refuse to write, with a clear error. Change those in the hOn app.
+
+One more consequence, fixed in v5.26.0: because a command sends its whole parameter
+group, a write also re-sends the fields it is not changing. The cloud mistypes three of
+them — `timingPowerOn` / `timingPowerOff` as `range[0,1]` and `opp1EcoDays` as
+`range[0,40]`, while the appliance reports `"00:00"` and `"7F"` — so the parameter could
+never hold its own value and every settings write sent `0` instead, wiping a timer or a
+day mask set in the app. Those three are now transmitted at the appliance's own reading.
 
 If your appliance reports a different `operationName`, or none, the integration does not
 gate anything: an operation it has not ground-truthed is never treated as blocking.
@@ -57,7 +81,22 @@ gate anything: an operation it has not ground-truthed is never treated as blocki
 
 Three ways, best first.
 
-### 1. The appliance's own schedule (no Home Assistant involved)
+### 1. The appliance's own schedule — now editable from Home Assistant
+
+Set *Off-peak window 1 start* and *end* to your solar hours and the appliance does the
+rest: no cloud round-trip at run time, no automation, and it keeps working when Home
+Assistant is down. This is the best of the three.
+
+The three off-peak windows of period group 1 and the two quiet windows are `time`
+entities; only the first off-peak pair is enabled by default. A slot with both ends at
+the same time is unused — that is how the appliance spells an empty slot.
+
+Two parts stay read-only, and not for want of trying: the daily power timer and the day
+mask are mandatory too, but the cloud declares them as numeric ranges while the appliance
+reports a clock reading and a hex mask, so a time cannot be assigned to those parameters
+at all. Set those two in the hOn app; everything else is here.
+
+### 1b. The appliance's own schedule (details)
 
 The unit has a full scheduler that nothing in Home Assistant could see before v5.22.0:
 

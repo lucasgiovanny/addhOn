@@ -104,11 +104,13 @@ entity's operating state follows what the appliance says it is **running** (`mac
 mapped from the device's own per-program schema) rather than what it is configured to
 run, so a holiday window it enters by itself shows up correctly.
 
-Those schedule entities are read-only because the appliance's `settings` command performs
-a single operation and drops everything outside it, and the name of the other operations
-is not published anywhere. The `addhon.send_command` service (v5.24.0) exists to try
-candidates against a real appliance; every one confirmed turns the matching controls
-writable. See [`docs/heat-pump-water-heater.md`](docs/heat-pump-water-heater.md).
+Since v5.26.0 the **off-peak and quiet windows are editable** as `time` entities: point
+*Off-peak window 1* at your solar hours and the appliance runs itself, with no automation
+and no dependency on Home Assistant being up. What a `settings` write reaches turned out
+to be decided by the schema's `mandatory` flag rather than by the command's operation
+name — six live data points agree — so the whole schedule subsystem is writable while the
+toggles that never worked stay honestly read-only. See
+[`docs/heat-pump-water-heater.md`](docs/heat-pump-water-heater.md).
 
 The target temperature is **snapped onto the device's own min/max/step grid** before it
 is sent, on both the `water_heater` and the `climate` (AC) entity. Home Assistant does

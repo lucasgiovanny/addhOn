@@ -163,10 +163,11 @@ _install_homeassistant_stubs()
 class RangeParam:
     """Mimics HonParameterRange: min/max/step + a value setter that validates."""
 
-    def __init__(self, value, mn, mx, step) -> None:
+    def __init__(self, value, mn, mx, step, mandatory: int = 0) -> None:
         self.min = mn
         self.max = mx
         self.step = step
+        self.mandatory = mandatory
         self._v = self._coerce(value)
 
     @staticmethod
@@ -215,7 +216,8 @@ class FixedParam:
     validate (the engine relies on that -- it is how the vacation dates, and now the
     power flag, are written through parameters the schema calls "fixed")."""
 
-    def __init__(self, value) -> None:
+    def __init__(self, value, mandatory: int = 0) -> None:
+        self.mandatory = mandatory
         self._value = str(value)
 
     @property
@@ -308,9 +310,12 @@ def _hw_commands(
     if with_on_off:
         settings_params["onOffStatus"] = RangeParam(1, 0, 1, 1)
     if pinned_operation is not None:
-        settings_params["operationName"] = FixedParam(pinned_operation)
-        settings_params["vacStartDate"] = FixedParam("2000-01-01")
-        settings_params["vacEndDate"] = FixedParam("2000-01-01")
+        # mandatory=1 is what makes the window writable through this command, and
+        # onOffStatus (mandatory 0, above) NOT writable -- the real schema, and the
+        # distinction the whole gate rests on.
+        settings_params["operationName"] = FixedParam(pinned_operation, mandatory=1)
+        settings_params["vacStartDate"] = FixedParam("2000-01-01", mandatory=1)
+        settings_params["vacEndDate"] = FixedParam("2000-01-01", mandatory=1)
     codes = ["auto", "eco", "elec", "vac"]
     start_params = {
         "machMode": FixedParam("1"),
@@ -856,11 +861,20 @@ class PowerCommandResolutionTest(unittest.TestCase):
         )
         self.assertNotIn("off", entity._attr_operation_list)
 
-    def test_an_unknown_pinned_operation_is_not_treated_as_blocking(self) -> None:
-        # "Not ground-truthed" is not "writes nothing": an operation this integration has
-        # never seen must not silently remove a control.
-        commands = _hw_commands(
-            power_on_start_program=False, pinned_operation="grSetSomethingNew"
+    def test_a_free_settings_command_keeps_the_capability(self) -> None:
+        # Only a PINNED command gates anything: an appliance whose settings command is an
+        # ordinary multi-parameter write must never lose a control to this rule.
+        commands = _hw_commands(power_on_start_program=False, pinned_operation=None)
+        added, _ = _one(commands=commands)
+        self.assertEqual(added[0]._on_off_command, "settings")
+
+    def test_a_mandatory_power_parameter_would_be_kept(self) -> None:
+        # The gate follows the MANDATORY flag, not the operation name. This appliance
+        # marks onOffStatus mandatory 0 -- which is why its power never worked through
+        # settings -- but a model that marks it mandatory keeps the control.
+        commands = _hw_commands(power_on_start_program=False)
+        commands["settings"].parameters["onOffStatus"] = RangeParam(
+            1, 0, 1, 1, mandatory=1
         )
         added, _ = _one(commands=commands)
         self.assertEqual(added[0]._on_off_command, "settings")

@@ -190,6 +190,21 @@ def _install_stubs() -> None:
         button_mod, "ButtonEntity", type("ButtonEntity", (), {})
     )
 
+    # time platform. kw_only dataclass like the other description bases, so
+    # HonTimeEntityDescription can extend it.
+    time_mod = _mod("homeassistant.components.time")
+    time_mod.TimeEntity = getattr(time_mod, "TimeEntity", type("TimeEntity", (), {}))
+    if not hasattr(time_mod, "TimeEntityDescription"):
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class TimeEntityDescription:
+            key: str
+            translation_key: str | None = None
+            icon: str | None = None
+            entity_category: object | None = None
+            entity_registry_enabled_default: bool = True
+
+        time_mod.TimeEntityDescription = TimeEntityDescription
+
     # water_heater platform
     wh_mod = _mod("homeassistant.components.water_heater")
     wh_mod.WaterHeaterEntity = getattr(wh_mod, "WaterHeaterEntity", type("WaterHeaterEntity", (), {}))
@@ -241,6 +256,9 @@ def _collect_code_keys() -> dict[str, set[str]]:
         switch,
         water_heater,
     )
+    # `time` shadows the stdlib module name, so it is imported under an alias rather
+    # than added to the tuple above.
+    from custom_components.addhon import time as time_platform
 
     used: dict[str, set[str]] = {}
 
@@ -304,6 +322,7 @@ def _collect_code_keys() -> dict[str, set[str]]:
     }
     # Vacation-window dates (HW/WH): translation_key defaults from description.key.
     used["date"] = {_tk(d) for descs in date.DATES.values() for d in descs}
+    used["time"] = {_tk(d) for descs in time_platform.TIMES.values() for d in descs}
     # Water heater (HW/WH): one fixed-key entity. Its `name` comes from the device
     # (_attr_name = None), so the JSON block carries only the operation-mode states.
     used["water_heater"] = {water_heater.HonWaterHeater._attr_translation_key}

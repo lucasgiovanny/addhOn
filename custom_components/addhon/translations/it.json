@@ -1116,6 +1116,38 @@
       "purifier": {
         "name": "Purificatore"
       }
+    },
+    "time": {
+      "eco_window_1_start": {
+        "name": "Inizio fascia economica 1"
+      },
+      "eco_window_1_end": {
+        "name": "Fine fascia economica 1"
+      },
+      "eco_window_2_start": {
+        "name": "Inizio fascia economica 2"
+      },
+      "eco_window_2_end": {
+        "name": "Fine fascia economica 2"
+      },
+      "eco_window_3_start": {
+        "name": "Inizio fascia economica 3"
+      },
+      "eco_window_3_end": {
+        "name": "Fine fascia economica 3"
+      },
+      "silent_window_1_start": {
+        "name": "Inizio fascia silenziosa 1"
+      },
+      "silent_window_1_end": {
+        "name": "Fine fascia silenziosa 1"
+      },
+      "silent_window_2_start": {
+        "name": "Inizio fascia silenziosa 2"
+      },
+      "silent_window_2_end": {
+        "name": "Fine fascia silenziosa 2"
+      }
     }
   },
   "exceptions": {
