@@ -9,6 +9,37 @@ the notes were generated automatically carry a link to their diff instead of a s
 
 ## [Unreleased]
 
+## [5.19.1] - 2026-08-25
+
+**New Features**
+
+- Cooker hoods (`HO`) gain a **power switch** (#83). The hood has three states, and the
+  integration used to model only two of them: the control panel dark, the panel lit with
+  the fan stopped, and the panel lit with the fan running. While the panel is dark the
+  appliance ignores every speed and light command it is sent. The new switch owns the
+  panel — switching it on is the remote equivalent of tapping the glass, switching it off
+  stops the hood and darkens the panel — while the fan entity owns the other axis.
+
+**Fixes**
+
+- **Switching the hood's fan off no longer switches the whole hood off** (#83). It used
+  to send the appliance's stop command, which darkened the control panel — and from the
+  dark panel nothing Home Assistant sent afterwards had any effect, so the hood could be
+  switched off exactly once and then had to be woken by hand at the appliance. The fan
+  now writes a wind speed of zero, which is what the official app's slider does at its
+  bottom notch: extraction stops, the panel stays lit, and the light keeps whatever state
+  it was in.
+- **The hood's speed control now wakes a sleeping hood** instead of being ignored. Speed
+  changes travel on the same command the official app uses, which carries the "panel on"
+  flag with them.
+
+**Known Behaviour**
+
+- **The hood's power switch turns the light off with it.** That is the device's own
+  declaration, not a choice of this integration: its stop command pins the light to `"0"`
+  as a fixed value. Stopping only the fan, with the light left alone, is what the fan
+  entity now does — this note replaces the 5.18.0 one that described the old behaviour.
+
 ## [5.18.0] - 2026-08-24
 
 **New Features**
