@@ -588,13 +588,13 @@
         "name": "Timer switch-off"
       },
       "eco_schedule_1": {
-        "name": "Off-peak windows 1"
+        "name": "Heating window"
       },
       "eco_schedule_2": {
-        "name": "Off-peak windows 2"
+        "name": "Heating windows (group 2)"
       },
       "eco_days": {
-        "name": "Off-peak days"
+        "name": "Heating window days"
       },
       "silent_schedule": {
         "name": "Silent windows"
@@ -1118,23 +1118,11 @@
       }
     },
     "time": {
-      "eco_window_1_start": {
-        "name": "Off-peak window 1 start"
+      "heating_window_start": {
+        "name": "Heating window start"
       },
-      "eco_window_1_end": {
-        "name": "Off-peak window 1 end"
-      },
-      "eco_window_2_start": {
-        "name": "Off-peak window 2 start"
-      },
-      "eco_window_2_end": {
-        "name": "Off-peak window 2 end"
-      },
-      "eco_window_3_start": {
-        "name": "Off-peak window 3 start"
-      },
-      "eco_window_3_end": {
-        "name": "Off-peak window 3 end"
+      "heating_window_end": {
+        "name": "Heating window end"
       },
       "silent_window_1_start": {
         "name": "Silent window 1 start"

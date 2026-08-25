@@ -83,13 +83,23 @@ Three ways, best first.
 
 ### 1. The appliance's own schedule — now editable from Home Assistant
 
-Set *Off-peak window 1 start* and *end* to your solar hours and the appliance does the
+Set *Heating window start* and *end* to your solar hours and the appliance does the
 rest: no cloud round-trip at run time, no automation, and it keeps working when Home
 Assistant is down. This is the best of the three.
 
-The three off-peak windows of period group 1 and the two quiet windows are `time`
-entities; only the first off-peak pair is enabled by default. A slot with both ends at
-the same time is unused — that is how the appliance spells an empty slot.
+There is deliberately **one** heating window (the appliance carries nine slots across
+two groups; the job — "heat during my solar / cheap-tariff hours" — needs one, and the
+rest stays readable as sensors and writable via `addhon.send_command`). The two quiet
+windows exist as `time` entities too, disabled by default. A slot with both ends at the
+same time is unused — that is how the appliance spells an empty slot.
+
+**The day mask rides along.** A window only runs on the days its mask (`opp1EcoDays`)
+selects, and the appliance's firmware *sanitizes* a window whose mask selects no days:
+the freshly written times revert to 00:00 on the next poll, and again at power-on
+(live-observed 2026-08-26 — the mask had been zeroed by a v5.25-era write, because the
+cloud mistypes it as a numeric range). Every heating-window write therefore checks the
+reported mask and, when it selects no days, restores `7F` (every day) in the same
+payload. A mask that already selects days is left exactly as it is.
 
 Two parts stay read-only, and not for want of trying: the daily power timer and the day
 mask are mandatory too, but the cloud declares them as numeric ranges while the appliance

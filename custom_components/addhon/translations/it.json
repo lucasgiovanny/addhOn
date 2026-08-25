@@ -588,13 +588,13 @@
         "name": "Spegnimento programmato"
       },
       "eco_schedule_1": {
-        "name": "Fasce economiche 1"
+        "name": "Finestra di riscaldamento"
       },
       "eco_schedule_2": {
-        "name": "Fasce economiche 2"
+        "name": "Finestre di riscaldamento (gruppo 2)"
       },
       "eco_days": {
-        "name": "Giorni fascia economica"
+        "name": "Giorni della finestra di riscaldamento"
       },
       "silent_schedule": {
         "name": "Fasce silenziose"
@@ -1118,23 +1118,11 @@
       }
     },
     "time": {
-      "eco_window_1_start": {
-        "name": "Inizio fascia economica 1"
+      "heating_window_start": {
+        "name": "Inizio finestra di riscaldamento"
       },
-      "eco_window_1_end": {
-        "name": "Fine fascia economica 1"
-      },
-      "eco_window_2_start": {
-        "name": "Inizio fascia economica 2"
-      },
-      "eco_window_2_end": {
-        "name": "Fine fascia economica 2"
-      },
-      "eco_window_3_start": {
-        "name": "Inizio fascia economica 3"
-      },
-      "eco_window_3_end": {
-        "name": "Fine fascia economica 3"
+      "heating_window_end": {
+        "name": "Fine finestra di riscaldamento"
       },
       "silent_window_1_start": {
         "name": "Inizio fascia silenziosa 1"

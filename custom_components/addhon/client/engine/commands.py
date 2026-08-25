@@ -228,8 +228,6 @@ class HonCommand:
             self.parameter_groups.get("ancillaryParameters", {})
         )
         ancillary_params.pop("programRules", None)
-        if sync_shadow:
-            self.appliance.sync_command_to_params(self.name)
         result = await self.api.send_command(
             self._appliance,
             self._name,
@@ -240,6 +238,13 @@ class HonCommand:
         if not result:
             _LOGGER.error("Command rejected by cloud: %s", self._name)
             raise ApiError("Can't send command")
+        # Optimistic shadow mirror only AFTER the cloud accepted. It used to run before
+        # the call, so a REJECTED command still showed as applied for the shield window
+        # (10s) plus the poll interval -- the write looked successful, then "reverted by
+        # itself" a minute later. The payload is built before this either way, so the
+        # transmitted values are unaffected.
+        if sync_shadow:
+            self.appliance.sync_command_to_params(self.name)
         return result
 
     async def send_parameters(self, params: dict[str, str | float]) -> bool:

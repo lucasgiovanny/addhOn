@@ -157,14 +157,25 @@ class RecordingCommand:
         self.send_calls = 0
         self.sent = None
 
+    @property
+    def parameter_groups(self):
+        return {"parameters": {k: str(p.value) for k, p in self.parameters.items()}}
+
     async def send(self) -> None:
         self.send_calls += 1
-        self.sent = {k: p.value for k, p in self.parameters.items()}
+        self.sent = {k: str(p.value) for k, p in self.parameters.items()}
+
+    async def send_parameters(self, params) -> None:
+        self.send_calls += 1
+        self.sent = dict(params)
 
 
 class FakeAppliance:
-    def __init__(self, commands) -> None:
+    def __init__(self, commands, reported: dict | None = None) -> None:
         self.commands = commands
+        # The device shadow, as the engine holds it (shadow_overrides and the day-mask
+        # restore both read it).
+        self.attributes = {"parameters": dict(reported or {})}
 
 
 class FakeClient:
@@ -203,22 +214,46 @@ class FakeEntry:
 
 APPLIANCE_ID = "hw-1"
 
-# Every schedule slot the appliance exposes, as the real schema does: fixed parameters,
-# mandatory, next to the operation marker the command is pinned to.
-_SLOTS = [f"opp1Eco{edge}Time{n}" for n in (1, 2, 3) for edge in ("Start", "End")] + [
+# The slots backing ENTITIES: the heating window (off-peak slot 1) and the two quiet
+# windows. The appliance carries more (opp1 slots 2-3, all of group 2); those deliberately
+# get no entity -- one window does the job -- and the gate below proves none appears.
+_SLOTS = ["opp1EcoStartTime1", "opp1EcoEndTime1"] + [
     f"silent{edge}Time{n}" for n in (1, 2) for edge in ("Start", "End")
 ]
 
+# Slots the appliance exposes but the platform must NOT build entities for.
+_UNEXPOSED = [f"opp1Eco{edge}Time{n}" for n in (2, 3) for edge in ("Start", "End")]
+
+
+class MaskParam:
+    """The day mask as the real schema declares it: a numeric range that CANNOT hold the
+    hex value the appliance uses -- assigning "7F" raises, exactly like the engine."""
+
+    def __init__(self, value=0) -> None:
+        self.min, self.max, self.step = 0, 40, 1
+        self.mandatory = 1
+        self._v = value
+
+    @property
+    def value(self):
+        return self._v
+
+    @value.setter
+    def value(self, v):
+        self._v = float(v)  # "7F" raises ValueError, as HonParameterRange would
+
 
 def _hw_commands(*, mandatory: int = 1, pinned: bool = True) -> dict:
-    params = {name: FixedParam("00:00", mandatory=mandatory) for name in _SLOTS}
+    params = {name: FixedParam("00:00", mandatory=mandatory) for name in _SLOTS + _UNEXPOSED}
+    params["opp1EcoDays"] = MaskParam()
     if pinned:
         params["operationName"] = FixedParam("grSetVacDate")
     return {"settings": RecordingCommand(params)}
 
 
 def _attrs(**overrides) -> dict:
-    attrs = {name: "00:00" for name in _SLOTS}
+    attrs = {name: "00:00" for name in _SLOTS + _UNEXPOSED}
+    attrs["opp1EcoDays"] = "7F"
     attrs.update(overrides)
     return attrs
 
@@ -228,13 +263,14 @@ def _setup(*, app_type: str = "HW", commands=None, attributes=None):
     from custom_components.addhon.const import DOMAIN
 
     commands = _hw_commands() if commands is None else commands
+    attributes = _attrs() if attributes is None else attributes
     coordinator = FakeCoordinator(
         {
             APPLIANCE_ID: {
                 "type": app_type,
                 "name": "Boiler",
-                "attributes": _attrs() if attributes is None else attributes,
-                "appliance": FakeAppliance(commands),
+                "attributes": attributes,
+                "appliance": FakeAppliance(commands, attributes),
             }
         }
     )
@@ -253,22 +289,26 @@ def _by_key(entities):
 
 
 class GatingTest(unittest.TestCase):
-    def test_one_entity_per_slot(self) -> None:
+    def test_one_entity_per_exposed_slot(self) -> None:
         entities, _ = _setup()
         self.assertEqual(len(entities), len(_SLOTS))
-        self.assertIn("eco_window_1_start", _by_key(entities))
+        self.assertIn("heating_window_start", _by_key(entities))
         self.assertIn("silent_window_2_end", _by_key(entities))
 
-    def test_only_the_first_off_peak_pair_is_on_by_default(self) -> None:
-        # Ten schedule controls on the device page would bury everything else; the pair a
-        # solar or cheap-tariff setup needs is the one that shows.
+    def test_the_other_off_peak_slots_get_no_entity(self) -> None:
+        # The appliance exposes them and they are writable; ONE window is a product
+        # decision, and this pins it (the rest stays reachable via addhon.send_command).
+        keys = set(_by_key(_setup()[0]))
+        self.assertFalse({k for k in keys if "eco_window" in k})
+
+    def test_only_the_heating_pair_is_on_by_default(self) -> None:
         entities = _by_key(_setup()[0])
         enabled = {
             key
             for key, entity in entities.items()
             if entity._attr_entity_registry_enabled_default
         }
-        self.assertEqual(enabled, {"eco_window_1_start", "eco_window_1_end"})
+        self.assertEqual(enabled, {"heating_window_start", "heating_window_end"})
 
     def test_a_parameter_the_command_would_swallow_gets_no_entity(self) -> None:
         # mandatory 0 on a PINNED command: the appliance accepts the payload and ignores
@@ -294,24 +334,24 @@ class ReadTest(unittest.TestCase):
         entities = _by_key(
             _setup(attributes=_attrs(opp1EcoStartTime1="11:00", opp1EcoEndTime1="16:00"))[0]
         )
-        self.assertEqual(entities["eco_window_1_start"].native_value, datetime.time(11, 0))
-        self.assertEqual(entities["eco_window_1_end"].native_value, datetime.time(16, 0))
+        self.assertEqual(entities["heating_window_start"].native_value, datetime.time(11, 0))
+        self.assertEqual(entities["heating_window_end"].native_value, datetime.time(16, 0))
 
     def test_an_unset_slot_reads_midnight(self) -> None:
         # Unlike the holiday dates, 00:00 is a real reading here and a time entity has no
         # empty state to fall back on.
         entities = _by_key(_setup()[0])
-        self.assertEqual(entities["eco_window_2_start"].native_value, datetime.time(0, 0))
+        self.assertEqual(entities["heating_window_start"].native_value, datetime.time(0, 0))
 
     def test_an_unusable_reading_is_unknown(self) -> None:
         entities = _by_key(_setup(attributes=_attrs(opp1EcoStartTime1="0"))[0])
-        self.assertIsNone(entities["eco_window_1_start"].native_value)
+        self.assertIsNone(entities["heating_window_start"].native_value)
 
 
 class WriteTest(unittest.TestCase):
     def test_it_sends_hh_mm_and_refreshes(self) -> None:
         entities, commands = _setup()
-        start = _by_key(entities)["eco_window_1_start"]
+        start = _by_key(entities)["heating_window_start"]
         asyncio.run(start.async_set_value(datetime.time(11, 0)))
         self.assertEqual(commands["settings"].parameters["opp1EcoStartTime1"].value, "11:00")
         self.assertEqual(commands["settings"].send_calls, 1)
@@ -320,9 +360,42 @@ class WriteTest(unittest.TestCase):
         # The appliance reports minute resolution; "11:30:00" would never match back and
         # the entity would look like the write failed.
         entities, commands = _setup()
-        end = _by_key(entities)["eco_window_1_end"]
+        end = _by_key(entities)["heating_window_end"]
         asyncio.run(end.async_set_value(datetime.time(16, 30, 45)))
         self.assertEqual(commands["settings"].parameters["opp1EcoEndTime1"].value, "16:30")
+
+    def test_a_zeroed_day_mask_is_restored_with_the_window(self) -> None:
+        # A window whose mask selects no days is sanitized away by the appliance (the
+        # freshly written times reverted on the next poll, live-observed 2026-08-26).
+        # The mask is mistyped by the cloud (range[0,40] vs "7F"), so it must ride in
+        # the payload -- the parameter object itself cannot hold it.
+        entities, commands = _setup(attributes=_attrs(opp1EcoDays=0))
+        start = _by_key(entities)["heating_window_start"]
+        asyncio.run(start.async_set_value(datetime.time(11, 0)))
+        sent = commands["settings"].sent
+        self.assertEqual(sent["opp1EcoStartTime1"], "11:00")
+        self.assertEqual(sent["opp1EcoDays"], "7F")
+
+    def test_a_real_day_mask_is_left_exactly_as_it_is(self) -> None:
+        # "3E" would be a Mon-Fri-style selection; restoring "7F" over it would widen the
+        # user's schedule behind their back.
+        entities, commands = _setup(attributes=_attrs(opp1EcoDays="3E"))
+        start = _by_key(entities)["heating_window_start"]
+        asyncio.run(start.async_set_value(datetime.time(11, 0)))
+        # The mistyped parameter cannot hold "3E" either, so the preservation path
+        # (shadow_overrides) carries the reported value through.
+        self.assertEqual(commands["settings"].sent["opp1EcoDays"], "3E")
+
+    def test_a_silent_window_never_touches_the_mask(self) -> None:
+        entities, commands = _setup(attributes=_attrs(opp1EcoDays=0))
+        asyncio.run(
+            _by_key(entities)["silent_window_1_start"].async_set_value(datetime.time(23, 0))
+        )
+        sent = commands["settings"].sent
+        self.assertEqual(sent["silentStartTime1"], "23:00")
+        # No restore for a write that is not about the heating window: the shadow holds
+        # a plain 0, which the numeric parameter CAN hold, so nothing overrides it.
+        self.assertEqual(sent["opp1EcoDays"], "0")
 
     def test_it_writes_only_its_own_slot(self) -> None:
         entities, commands = _setup()
@@ -356,7 +429,7 @@ class WriteTest(unittest.TestCase):
         )
         added: list = []
         asyncio.run(time_platform.async_setup_entry(hass, FakeEntry(), added.extend))
-        entity = _by_key(added)["eco_window_1_start"]
+        entity = _by_key(added)["heating_window_start"]
         entity.hass = hass
         with self.assertRaises(HomeAssistantError):
             asyncio.run(entity.async_set_value(datetime.time(11, 0)))

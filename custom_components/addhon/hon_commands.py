@@ -376,6 +376,7 @@ async def async_send_command(
     params: dict,
     *,
     pre_send: Callable[[dict], None] | None = None,
+    payload_overrides: dict[str, str] | None = None,
 ) -> None:
     """Apply `params` (name->value) to command `command_name` and send it on
     the client's dedicated loop, with rollback if an assignment fails.
@@ -383,6 +384,13 @@ async def async_send_command(
     `pre_send(command_params)`: optional hook run BEFORE applying the requested
     parameters (the AC uses it to sanitize windDirection*). The requested values
     win anyway over whatever pre_send has set.
+
+    `payload_overrides`: values injected into the TRANSMITTED payload without going
+    through the parameter setters. For parameters whose cloud schema cannot hold the
+    value the appliance actually uses (the HP250M7C-F9 declares its day mask as a
+    numeric range while the appliance wants "7F"): assigning through the setter would
+    raise, so the value rides in the payload directly. They win over the automatic
+    shadow_overrides; a requested parameter is never overridden.
     """
     if not appliance or not client:
         raise HomeAssistantError(
@@ -419,6 +427,9 @@ async def async_send_command(
                     command_params[key].value = value
                     _LOGGER.debug("Command %s: '%s' = %s", command_name, key, value)
                 overrides = shadow_overrides(command, appliance, set(params))
+                for name, value in (payload_overrides or {}).items():
+                    if name not in params:
+                        overrides[name] = str(value)
                 if overrides:
                     # Send the group explicitly, with the appliance's own values for the
                     # parameters its schema mistypes. send_parameters (not send_exact)

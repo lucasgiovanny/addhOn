@@ -618,6 +618,15 @@ _HW_REMOVED = (
     # it never turned anything off. Power is now the water_heater entity's, written
     # through startProgram like the mode and the setpoint.
     ("switch", "_on_off"),
+    # v5.27.0: the per-slot off-peak TIME entities, replaced by the single heating
+    # window (one job -- "heat during my solar hours" -- one window; the other slots
+    # stay readable as sensors and writable via addhon.send_command).
+    ("time", "_eco_window_1_start"),
+    ("time", "_eco_window_1_end"),
+    ("time", "_eco_window_2_start"),
+    ("time", "_eco_window_2_end"),
+    ("time", "_eco_window_3_start"),
+    ("time", "_eco_window_3_end"),
 )
 
 

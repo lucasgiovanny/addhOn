@@ -588,13 +588,13 @@
         "name": "Desligar programado"
       },
       "eco_schedule_1": {
-        "name": "Janelas fora de ponta 1"
+        "name": "Janela de aquecimento"
       },
       "eco_schedule_2": {
-        "name": "Janelas fora de ponta 2"
+        "name": "Janelas de aquecimento (grupo 2)"
       },
       "eco_days": {
-        "name": "Dias fora de ponta"
+        "name": "Dias da janela de aquecimento"
       },
       "silent_schedule": {
         "name": "Janelas silenciosas"
@@ -1118,23 +1118,11 @@
       }
     },
     "time": {
-      "eco_window_1_start": {
-        "name": "Início da janela fora de ponta 1"
+      "heating_window_start": {
+        "name": "Início da janela de aquecimento"
       },
-      "eco_window_1_end": {
-        "name": "Fim da janela fora de ponta 1"
-      },
-      "eco_window_2_start": {
-        "name": "Início da janela fora de ponta 2"
-      },
-      "eco_window_2_end": {
-        "name": "Fim da janela fora de ponta 2"
-      },
-      "eco_window_3_start": {
-        "name": "Início da janela fora de ponta 3"
-      },
-      "eco_window_3_end": {
-        "name": "Fim da janela fora de ponta 3"
+      "heating_window_end": {
+        "name": "Fim da janela de aquecimento"
       },
       "silent_window_1_start": {
         "name": "Início da janela silenciosa 1"

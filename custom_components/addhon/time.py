@@ -15,16 +15,25 @@ that matters: an off-peak window written straight through `settings` -- no opera
 touched -- landed on the appliance and came back as 11:00-16:00 (2026-08-25). Every
 schedule field is mandatory on that schema; every toggle that never worked is not.
 
-WHAT IS EXPOSED. The three windows of off-peak period group 1 and the two quiet windows,
-as start/end pairs. Only the first off-peak pair is enabled by default: it is the one a
-solar or cheap-tariff setup needs, and eight more entities on the device page is not.
+WHAT IS EXPOSED. ONE heating window -- the first slot of off-peak period group 1 -- plus
+the two quiet windows (disabled by default). One window, not the nine slots the appliance
+carries, is a deliberate product decision: the job to be done is "heat during my solar /
+cheap-tariff hours", one window does it, and a page of start/end pairs buries the two
+that matter. The remaining slots stay readable through the schedule sensors and writable
+through addhon.send_command for whoever needs them.
 
-WHAT IS NOT, AND WHY:
-- period group 2 (`opp2Eco*`) is mandatory too and would work the same way, but nothing
-  in any capture says what selects it (`offPeakPeriodScheme` is a bare 0/1 that has read
-  1 throughout). Exposing writable controls for a group that may never run would be
-  offering a setting whose effect this integration cannot describe. Both groups stay
-  readable through the `eco_schedule_1` / `eco_schedule_2` sensors.
+THE DAY MASK RIDES ALONG. A window is only real if its day mask (`opp1EcoDays`) selects
+at least one day. The mask is mistyped by the cloud (declared range[0,40], real value
+"7F"), so a v5.25-era write reset it to 0 -- and the appliance's firmware SANITIZES a
+window with no days: the freshly written times reverted to 00:00 on the next poll, and
+again at power-on (live-observed 2026-08-26). So every window write checks the reported
+mask and, when it selects no days, restores "7F" (every day -- the only value ever
+observed) in the same payload, bypassing the mistyped setter via payload_overrides.
+
+WHAT IS NOT EXPOSED, AND WHY:
+- the other off-peak slots and period group 2: see above. For group 2 additionally,
+  nothing in any capture says what selects it (`offPeakPeriodScheme` is a bare 0/1 that
+  has read 1 throughout).
 - the daily power timer (`timingPowerOn` / `timingPowerOff`) is mandatory as well, but
   the cloud declares both as range[0,1] while the appliance reports "00:00". A time
   cannot be assigned to that parameter at all -- the engine's range setter refuses it --
@@ -59,7 +68,13 @@ from .hon_commands import (
     find_settings_param,
     settings_write_blocked,
 )
-from .hw_values import HW_ECO_SLOTS, HW_SILENT_SLOTS, hw_time
+from .hw_values import (
+    HW_ECO_DAYS_ALL,
+    HW_ECO_DAYS_ATTR,
+    HW_SILENT_SLOTS,
+    hw_eco_days,
+    hw_time,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,29 +90,40 @@ class HonTimeEntityDescription(TimeEntityDescription):
 
     param: str
     enabled_default: bool = True
+    # True for the heating-window pair: the write must keep the day mask alive, or the
+    # appliance sanitizes the whole window away (see the module docstring).
+    restores_day_mask: bool = False
 
 
-def _window(key: str, param: str, *, icon: str, enabled_default: bool):
+def _window(key: str, param: str, *, icon: str, enabled_default: bool,
+            restores_day_mask: bool = False):
     return HonTimeEntityDescription(
         key=key,
         param=param,
         icon=icon,
         entity_category=EntityCategory.CONFIG,
         enabled_default=enabled_default,
+        restores_day_mask=restores_day_mask,
     )
 
 
-# Off-peak period group 1, then the quiet windows. Only the first off-peak pair is on by
-# default (see the module docstring).
-_SCHEDULE_TIMES: tuple[HonTimeEntityDescription, ...] = tuple(
+# The heating window, then the quiet windows (disabled by default). See the module
+# docstring for why exactly one heating window is offered.
+_SCHEDULE_TIMES: tuple[HonTimeEntityDescription, ...] = (
     _window(
-        f"eco_window_{slot}_{edge.lower()}",
-        f"opp1Eco{edge}Time{slot}",
+        "heating_window_start",
+        "opp1EcoStartTime1",
         icon="mdi:calendar-clock",
-        enabled_default=slot == 1,
-    )
-    for slot in HW_ECO_SLOTS
-    for edge in ("Start", "End")
+        enabled_default=True,
+        restores_day_mask=True,
+    ),
+    _window(
+        "heating_window_end",
+        "opp1EcoEndTime1",
+        icon="mdi:calendar-clock",
+        enabled_default=True,
+        restores_day_mask=True,
+    ),
 ) + tuple(
     _window(
         f"silent_window_{slot}_{edge.lower()}",
@@ -211,16 +237,33 @@ class HonScheduleTime(HonBaseEntity, TimeEntity):
         # resolution ("00:00", "22:00") and sending "11:30:00" would not match the shape
         # it reports back, leaving the entity looking like the write failed.
         send_value = f"{value.hour:02d}:{value.minute:02d}"
+        # A window whose day mask selects no days is sanitized away by the appliance's
+        # own firmware (times reset to 00:00 on the next poll, and at power-on). The
+        # mask is mistyped by the cloud schema, so it cannot go through the parameter
+        # setter; it rides in the payload directly. "7F" = every day, the only value
+        # ever observed. A mask that already selects days is left exactly as it is.
+        payload_overrides: dict[str, str] | None = None
+        if (
+            self.entity_description.restores_day_mask
+            and hw_eco_days(self._get_attr(HW_ECO_DAYS_ATTR)) is None
+        ):
+            payload_overrides = {HW_ECO_DAYS_ATTR: HW_ECO_DAYS_ALL}
         try:
             _LOGGER.debug(
-                "Time debug: set %s=%s (cmd=%s) id=%s",
+                "Time debug: set %s=%s (cmd=%s, mask_restore=%s) id=%s",
                 param,
                 send_value,
                 self._command_name,
+                payload_overrides is not None,
                 redact_id(self._appliance_id),
             )
             await async_send_command(
-                self.hass, client, appliance, self._command_name, {param: send_value}
+                self.hass,
+                client,
+                appliance,
+                self._command_name,
+                {param: send_value},
+                payload_overrides=payload_overrides,
             )
             await self._async_request_command_refresh()
         except HomeAssistantError:

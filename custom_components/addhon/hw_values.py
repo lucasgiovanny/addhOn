@@ -97,6 +97,32 @@ HW_SILENT_SLOTS: tuple[int, ...] = (1, 2)
 # weekday is not derivable from the evidence, and a decoded weekday list would assert an
 # ordering nothing supports.
 HW_ECO_DAYS_ATTR = "opp1EcoDays"
+HW_ECO_DAYS_ALL = "7F"
+
+
+def hw_eco_days(raw) -> str | None:
+    """The day mask as a USABLE selection, or None when it selects no day at all.
+
+    A mask is usable when it is a 7-bit hex value with at least one bit set. "7F" is the
+    only value ever observed from the app; 0 is what a v5.25 write left behind (the
+    mistyped range parameter defaulted to it) -- and a window whose mask selects no days
+    is what the appliance's own firmware sanitizes away, clearing the window times back
+    to 00:00 (live-observed 2026-08-26: a freshly written window reverted on the next
+    poll, and again at power-on). Callers writing a window use this to know the mask must
+    be restored alongside it.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = int(text, 16)
+    except ValueError:
+        return None
+    if value <= 0 or value > 0x7F:
+        return None
+    return text.upper()
 
 # The device's own weekday, ISO-numbered. Verified against the appliance's `date` field
 # on all four captures (2026-07-26 Sun -> 7, 2026-08-16 Sun -> 7, 2026-08-18 Tue -> 2,
