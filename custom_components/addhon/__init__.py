@@ -324,8 +324,23 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     translation_placeholders={"parameter": parameter, "value": value},
                 )
 
+            async def _refresh_and_read() -> str | None:
+                refresh = getattr(coordinator, "async_refresh", None)
+                if refresh is not None:
+                    await refresh()
+                return _reported()
+
+            # ECHO-RESISTANT since v5.29.1: a MANDATORY parameter sent through the
+            # pinned settings command lands in the cloud shadow and reads back as
+            # applied for a minute or more before the appliance's own state publish
+            # reverts it. That echo is precisely what fooled the mandatory-flag theory
+            # (an opp1 window read as written for minutes and was later found
+            # discarded). So a hit is only reported after it survives a SECOND wait of
+            # the same length -- call with settle >= 90 when hunting, so the appliance
+            # publishes in between.
             found: str | None = None
             tried: list[str] = []
+            echoed: list[str] = []
             for candidate in candidates:
                 tried.append(candidate)
                 _LOGGER.info(
@@ -343,24 +358,36 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     {"operationName": candidate, parameter: value},
                 )
                 await asyncio.sleep(settle)
-                refresh = getattr(coordinator, "async_refresh", None)
-                if refresh is not None:
-                    await refresh()
-                if _reported() == value:
+                if await _refresh_and_read() != value:
+                    continue
+                await asyncio.sleep(settle)
+                if await _refresh_and_read() == value:
                     found = candidate
                     break
-
-            message = (
-                f"`{parameter}` moved to `{value}` with **operationName "
-                f"`{found}`**. Add it to SETTINGS_OPERATION_PARAMS to make the "
-                f"matching controls writable."
-                if found
-                else (
-                    f"None of the {len(tried)} candidates moved `{parameter}`: "
-                    f"{', '.join(tried)}. Try other names, or the operation may not be "
-                    f"reachable from the cloud at all."
+                echoed.append(candidate)
+                _LOGGER.info(
+                    "probe_settings_operation: '%s' echoed and reverted", candidate
                 )
-            )
+
+            if found:
+                message = (
+                    f"`{parameter}` moved to `{value}` with **operationName "
+                    f"`{found}`** and SURVIVED a re-check {settle:.0f}s later. Add it "
+                    f"to SETTINGS_OPERATION_PARAMS to make the matching controls "
+                    f"writable."
+                )
+            else:
+                detail = (
+                    f" These echoed into the shadow and then reverted (the appliance "
+                    f"discarded them): {', '.join(echoed)}."
+                    if echoed
+                    else ""
+                )
+                message = (
+                    f"None of the {len(tried)} candidates moved `{parameter}` "
+                    f"persistently: {', '.join(tried)}.{detail} Try other names, or "
+                    f"the operation may not be reachable from the cloud at all."
+                )
             _LOGGER.info("probe_settings_operation: %s", message)
             persistent_notification.async_create(
                 hass,

@@ -76,26 +76,28 @@ def find_settings_param(
 # belong to `operationName` and silently drops everything else in the same payload.
 SETTINGS_OPERATION_PARAM = "operationName"
 
-# WHAT A PINNED SETTINGS COMMAND ACTUALLY WRITES: its MANDATORY parameters.
+# WHAT A PINNED SETTINGS COMMAND WRITES -- the state of knowledge, revised twice on live
+# evidence:
 #
-# Five live data points on a real HP250M7C-F9, and they agree perfectly:
+#   vacStartDate / vacEndDate    mandatory 1   the pinned operation's own fields
+#   opp1/opp2 window slots       mandatory 1   ECHO for ~a minute, then the appliance
+#                                              discards them (opp1: 2026-08-25/26;
+#                                              opp2: 2026-08-26, after the panel proved
+#                                              the parameter itself is the right one)
+#   tempSel / onOffStatus /      mandatory 0   dropped immediately, no echo
+#   sterilizationTime
 #
-#   vacStartDate / vacEndDate   mandatory 1   written OK   (v5.19.0)
-#   opp1EcoStartTime1 / EndTime1 mandatory 1  written OK   (2026-08-25, 11:00-16:00)
-#   tempSel                     mandatory 0   dropped      (v5.10, live-verified)
-#   onOffStatus                 mandatory 0   dropped      (v5.22.0, live-verified)
-#   sterilizationTime           mandatory 0   dropped      (probed twice, 2026-08-25)
+# The v5.26 "mandatory group" theory was built on mistaking that echo for a persisted
+# write; the opp2 experiment killed it. What the evidence now supports: the appliance
+# EXECUTES only the operation the command is pinned to (grSetVacDate -> the vacation
+# window); mandatory fields outside it reach the cloud shadow and are reverted by the
+# appliance's next state publish, non-mandatory ones do not even echo.
 #
-# So the rule is NOT "only the operation the command is named after": it is "the
-# mandatory group". On this appliance that group is exactly the schedule subsystem --
-# the holiday window, the off-peak windows of both period groups, their day mask, the
-# quiet windows and the daily power timer -- and none of the temperature, boost, quiet or
-# anti-legionella toggles, which are the ones that never worked. The operation name turned
-# out to be a red herring: overriding it changed nothing in either direction.
-#
-# Read off the live schema rather than hard-coded, so a model whose settings command is a
-# free write (no pinned operationName) is never gated, and one that marks a different
-# group mandatory gates itself correctly.
+# The GATE below still keys on the mandatory flag, deliberately: it separates "the cloud
+# will at least carry this write to the appliance" (worth offering while the hunt for
+# the executing operation continues -- see probe_settings_operation) from "provably
+# dropped on the doorstep" (never worth offering). A model whose settings command is a
+# free write (no pinned operationName) is never gated at all.
 
 
 def settings_operation(appliance, command_name: str = "settings") -> str | None:

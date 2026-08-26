@@ -80,5 +80,5 @@ probe_settings_operation:
       selector:
         number:
           min: 3
-          max: 60
+          max: 300
           unit_of_measurement: s
