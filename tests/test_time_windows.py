@@ -307,11 +307,35 @@ class GatingTest(unittest.TestCase):
             all(e._attr_entity_registry_enabled_default for e in entities.values())
         )
 
-    def test_a_parameter_the_command_would_swallow_gets_no_entity(self) -> None:
-        # mandatory 0 on a PINNED command: the appliance accepts the payload and ignores
-        # it, so a control here would be a control that lies.
+    def test_known_operation_params_pass_the_gate_regardless_of_mandatory(self) -> None:
+        # Since v5.30 the gate keys on the known-operation table (grSetEcoTime), not on
+        # the mandatory flag -- the flag only ever predicted the shadow echo.
         entities, _ = _setup(commands=_hw_commands(mandatory=0))
-        self.assertEqual(entities, [])
+        self.assertEqual(len(entities), len(_SLOTS))
+
+    def test_the_write_names_the_executing_operation(self) -> None:
+        # The one line the whole saga comes down to: the payload must say
+        # operationName=grSetEcoTime, or the appliance discards the field after the
+        # shadow echo (differentially proven by the probe, 2026-08-26).
+        import datetime as dt
+
+        entities, commands = _setup()
+        start = _by_key(entities)["heating_window_start"]
+        asyncio.run(start.async_set_value(dt.time(11, 0)))
+        self.assertEqual(
+            commands["settings"].parameters["operationName"].value, "grSetEcoTime"
+        )
+
+    def test_an_unpinned_command_gets_no_operation_name(self) -> None:
+        # A free-write command has no operation envelope; naming one would send a
+        # parameter the command does not carry, and the engine would refuse the write.
+        import datetime as dt
+
+        entities, commands = _setup(commands=_hw_commands(pinned=False))
+        start = _by_key(entities)["heating_window_start"]
+        asyncio.run(start.async_set_value(dt.time(11, 0)))
+        self.assertNotIn("operationName", commands["settings"].parameters)
+        self.assertEqual(commands["settings"].parameters["opp2EcoStartTime1"].value, "11:00")
 
     def test_an_unpinned_command_is_never_gated(self) -> None:
         entities, _ = _setup(commands=_hw_commands(mandatory=0, pinned=False))

@@ -92,19 +92,28 @@ two groups; the job — "heat during my solar / cheap-tariff hours" — needs on
 rest stays writable via `addhon.send_command`). A slot with both ends at the same time
 is unused — that is how the appliance spells an empty slot.
 
-**The window lives in period group 2** — `opp2EcoStartTime1` / `opp2EcoEndTime1`.
-Settled empirically on 2026-08-26: a window set on the appliance's own panel
-("Programação horária", 09:00–18:00) landed in group 2 in the very next capture, with
-**nothing else changing** — no enable flag, no scheme, no mask. Group 1, which
-v5.26–v5.28 wrote to and the appliance kept discarding, belongs to the **off-peak
-tariff** feature (its day mask is `opp1EcoDays`, its siblings are the `offpeakSignal*`
-dry-contact config), which is inactive on this unit. Two subsystems, two groups — the
-writes were going to the wrong one. Three theories died on the way (the operation name,
-the day mask, the eco program), each eliminated by a live experiment; the panel-diff
-method is what cracked it.
+**The window WORKS from Home Assistant since v5.30.0.** It took two empirical keys,
+each found by experiment after four wrong theories:
 
-The panel's "different heating schedules per day" option is not yet mapped — one more
-panel experiment plus a capture diff away, the same method.
+1. **Period group 2** — `opp2EcoStartTime1` / `opp2EcoEndTime1`. A window set on the
+   appliance's own panel ("Programação horária", 09:00–18:00) landed there in the next
+   capture, with nothing else changing. Group 1, which v5.26–v5.28 wrote to, belongs to
+   the inactive off-peak tariff feature.
+2. **`operationName: grSetEcoTime`** — the settings command executes the operation
+   *named in the payload*; the schema's pinned value is only a default. Found by the
+   echo-resistant probe on 2026-08-26, and differentially proven: three other candidate
+   names sent the very same field first and every one was discarded, `grSetEcoTime`
+   moved it persistently.
+
+Every window write now carries `operationName: grSetEcoTime`; every vacation write
+re-names `grSetVacDate` (one write mutates the command's stored operation, so the next
+write of the other kind must name its own). The known-operation table lives in
+`hon_commands.SETTINGS_PARAM_OPERATIONS` — each entry either live-verified or the
+schema's own pin — and the write gate follows it: a parameter with no known operation
+cannot be written, because there is nothing to name. `addhon.probe_settings_operation`
+is how new names are found; obvious next targets are the sterilization hour
+(`grSetSterilization*` failed — try other spellings) and the panel's per-day schedule
+variant (not yet mapped; one panel experiment plus a capture diff away).
 
 **v5.28 trim.** The v5.22 mirrors of the rest of the schedule subsystem (daily power
 timer, group 2, quiet windows, day mask, off-peak dry-contact tuning) and the

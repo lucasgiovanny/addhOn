@@ -868,16 +868,17 @@ class PowerCommandResolutionTest(unittest.TestCase):
         added, _ = _one(commands=commands)
         self.assertEqual(added[0]._on_off_command, "settings")
 
-    def test_a_mandatory_power_parameter_would_be_kept(self) -> None:
-        # The gate follows the MANDATORY flag, not the operation name. This appliance
-        # marks onOffStatus mandatory 0 -- which is why its power never worked through
-        # settings -- but a model that marks it mandatory keeps the control.
+    def test_a_mandatory_flag_does_not_rescue_power_on_a_pinned_command(self) -> None:
+        # v5.26 keyed the gate on the mandatory flag; the opp2 experiment killed that
+        # (a mandatory field echoed and was discarded). Since v5.30 the gate keys on
+        # the known-operation table, and no operation is known for onOffStatus -- so a
+        # pinned command loses the capability whatever the flag says.
         commands = _hw_commands(power_on_start_program=False)
         commands["settings"].parameters["onOffStatus"] = RangeParam(
             1, 0, 1, 1, mandatory=1
         )
         added, _ = _one(commands=commands)
-        self.assertEqual(added[0]._on_off_command, "settings")
+        self.assertIsNone(added[0]._on_off_command)
 
 
 class RealDeviceSchemaTest(unittest.TestCase):

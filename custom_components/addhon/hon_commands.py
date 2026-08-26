@@ -76,28 +76,54 @@ def find_settings_param(
 # belong to `operationName` and silently drops everything else in the same payload.
 SETTINGS_OPERATION_PARAM = "operationName"
 
-# WHAT A PINNED SETTINGS COMMAND WRITES -- the state of knowledge, revised twice on live
-# evidence:
+# HOW THE SETTINGS COMMAND REALLY WORKS -- settled on 2026-08-26 by the operation
+# probe, after three revisions each killed by a live experiment:
 #
-#   vacStartDate / vacEndDate    mandatory 1   the pinned operation's own fields
-#   opp1/opp2 window slots       mandatory 1   ECHO for ~a minute, then the appliance
-#                                              discards them (opp1: 2026-08-25/26;
-#                                              opp2: 2026-08-26, after the panel proved
-#                                              the parameter itself is the right one)
-#   tempSel / onOffStatus /      mandatory 0   dropped immediately, no echo
-#   sterilizationTime
+# The command is a SINGLE-OPERATION envelope, and it executes THE OPERATION NAMED IN
+# THE PAYLOAD. The "pinned" operationName the schema advertises is only a default (the
+# fixed value the cloud last stored), not a limit: sending operationName=grSetEcoTime
+# moved opp2EcoEndTime1 PERSISTENTLY -- differentially proven, because three other
+# candidate names sent the very same field first and every one was discarded. Fields
+# outside the named operation are dropped by the appliance; mandatory ones echo in the
+# cloud shadow for about a minute first (the artifact that fooled the v5.26 theory),
+# non-mandatory ones do not even echo.
 #
-# The v5.26 "mandatory group" theory was built on mistaking that echo for a persisted
-# write; the opp2 experiment killed it. What the evidence now supports: the appliance
-# EXECUTES only the operation the command is pinned to (grSetVacDate -> the vacation
-# window); mandatory fields outside it reach the cloud shadow and are reverted by the
-# appliance's next state publish, non-mandatory ones do not even echo.
-#
-# The GATE below still keys on the mandatory flag, deliberately: it separates "the cloud
-# will at least carry this write to the appliance" (worth offering while the hunt for
-# the executing operation continues -- see probe_settings_operation) from "provably
-# dropped on the doorstep" (never worth offering). A model whose settings command is a
-# free write (no pinned operationName) is never gated at all.
+# So a write through a pinned settings command needs the parameter's OPERATION sent
+# with it, and the table below records the operations that are KNOWN -- each one either
+# live-verified or the schema's own pin. A parameter with no known operation cannot be
+# written (there is nothing to name), which is what the gate below enforces. The hunt
+# for more names is addhon.probe_settings_operation.
+SETTINGS_PARAM_OPERATIONS: dict[str, str] = {
+    # The schema's own pin; the app schedules holiday by dates through it (v5.19).
+    "vacStartDate": "grSetVacDate",
+    "vacEndDate": "grSetVacDate",
+    # Probed 2026-08-26: moved opp2EcoEndTime1 and survived re-reads while three other
+    # names were discarded. The heating window ("Programacao horaria") lives in period
+    # group 2 -- see time.py.
+    "opp2EcoStartTime1": "grSetEcoTime",
+    "opp2EcoEndTime1": "grSetEcoTime",
+}
+
+
+def with_operation(appliance, command_name: str, params: dict) -> dict:
+    """`params` plus the operationName that EXECUTES this write, where one is known.
+
+    Only for a pinned settings command (a free-write command has no operation
+    envelope, and naming one would send a parameter the command does not have). The
+    operation is attached when every parameter in `params` agrees on it -- a write
+    mixing two operations is a caller bug and goes out un-named rather than half-named.
+
+    Attaching explicitly ALSO repairs the command state: writing one operation mutates
+    the command's operationName parameter, so without this the NEXT write of a
+    different operation would inherit the wrong name and be silently discarded.
+    """
+    if settings_operation(appliance, command_name) is None:
+        return params
+    operations = {SETTINGS_PARAM_OPERATIONS.get(name) for name in params}
+    operations.discard(None)
+    if len(operations) == 1:
+        return {SETTINGS_OPERATION_PARAM: next(iter(operations)), **params}
+    return params
 
 
 def settings_operation(appliance, command_name: str = "settings") -> str | None:
@@ -183,26 +209,23 @@ def settings_operation_candidates(parameter: str) -> list[str]:
 def settings_write_blocked(
     appliance, param_name: str, command_name: str = "settings"
 ) -> str | None:
-    """The pinned operation that would SWALLOW a write of `param_name`, or None.
+    """The operation that would SWALLOW a write of `param_name`, or None.
 
-    The capability gate for every settings-backed control. A settings command pinned to a
-    single operation writes its MANDATORY parameter group and drops the rest (see the
-    evidence above), so a non-mandatory parameter cannot be written through it -- and a
-    control that reports success while the appliance ignores it is worse than no control.
+    The capability gate for every settings-backed control. On a pinned settings command
+    a write only lands when sent with the parameter's own operation (see the table
+    above); a parameter whose operation is UNKNOWN cannot be written -- there is
+    nothing to name -- and a control that reports success while the appliance ignores
+    it is worse than no control.
 
-    Returns None (not blocked) whenever the command is a free write, or the parameter is
-    mandatory, or the schema does not say. Never blocks on a guess.
+    Returns None (not blocked) when the command is a free write, or when the
+    parameter's operation is known (the write path attaches it via with_operation).
     """
     operation = settings_operation(appliance, command_name)
     if operation is None:
         return None
-    param = command_param(appliance, command_name, param_name)
-    if param is None:
+    if param_name in SETTINGS_PARAM_OPERATIONS:
         return None
-    mandatory = getattr(param, "mandatory", None)
-    if mandatory is None:
-        return None
-    return None if mandatory else operation
+    return operation
 
 
 def param_values(param) -> list[str]:

@@ -480,8 +480,11 @@ class PinnedSettingsWriteTest(unittest.TestCase):
             settings_write_blocked(appliance, "pvTempSel"), "grSetVacDate"
         )
 
-    def test_a_parameter_without_mandatory_metadata_is_never_blocked(self) -> None:
-        # Missing schema information is not evidence: never refuse on a guess.
+    def test_an_unknown_parameter_is_blocked_on_a_pinned_command(self) -> None:
+        # Since v5.30 the gate keys on the KNOWN-OPERATION table: a write only lands
+        # when sent with the parameter's own operationName (differentially proven by
+        # the grSetEcoTime probe), so a parameter whose operation nobody knows cannot
+        # be written -- there is nothing to name.
         from custom_components.addhon.hon_commands import settings_write_blocked
 
         class Bare:
@@ -489,8 +492,8 @@ class PinnedSettingsWriteTest(unittest.TestCase):
 
         commands = _hw_commands()
         commands["settings"].parameters["mystery"] = Bare()
-        self.assertIsNone(
-            settings_write_blocked(FakeAppliance(commands), "mystery")
+        self.assertEqual(
+            settings_write_blocked(FakeAppliance(commands), "mystery"), "grSetVacDate"
         )
 
 

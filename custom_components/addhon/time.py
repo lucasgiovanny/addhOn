@@ -72,6 +72,7 @@ from .hon_commands import (
     async_send_command,
     find_settings_param,
     settings_write_blocked,
+    with_operation,
 )
 from .hw_values import hw_time
 
@@ -236,8 +237,16 @@ class HonScheduleTime(HonBaseEntity, TimeEntity):
                 self._command_name,
                 redact_id(self._appliance_id),
             )
+            # with_operation names grSetEcoTime in the payload -- the operation that
+            # EXECUTES the window write (probed 2026-08-26). Without it the appliance
+            # discards the field after a shadow echo, which is the whole v5.26-v5.29
+            # saga in one line.
             await async_send_command(
-                self.hass, client, appliance, self._command_name, {param: send_value}
+                self.hass,
+                client,
+                appliance,
+                self._command_name,
+                with_operation(appliance, self._command_name, {param: send_value}),
             )
             await self._async_request_command_refresh()
         except HomeAssistantError:

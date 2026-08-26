@@ -459,6 +459,29 @@ class MistypedParameterPreservationTest(unittest.TestCase):
         )
 
 
+class OperationEnvelopeTest(unittest.TestCase):
+    """Every vacation write names grSetVacDate explicitly (v5.30).
+
+    A heating-window write mutates the command's operationName to grSetEcoTime; without
+    re-naming, the next vacation write would inherit it and be silently discarded.
+    """
+
+    def test_the_write_renames_the_operation(self) -> None:
+        import datetime
+
+        entities, commands = _setup()
+        start = next(
+            e for e in entities if e.entity_description.key == "vacation_start_date"
+        )
+        # Simulate the aftermath of a heating-window write.
+        commands["settings"].parameters["operationName"].value = "grSetEcoTime"
+        asyncio.run(start.async_set_value(datetime.date(2026, 8, 19)))
+        self.assertEqual(
+            commands["settings"].parameters["operationName"].value, "grSetVacDate"
+        )
+        self.assertEqual(commands["settings"].parameters["vacStartDate"].value, "2026-08-19")
+
+
 class UnsetWindowTest(unittest.TestCase):
     """How "no holiday scheduled" is read and written (v5.25.0).
 

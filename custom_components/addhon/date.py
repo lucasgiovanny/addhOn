@@ -52,7 +52,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .base_entity import HonBaseEntity, coordinator_data_map
 from .const import APPLIANCE_HW, APPLIANCE_WH, DOMAIN
 from .debug_utils import redact_id
-from .hon_commands import async_send_command, find_settings_param
+from .hon_commands import async_send_command, find_settings_param, with_operation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -253,8 +253,15 @@ class HonVacationDate(HonBaseEntity, DateEntity):
                 self._command_name,
                 redact_id(self._appliance_id),
             )
+            # Explicitly named grSetVacDate: a heating-window write mutates the
+            # command's operationName to grSetEcoTime, and without re-naming here the
+            # next vacation write would inherit it and be silently discarded.
             await async_send_command(
-                self.hass, client, appliance, self._command_name, params
+                self.hass,
+                client,
+                appliance,
+                self._command_name,
+                with_operation(appliance, self._command_name, params),
             )
             await self._async_request_command_refresh()
         except HomeAssistantError:

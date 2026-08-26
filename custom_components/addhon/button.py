@@ -27,7 +27,7 @@ from .const import (
 )
 from .date import VAC_END_PARAM, VAC_START_PARAM, VAC_UNSET_DATE
 from .debug_utils import command_names, param_snapshot, redact_id, redact_store
-from .hon_commands import async_send_command, find_settings_param
+from .hon_commands import async_send_command, find_settings_param, with_operation
 from .logging_utils import reset_integration_log_level, silence_mqtt_noise
 from .param_rollback import restore_params, snapshot_params
 from .program_options import apply_pending_options
@@ -149,7 +149,11 @@ class HonClearVacationButton(HonBaseEntity, ButtonEntity):
                 translation_domain=DOMAIN,
                 translation_key="appliance_or_client_unavailable",
             )
-        params = {VAC_START_PARAM: VAC_UNSET_DATE, VAC_END_PARAM: VAC_UNSET_DATE}
+        params = with_operation(
+            appliance,
+            self._command_name,
+            {VAC_START_PARAM: VAC_UNSET_DATE, VAC_END_PARAM: VAC_UNSET_DATE},
+        )
         try:
             _LOGGER.info(
                 "Button: clearing the vacation window id=%s",

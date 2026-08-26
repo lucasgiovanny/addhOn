@@ -205,7 +205,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         So: pass the parameters you want AND the `operationName` you are testing. A wrong
         operation name is the same no-op the integration is trying to avoid shipping; a
         right one is a discovery, and it belongs in
-        hon_commands.SETTINGS_OPERATION_PARAMS so the affected controls become real.
+        hon_commands.SETTINGS_PARAM_OPERATIONS so the affected controls become real.
 
         Parameter values still go through the engine's own setters, so a range or enum
         parameter rejects an out-of-schema value exactly as it would from an entity.
@@ -280,7 +280,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         Each round sends {operationName: candidate, parameter: value}, waits for the
         appliance to apply and the shadow to catch up, then reads the parameter back. The
         first candidate that moves it is the answer -- and belongs in
-        hon_commands.SETTINGS_OPERATION_PARAMS, which is what turns the read-only
+        hon_commands.SETTINGS_PARAM_OPERATIONS, which is what turns the read-only
         controls for that group into real ones.
 
         Refuses up front when the parameter is not mirrored in the shadow (the result
@@ -373,7 +373,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 message = (
                     f"`{parameter}` moved to `{value}` with **operationName "
                     f"`{found}`** and SURVIVED a re-check {settle:.0f}s later. Add it "
-                    f"to SETTINGS_OPERATION_PARAMS to make the matching controls "
+                    f"to SETTINGS_PARAM_OPERATIONS to make the matching controls "
                     f"writable."
                 )
             else:
