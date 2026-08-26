@@ -656,6 +656,10 @@ _HW_REMOVED = (
     ("switch", "_silent_mode"),
     ("switch", "_child_lock"),
     ("switch", "_sterilization"),
+    # v5.29.0: the heating-window sensor was re-keyed (eco_schedule_1 -> heating_window)
+    # when it moved from period group 1 to group 2, where the panel's schedule really
+    # lives.
+    ("sensor", "_eco_schedule_1"),
     ("number", "_target_temp_hc"),
     ("number", "_target_temp_pv"),
     ("number", "_target_temp_sg"),

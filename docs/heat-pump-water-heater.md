@@ -92,22 +92,19 @@ two groups; the job — "heat during my solar / cheap-tariff hours" — needs on
 rest stays writable via `addhon.send_command`). A slot with both ends at the same time
 is unused — that is how the appliance spells an empty slot.
 
-**Current status, honestly (2026-08-26):** the write is accepted by the cloud, echoes
-for about a minute, and is then **discarded by the appliance** — the whole schedule
-block reverts on the next state publish. Two theories died on the evidence: the
-operation name (disproved by the mandatory-flag experiments) and the day mask
-(disproved by the shadow history — `opp1EcoDays` read `7F` on all seven captures). The
-**leading explanation is the program**: the parameters are named `opp1Eco…`, and the
-appliance's own panel carries the whole schedule UI ("Programação horária" — heat only
-inside the window, same every day or per-day) in the **Eco** program's menus, while this
-unit runs `auto`. A window configured for a program that is not running is configuration
-the firmware has no owner for. The test uses only proven writes: switch the
-`water_heater` to **Eco**, set the window, watch whether it survives the polls.
+**The window lives in period group 2** — `opp2EcoStartTime1` / `opp2EcoEndTime1`.
+Settled empirically on 2026-08-26: a window set on the appliance's own panel
+("Programação horária", 09:00–18:00) landed in group 2 in the very next capture, with
+**nothing else changing** — no enable flag, no scheme, no mask. Group 1, which
+v5.26–v5.28 wrote to and the appliance kept discarding, belongs to the **off-peak
+tariff** feature (its day mask is `opp1EcoDays`, its siblings are the `offpeakSignal*`
+dry-contact config), which is inactive on this unit. Two subsystems, two groups — the
+writes were going to the wrong one. Three theories died on the way (the operation name,
+the day mask, the eco program), each eliminated by a live experiment; the panel-diff
+method is what cracked it.
 
-The panel's "different heating schedules per day" option is what the two period groups
-and the day mask exist for — per-weekday windows become reachable the moment the base
-case works. The day mask still rides along defensively on every window write (restored
-to `7F` when it reads as selecting no days).
+The panel's "different heating schedules per day" option is not yet mapped — one more
+panel experiment plus a capture diff away, the same method.
 
 **v5.28 trim.** The v5.22 mirrors of the rest of the schedule subsystem (daily power
 timer, group 2, quiet windows, day mask, off-peak dry-contact tuning) and the

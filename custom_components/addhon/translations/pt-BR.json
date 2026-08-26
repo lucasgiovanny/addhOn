@@ -581,14 +581,14 @@
       "heat_output_day": {
         "name": "Calor produzido hoje"
       },
-      "eco_schedule_1": {
-        "name": "Janela de aquecimento"
-      },
       "sterilization_time": {
         "name": "Horário do anti-legionela"
       },
       "power_supply_source": {
         "name": "Fonte de alimentação"
+      },
+      "heating_window": {
+        "name": "Janela de aquecimento"
       }
     },
     "binary_sensor": {

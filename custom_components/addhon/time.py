@@ -19,27 +19,21 @@ WHAT IS EXPOSED. ONE heating window -- the first slot of off-peak period group 1
 window, not the nine slots the appliance carries, is a deliberate product decision: the
 job to be done is "heat during my solar / cheap-tariff hours", and one window does it.
 
-CURRENT STATUS ON THE HP250M7C-F9, honestly: the write is ACCEPTED by the cloud, echoes
-back for about a minute, and is then DISCARDED by the appliance -- the whole schedule
-block reverts on the next report. The day-mask theory (v5.27) was disproved by the
-shadow history: `opp1EcoDays` read "7F" on every one of seven captures, so the mask was
-never broken appliance-side.
+HOW THE RIGHT SLOT WAS FOUND -- a short archaeology, kept because every wrong theory
+eliminated something real. Writes to period group 1 were accepted by the cloud, echoed
+for a minute, and then discarded by the appliance. The operation-name theory died on
+the mandatory-flag experiments (v5.26); the day-mask theory died on the shadow history
+(opp1EcoDays read "7F" on all seven captures, v5.28); the eco-program theory died live
+(the group-1 write reverted in eco mode too). What settled it was setting the window on
+the APPLIANCE'S OWN PANEL and diffing the next capture: the panel's window landed in
+GROUP 2, with nothing else changing. Group 1 -- the one with the opp1EcoDays mask,
+sibling to the offpeakSignal* dry-contact config -- belongs to the off-peak TARIFF
+feature, inactive on this unit (powerSupplySource 0). Two subsystems, two groups; we
+were writing to the wrong one.
 
-THE LEADING EXPLANATION is the PROGRAM. The parameters are named `opp1ECO...` and the
-appliance's own panel carries the schedule UI ("Programacao horaria" -- heating only
-within the defined window, same every day or per-day) in the ECO program's menus, while
-this unit runs `auto` (machMode 1) -- found by the user on the physical panel,
-2026-08-26. A window configured for a program that is not running is configuration the
-firmware has no owner for, and discarding it on the next state publish is exactly what
-was observed. The test is cheap and uses only proven writes: switch the water_heater to
-Eco (startProgram, solid), write the window, watch whether it survives the next polls.
-The panel's "different heating schedules per day" option is also what the two period
-groups and the day mask exist for -- per-weekday windows become reachable the moment the
-base case works.
-
-THE DAY MASK still rides along defensively: when the reported mask selects no days the
-write restores "7F" (every day) in the same payload, bypassing the mistyped range
-setter via payload_overrides. A mask that selects days is left exactly as it is.
+The panel offers "same every day" vs "different heating schedules per day"; how the
+per-day variant maps onto the slots is not yet captured -- a panel experiment plus one
+diff away, the same way the base case was cracked.
 
 WHAT IS NOT EXPOSED, AND WHY:
 - the other off-peak slots and period group 2: see above. For group 2 additionally,
@@ -79,12 +73,7 @@ from .hon_commands import (
     find_settings_param,
     settings_write_blocked,
 )
-from .hw_values import (
-    HW_ECO_DAYS_ALL,
-    HW_ECO_DAYS_ATTR,
-    hw_eco_days,
-    hw_time,
-)
+from .hw_values import hw_time
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,39 +89,37 @@ class HonTimeEntityDescription(TimeEntityDescription):
 
     param: str
     enabled_default: bool = True
-    # True for the heating-window pair: the write must keep the day mask alive, or the
-    # appliance sanitizes the whole window away (see the module docstring).
-    restores_day_mask: bool = False
 
 
-def _window(key: str, param: str, *, icon: str, enabled_default: bool,
-            restores_day_mask: bool = False):
+def _window(key: str, param: str, *, icon: str, enabled_default: bool):
     return HonTimeEntityDescription(
         key=key,
         param=param,
         icon=icon,
         entity_category=EntityCategory.CONFIG,
         enabled_default=enabled_default,
-        restores_day_mask=restores_day_mask,
     )
 
 
-# The heating window, then the quiet windows (disabled by default). See the module
-# docstring for why exactly one heating window is offered.
+# The heating window: PERIOD GROUP 2, slot 1. Not a guess -- a window set on the
+# appliance's own panel ("Programacao horaria", 09:00-18:00, 2026-08-26) landed in
+# opp2EcoStartTime1/opp2EcoEndTime1 in the very next capture, with NOTHING else changing
+# (no enable flag, no scheme, no mask). Group 1, which v5.26-v5.28 wrote to and the
+# appliance kept discarding, belongs to the off-peak TARIFF feature (its day mask is
+# opp1EcoDays, its siblings are the offpeakSignal* dry-contact config), which is
+# inactive on this unit.
 _SCHEDULE_TIMES: tuple[HonTimeEntityDescription, ...] = (
     _window(
         "heating_window_start",
-        "opp1EcoStartTime1",
+        "opp2EcoStartTime1",
         icon="mdi:calendar-clock",
         enabled_default=True,
-        restores_day_mask=True,
     ),
     _window(
         "heating_window_end",
-        "opp1EcoEndTime1",
+        "opp2EcoEndTime1",
         icon="mdi:calendar-clock",
         enabled_default=True,
-        restores_day_mask=True,
     ),
 )
 # The quiet-window entities v5.26 added were removed in v5.28 (registry cleanup in
@@ -241,33 +228,16 @@ class HonScheduleTime(HonBaseEntity, TimeEntity):
         # resolution ("00:00", "22:00") and sending "11:30:00" would not match the shape
         # it reports back, leaving the entity looking like the write failed.
         send_value = f"{value.hour:02d}:{value.minute:02d}"
-        # A window whose day mask selects no days is sanitized away by the appliance's
-        # own firmware (times reset to 00:00 on the next poll, and at power-on). The
-        # mask is mistyped by the cloud schema, so it cannot go through the parameter
-        # setter; it rides in the payload directly. "7F" = every day, the only value
-        # ever observed. A mask that already selects days is left exactly as it is.
-        payload_overrides: dict[str, str] | None = None
-        if (
-            self.entity_description.restores_day_mask
-            and hw_eco_days(self._get_attr(HW_ECO_DAYS_ATTR)) is None
-        ):
-            payload_overrides = {HW_ECO_DAYS_ATTR: HW_ECO_DAYS_ALL}
         try:
             _LOGGER.debug(
-                "Time debug: set %s=%s (cmd=%s, mask_restore=%s) id=%s",
+                "Time debug: set %s=%s (cmd=%s) id=%s",
                 param,
                 send_value,
                 self._command_name,
-                payload_overrides is not None,
                 redact_id(self._appliance_id),
             )
             await async_send_command(
-                self.hass,
-                client,
-                appliance,
-                self._command_name,
-                {param: send_value},
-                payload_overrides=payload_overrides,
+                self.hass, client, appliance, self._command_name, {param: send_value}
             )
             await self._async_request_command_refresh()
         except HomeAssistantError:

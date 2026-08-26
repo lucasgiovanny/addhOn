@@ -1016,9 +1016,14 @@ def _hw_total_energy(_raw, get_attr: Callable[[str], object]) -> float | None:
     return total if seen else None
 
 
-def _hw_eco_schedule_1(_raw, get_attr: Callable[[str], object]) -> str | None:
-    """The three "cheap energy" windows of period group 1, as one readable list."""
-    return hw_eco_schedule(get_attr, 1)
+def _hw_heating_window(_raw, get_attr: Callable[[str], object]) -> str | None:
+    """The heating-schedule windows: PERIOD GROUP 2, as one readable list.
+
+    Group 2, not 1: a window set on the appliance's own panel landed in
+    opp2EcoStartTime1/opp2EcoEndTime1 (2026-08-26 capture diff). Group 1 belongs to the
+    inactive off-peak tariff feature -- see time.py.
+    """
+    return hw_eco_schedule(get_attr, 2)
 
 
 def _g_hw_time(key: str, attr: str, *, icon: str | None = None,
@@ -1202,11 +1207,12 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
     # selected (powerSupplySource reads 0 on every capture). A page of diagnostic mirrors
     # for a subsystem the appliance ignores was clutter, not information, so only three
     # survive:
-    #   - the heating window (the one being actively pursued -- see time.py),
+    #   - the heating window (period group 2 -- the panel's "Programacao horaria";
+    #     see time.py for how the group was identified),
     #   - the anti-legionella hour (PROVEN live: changed in the app, landed here),
     #   - powerSupplySource (disabled): the value that decides whether the schedule
     #     subsystem is active at all, i.e. the lead for unlocking the window.
-    _g_hw_schedule("eco_schedule_1", "opp1EcoStartTime1", _hw_eco_schedule_1),
+    _g_hw_schedule("heating_window", "opp2EcoStartTime1", _hw_heating_window),
     _g_hw_time("sterilization_time", "sterilizationTime",
                icon="mdi:bacteria-outline"),
     _g_hw_config("power_supply_source", "powerSupplySource", icon="mdi:transmission-tower"),

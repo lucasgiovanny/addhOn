@@ -214,7 +214,8 @@ class HeatPumpWaterHeaterTest(unittest.TestCase):
         # without new evidence.
         by_key = self._by_key()
         expected = {
-            "eco_schedule_1": "opp1EcoStartTime1",
+            # Group 2: where a panel-set window landed (2026-08-26 capture diff).
+            "heating_window": "opp2EcoStartTime1",
             "sterilization_time": "sterilizationTime",
             "power_supply_source": "powerSupplySource",
         }
@@ -224,9 +225,10 @@ class HeatPumpWaterHeaterTest(unittest.TestCase):
                 self.assertEqual(by_key[key].attr_key, attr)
                 self.assertTrue(by_key[key].gated)
         for retired in (
-            "timer_power_on", "timer_power_off", "eco_schedule_2", "silent_schedule",
-            "eco_days", "sterilization_interval", "external_heat_source",
-            "off_peak_period_scheme", "off_peak_heat_mode", "off_peak_heat_strategy",
+            "timer_power_on", "timer_power_off", "eco_schedule_1", "eco_schedule_2",
+            "silent_schedule", "eco_days", "sterilization_interval",
+            "external_heat_source", "off_peak_period_scheme", "off_peak_heat_mode",
+            "off_peak_heat_strategy",
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, by_key)
@@ -235,7 +237,7 @@ class HeatPumpWaterHeaterTest(unittest.TestCase):
         from homeassistant.const import EntityCategory
 
         by_key = self._by_key()
-        for key in ("eco_schedule_1", "sterilization_time", "power_supply_source"):
+        for key in ("heating_window", "sterilization_time", "power_supply_source"):
             with self.subTest(key=key):
                 self.assertEqual(
                     by_key[key].entity_category, EntityCategory.DIAGNOSTIC
@@ -249,26 +251,27 @@ class HeatPumpWaterHeaterTest(unittest.TestCase):
         # appliance; a bare 0 must never be rendered as a time.
         self.assertIsNone(sensor.value_fn(0))
 
-    def test_eco_schedule_reads_every_slot_of_its_own_group(self) -> None:
+    def test_the_heating_window_reads_group_2(self) -> None:
+        # The 2026-08-26 capture, verbatim: the panel's 09:00-18:00 window in group 2,
+        # group 1 untouched -- the sensor must show the panel's window, not group 1.
         by_key = self._by_key()
         attributes = {
-            "opp1EcoStartTime1": "11:00", "opp1EcoEndTime1": "16:00",
-            "opp1EcoStartTime3": "20:00", "opp1EcoEndTime3": "22:30",
+            "opp2EcoStartTime1": "09:00", "opp2EcoEndTime1": "18:00",
+            "opp1EcoStartTime1": "00:00", "opp1EcoEndTime1": "00:00",
         }
-        get_attr = attributes.get
-        self.assertTrue(by_key["eco_schedule_1"].value_fn_needs_attrs)
+        self.assertTrue(by_key["heating_window"].value_fn_needs_attrs)
         self.assertEqual(
-            by_key["eco_schedule_1"].value_fn(None, get_attr), "11:00-16:00, 20:00-22:30"
+            by_key["heating_window"].value_fn(None, attributes.get), "09:00-18:00"
         )
 
     def test_an_unconfigured_schedule_is_unknown_not_a_zero_length_window(self) -> None:
         by_key = self._by_key()
         attributes = {
-            f"opp1Eco{edge}Time{slot}": "00:00"
+            f"opp2Eco{edge}Time{slot}": "00:00"
             for edge in ("Start", "End")
             for slot in (1, 2, 3)
         }
-        self.assertIsNone(by_key["eco_schedule_1"].value_fn(None, attributes.get))
+        self.assertIsNone(by_key["heating_window"].value_fn(None, attributes.get))
 
     # --- the daily counters (v5.22.0) ----------------------------------------
 

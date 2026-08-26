@@ -581,14 +581,14 @@
       "heat_output_day": {
         "name": "Calore prodotto oggi"
       },
-      "eco_schedule_1": {
-        "name": "Finestra di riscaldamento"
-      },
       "sterilization_time": {
         "name": "Orario anti-legionella"
       },
       "power_supply_source": {
         "name": "Sorgente di alimentazione"
+      },
+      "heating_window": {
+        "name": "Finestra di riscaldamento"
       }
     },
     "binary_sensor": {

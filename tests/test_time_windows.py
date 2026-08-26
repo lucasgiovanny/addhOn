@@ -214,15 +214,19 @@ class FakeEntry:
 
 APPLIANCE_ID = "hw-1"
 
-# The slots backing ENTITIES: the heating window (off-peak slot 1) alone since v5.28.
-_SLOTS = ["opp1EcoStartTime1", "opp1EcoEndTime1"]
+# The slots backing ENTITIES: PERIOD GROUP 2, slot 1 -- where a window set on the
+# appliance's own panel landed (2026-08-26 capture diff). Group 1 belongs to the
+# inactive off-peak tariff feature; v5.26-v5.28 wrote there and the appliance kept
+# discarding it.
+_SLOTS = ["opp2EcoStartTime1", "opp2EcoEndTime1"]
 
-# Slots the appliance exposes but the platform must NOT build entities for: the other
-# off-peak slots AND the quiet windows (retired in v5.28 with the rest of the inactive
-# subsystem's mirrors).
-_UNEXPOSED = [f"opp1Eco{edge}Time{n}" for n in (2, 3) for edge in ("Start", "End")] + [
-    f"silent{edge}Time{n}" for n in (1, 2) for edge in ("Start", "End")
-]
+# Slots the appliance exposes but the platform must NOT build entities for: all of
+# group 1, the remaining group-2 slots, and the quiet windows.
+_UNEXPOSED = (
+    [f"opp1Eco{edge}Time{n}" for n in (1, 2, 3) for edge in ("Start", "End")]
+    + [f"opp2Eco{edge}Time{n}" for n in (2, 3) for edge in ("Start", "End")]
+    + [f"silent{edge}Time{n}" for n in (1, 2) for edge in ("Start", "End")]
+)
 
 
 class MaskParam:
@@ -325,7 +329,7 @@ class GatingTest(unittest.TestCase):
 class ReadTest(unittest.TestCase):
     def test_the_state_is_the_appliance_reading(self) -> None:
         entities = _by_key(
-            _setup(attributes=_attrs(opp1EcoStartTime1="11:00", opp1EcoEndTime1="16:00"))[0]
+            _setup(attributes=_attrs(opp2EcoStartTime1="11:00", opp2EcoEndTime1="16:00"))[0]
         )
         self.assertEqual(entities["heating_window_start"].native_value, datetime.time(11, 0))
         self.assertEqual(entities["heating_window_end"].native_value, datetime.time(16, 0))
@@ -337,7 +341,7 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(entities["heating_window_start"].native_value, datetime.time(0, 0))
 
     def test_an_unusable_reading_is_unknown(self) -> None:
-        entities = _by_key(_setup(attributes=_attrs(opp1EcoStartTime1="0"))[0])
+        entities = _by_key(_setup(attributes=_attrs(opp2EcoStartTime1="0"))[0])
         self.assertIsNone(entities["heating_window_start"].native_value)
 
 
@@ -346,7 +350,7 @@ class WriteTest(unittest.TestCase):
         entities, commands = _setup()
         start = _by_key(entities)["heating_window_start"]
         asyncio.run(start.async_set_value(datetime.time(11, 0)))
-        self.assertEqual(commands["settings"].parameters["opp1EcoStartTime1"].value, "11:00")
+        self.assertEqual(commands["settings"].parameters["opp2EcoStartTime1"].value, "11:00")
         self.assertEqual(commands["settings"].send_calls, 1)
 
     def test_seconds_are_dropped(self) -> None:
@@ -355,29 +359,17 @@ class WriteTest(unittest.TestCase):
         entities, commands = _setup()
         end = _by_key(entities)["heating_window_end"]
         asyncio.run(end.async_set_value(datetime.time(16, 30, 45)))
-        self.assertEqual(commands["settings"].parameters["opp1EcoEndTime1"].value, "16:30")
+        self.assertEqual(commands["settings"].parameters["opp2EcoEndTime1"].value, "16:30")
 
-    def test_a_zeroed_day_mask_is_restored_with_the_window(self) -> None:
-        # A window whose mask selects no days is sanitized away by the appliance (the
-        # freshly written times reverted on the next poll, live-observed 2026-08-26).
-        # The mask is mistyped by the cloud (range[0,40] vs "7F"), so it must ride in
-        # the payload -- the parameter object itself cannot hold it.
-        entities, commands = _setup(attributes=_attrs(opp1EcoDays=0))
+    def test_the_group_1_mask_is_preserved_not_managed(self) -> None:
+        # opp1EcoDays belongs to the OTHER subsystem (off-peak tariff). The window write
+        # no longer manages it; the mistyped-parameter preservation still carries the
+        # appliance's own reading through, because the range[0,40] parameter cannot hold
+        # "7F" and the command would otherwise send its schema default over it.
+        entities, commands = _setup(attributes=_attrs(opp1EcoDays="7F"))
         start = _by_key(entities)["heating_window_start"]
         asyncio.run(start.async_set_value(datetime.time(11, 0)))
-        sent = commands["settings"].sent
-        self.assertEqual(sent["opp1EcoStartTime1"], "11:00")
-        self.assertEqual(sent["opp1EcoDays"], "7F")
-
-    def test_a_real_day_mask_is_left_exactly_as_it_is(self) -> None:
-        # "3E" would be a Mon-Fri-style selection; restoring "7F" over it would widen the
-        # user's schedule behind their back.
-        entities, commands = _setup(attributes=_attrs(opp1EcoDays="3E"))
-        start = _by_key(entities)["heating_window_start"]
-        asyncio.run(start.async_set_value(datetime.time(11, 0)))
-        # The mistyped parameter cannot hold "3E" either, so the preservation path
-        # (shadow_overrides) carries the reported value through.
-        self.assertEqual(commands["settings"].sent["opp1EcoDays"], "3E")
+        self.assertEqual(commands["settings"].sent["opp1EcoDays"], "7F")
 
 
 
@@ -387,9 +379,9 @@ class WriteTest(unittest.TestCase):
             _by_key(entities)["heating_window_start"].async_set_value(datetime.time(23, 0))
         )
         params = commands["settings"].parameters
-        self.assertEqual(params["opp1EcoStartTime1"].value, "23:00")
-        self.assertEqual(params["opp1EcoEndTime1"].value, "00:00")
-        self.assertEqual(params["silentStartTime1"].value, "00:00")
+        self.assertEqual(params["opp2EcoStartTime1"].value, "23:00")
+        self.assertEqual(params["opp2EcoEndTime1"].value, "00:00")
+        self.assertEqual(params["opp1EcoStartTime1"].value, "00:00")
 
     def test_without_a_client_it_refuses(self) -> None:
         from custom_components.addhon import time as time_platform

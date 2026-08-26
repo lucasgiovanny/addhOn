@@ -581,14 +581,14 @@
       "heat_output_day": {
         "name": "Heat produced today"
       },
-      "eco_schedule_1": {
-        "name": "Heating window"
-      },
       "sterilization_time": {
         "name": "Anti-legionella time"
       },
       "power_supply_source": {
         "name": "Power supply source"
+      },
+      "heating_window": {
+        "name": "Heating window"
       }
     },
     "binary_sensor": {
