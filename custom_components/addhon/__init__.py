@@ -627,6 +627,39 @@ _HW_REMOVED = (
     ("time", "_eco_window_2_end"),
     ("time", "_eco_window_3_start"),
     ("time", "_eco_window_3_end"),
+    # v5.28.0: the great trim. The 2026-08-26 experiments showed the schedule /
+    # auxiliary-input subsystem is INACTIVE on this appliance (powerSupplySource 0 on
+    # every capture; the firmware discards writes to it), so the mirrors of that
+    # subsystem and the settings-backed controls whose writes it swallows were retired.
+    # Only the heating window (actively pursued), the proven anti-legionella hour and
+    # powerSupplySource itself (the lead) remain.
+    ("time", "_silent_window_1_start"),
+    ("time", "_silent_window_1_end"),
+    ("time", "_silent_window_2_start"),
+    ("time", "_silent_window_2_end"),
+    ("sensor", "_timer_power_on"),
+    ("sensor", "_timer_power_off"),
+    ("sensor", "_eco_schedule_2"),
+    ("sensor", "_silent_schedule"),
+    ("sensor", "_eco_days"),
+    ("sensor", "_sterilization_interval"),
+    ("sensor", "_external_heat_source"),
+    ("sensor", "_off_peak_period_scheme"),
+    ("sensor", "_off_peak_heat_mode"),
+    ("sensor", "_off_peak_heat_strategy"),
+    ("binary_sensor", "_timer_enabled"),
+    ("binary_sensor", "_silent_running"),
+    ("binary_sensor", "_solar_heating"),
+    ("binary_sensor", "_off_peak_input_enabled"),
+    ("binary_sensor", "_off_peak_signal"),
+    ("switch", "_boost"),
+    ("switch", "_silent_mode"),
+    ("switch", "_child_lock"),
+    ("switch", "_sterilization"),
+    ("number", "_target_temp_hc"),
+    ("number", "_target_temp_pv"),
+    ("number", "_target_temp_sg"),
+    ("number", "_sterilization_temp"),
 )
 
 

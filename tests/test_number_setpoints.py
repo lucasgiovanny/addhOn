@@ -397,8 +397,15 @@ class HeatPumpSetpointReadTest(unittest.TestCase):
     """
 
     def _by_key(self):
+        # UNPINNED on purpose: since v5.28 a pinned settings command creates no number
+        # entities at all (see PinnedSettingsWriteTest), so the read behaviour is
+        # exercised on the schema shape that still produces them.
         added = asyncio.run(
-            _build("HW", FakeAppliance(_hw_commands()), _hw_attributes())
+            _build(
+                "HW",
+                FakeAppliance(_hw_commands(pinned_operation=None)),
+                _hw_attributes(),
+            )
         )
         return {e.entity_description.key: e for e in added}
 
@@ -424,9 +431,14 @@ class HeatPumpSetpointReadTest(unittest.TestCase):
 
 
 class PinnedSettingsWriteTest(unittest.TestCase):
-    """A write the appliance would silently swallow must fail loudly (v5.22.0)."""
+    """A setpoint the pinned command would swallow gets NO entity at all (v5.28).
 
-    def _pv(self, *, pinned_operation="grSetVacDate"):
+    v5.22-v5.27 created the entity and raised on write; a number that errors on every
+    nudge is still a dead control, so the gate moved to setup (registry cleanup retires
+    the retired ones).
+    """
+
+    def _entities(self, *, pinned_operation="grSetVacDate"):
         commands = _hw_commands(pinned_operation=pinned_operation)
         added = asyncio.run(
             _build(
@@ -436,40 +448,25 @@ class PinnedSettingsWriteTest(unittest.TestCase):
                 client=FakeClient(),
             )
         )
-        return next(e for e in added if e.entity_description.key == "target_temp_pv"), commands
+        return {e.entity_description.key: e for e in added}, commands
 
-    def test_write_through_a_pinned_command_raises_and_sends_nothing(self) -> None:
-        from homeassistant.exceptions import HomeAssistantError
+    def test_a_pinned_command_creates_no_setpoint_entities(self) -> None:
+        entities, _ = self._entities()
+        self.assertEqual(entities, {})
 
-        pv, commands = self._pv()
-        with self.assertRaises(HomeAssistantError) as ctx:
-            asyncio.run(pv.async_set_native_value(70.0))
-        self.assertEqual(
-            ctx.exception.translation_key, "settings_operation_locked"
-        )
-        self.assertEqual(
-            ctx.exception.translation_placeholders,
-            {"param": "pvTempSel", "operation": "grSetVacDate"},
-        )
-        self.assertEqual(commands["settings"].send_calls, 0)
-        # ...and the READ half is untouched: the entity still reports the appliance.
-        self.assertEqual(pv.native_value, 75.0)
+    def test_the_operation_name_itself_does_not_decide(self) -> None:
+        # The name is a red herring: what a pinned settings command writes is its
+        # MANDATORY group, whatever the operation is called -- an operation this
+        # integration never saw gates exactly the same way.
+        entities, _ = self._entities(pinned_operation="grSetSomethingNew")
+        self.assertEqual(entities, {})
 
     def test_an_unpinned_settings_command_still_writes(self) -> None:
-        pv, commands = self._pv(pinned_operation=None)
+        entities, commands = self._entities(pinned_operation=None)
+        pv = entities["target_temp_pv"]
         asyncio.run(pv.async_set_native_value(70.0))
         self.assertEqual(commands["settings"].send_calls, 1)
         self.assertEqual(commands["settings"].parameters["pvTempSel"].value, 70)
-
-    def test_the_operation_name_itself_does_not_decide(self) -> None:
-        # The name turned out to be a red herring: what a pinned settings command writes
-        # is its MANDATORY group, whatever the operation is called.
-        pv, commands = self._pv(pinned_operation="grSetSomethingNew")
-        from homeassistant.exceptions import HomeAssistantError
-
-        with self.assertRaises(HomeAssistantError):
-            asyncio.run(pv.async_set_native_value(70.0))
-        self.assertEqual(commands["settings"].send_calls, 0)
 
     def test_a_mandatory_parameter_is_allowed(self) -> None:
         # The vacation window is mandatory, and it is the half of this command that

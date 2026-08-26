@@ -581,44 +581,14 @@
       "heat_output_day": {
         "name": "Calor produzido hoje"
       },
-      "timer_power_on": {
-        "name": "Ligar programado"
-      },
-      "timer_power_off": {
-        "name": "Desligar programado"
-      },
       "eco_schedule_1": {
         "name": "Janela de aquecimento"
-      },
-      "eco_schedule_2": {
-        "name": "Janelas de aquecimento (grupo 2)"
-      },
-      "eco_days": {
-        "name": "Dias da janela de aquecimento"
-      },
-      "silent_schedule": {
-        "name": "Janelas silenciosas"
       },
       "sterilization_time": {
         "name": "Horário do anti-legionela"
       },
-      "sterilization_interval": {
-        "name": "Intervalo do anti-legionela"
-      },
       "power_supply_source": {
         "name": "Fonte de alimentação"
-      },
-      "external_heat_source": {
-        "name": "Fonte de calor externa"
-      },
-      "off_peak_period_scheme": {
-        "name": "Esquema de períodos fora de ponta"
-      },
-      "off_peak_heat_mode": {
-        "name": "Modo de aquecimento fora de ponta"
-      },
-      "off_peak_heat_strategy": {
-        "name": "Estratégia de aquecimento fora de ponta"
       }
     },
     "binary_sensor": {
@@ -769,26 +739,11 @@
       "defrost": {
         "name": "Degelo"
       },
-      "off_peak_signal": {
-        "name": "Sinal de tarifa fora de ponta"
-      },
       "vacation_active": {
         "name": "Férias ativas"
       },
-      "timer_enabled": {
-        "name": "Temporizador"
-      },
       "sterilization_running": {
         "name": "Ciclo anti-legionela"
-      },
-      "silent_running": {
-        "name": "Modo silencioso ativo"
-      },
-      "solar_heating": {
-        "name": "Aquecimento solar"
-      },
-      "off_peak_input_enabled": {
-        "name": "Entrada fora de ponta"
       }
     },
     "switch": {
@@ -1123,18 +1078,6 @@
       },
       "heating_window_end": {
         "name": "Fim da janela de aquecimento"
-      },
-      "silent_window_1_start": {
-        "name": "Início da janela silenciosa 1"
-      },
-      "silent_window_1_end": {
-        "name": "Fim da janela silenciosa 1"
-      },
-      "silent_window_2_start": {
-        "name": "Início da janela silenciosa 2"
-      },
-      "silent_window_2_end": {
-        "name": "Fim da janela silenciosa 2"
       }
     }
   },

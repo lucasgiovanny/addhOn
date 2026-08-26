@@ -206,59 +206,59 @@ class HeatPumpWaterHeaterTest(unittest.TestCase):
 
     # --- the schedule mirror (v5.22.0) ---------------------------------------
 
-    def test_schedule_sensors_exist_and_read_the_shadow_names(self) -> None:
+    def test_the_schedule_mirror_is_deliberately_small(self) -> None:
+        # v5.28 trimmed the v5.22 mirror of the whole (inactive) schedule subsystem down
+        # to the three that earn their place: the heating window being pursued, the
+        # PROVEN anti-legionella hour, and powerSupplySource -- the value that decides
+        # whether the subsystem is active at all. The retired keys must not creep back
+        # without new evidence.
         by_key = self._by_key()
         expected = {
-            "timer_power_on": "timingPowerOn",
-            "timer_power_off": "timingPowerOff",
             "eco_schedule_1": "opp1EcoStartTime1",
-            "eco_schedule_2": "opp2EcoStartTime1",
-            "eco_days": "opp1EcoDays",
-            "silent_schedule": "silentStartTime1",
             "sterilization_time": "sterilizationTime",
-            "sterilization_interval": "sterilizationInterval",
+            "power_supply_source": "powerSupplySource",
         }
         for key, attr in expected.items():
             with self.subTest(key=key):
                 self.assertIn(key, by_key)
                 self.assertEqual(by_key[key].attr_key, attr)
-                # Capability-gated: a model without the parameter creates no entity.
                 self.assertTrue(by_key[key].gated)
+        for retired in (
+            "timer_power_on", "timer_power_off", "eco_schedule_2", "silent_schedule",
+            "eco_days", "sterilization_interval", "external_heat_source",
+            "off_peak_period_scheme", "off_peak_heat_mode", "off_peak_heat_strategy",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, by_key)
 
     def test_schedule_sensors_are_diagnostic(self) -> None:
-        # They mirror configuration, not telemetry -- and they are read-only because the
-        # settings command that owns them is pinned to one operation.
         from homeassistant.const import EntityCategory
 
         by_key = self._by_key()
-        for key in ("timer_power_on", "eco_schedule_1", "eco_days", "sterilization_time"):
+        for key in ("eco_schedule_1", "sterilization_time", "power_supply_source"):
             with self.subTest(key=key):
                 self.assertEqual(
                     by_key[key].entity_category, EntityCategory.DIAGNOSTIC
                 )
 
-    def test_timer_times_render_as_clock_values(self) -> None:
+    def test_sterilization_time_renders_as_a_clock_value(self) -> None:
         by_key = self._by_key()
-        timer_on = by_key["timer_power_on"]
-        self.assertEqual(timer_on.value_fn("07:30"), "07:30")
-        # The settings COMMAND declares the same name as a range[0,1]; a bare 0 must not
-        # be rendered as a time.
-        self.assertIsNone(timer_on.value_fn(0))
+        sensor = by_key["sterilization_time"]
+        self.assertEqual(sensor.value_fn("07:30"), "07:30")
+        # The settings COMMAND spells time-typed names as numeric placeholders on this
+        # appliance; a bare 0 must never be rendered as a time.
+        self.assertIsNone(sensor.value_fn(0))
 
     def test_eco_schedule_reads_every_slot_of_its_own_group(self) -> None:
         by_key = self._by_key()
         attributes = {
             "opp1EcoStartTime1": "11:00", "opp1EcoEndTime1": "16:00",
             "opp1EcoStartTime3": "20:00", "opp1EcoEndTime3": "22:30",
-            "opp2EcoStartTime1": "01:00", "opp2EcoEndTime1": "05:00",
         }
         get_attr = attributes.get
         self.assertTrue(by_key["eco_schedule_1"].value_fn_needs_attrs)
         self.assertEqual(
             by_key["eco_schedule_1"].value_fn(None, get_attr), "11:00-16:00, 20:00-22:30"
-        )
-        self.assertEqual(
-            by_key["eco_schedule_2"].value_fn(None, get_attr), "01:00-05:00"
         )
 
     def test_an_unconfigured_schedule_is_unknown_not_a_zero_length_window(self) -> None:
@@ -269,12 +269,6 @@ class HeatPumpWaterHeaterTest(unittest.TestCase):
             for slot in (1, 2, 3)
         }
         self.assertIsNone(by_key["eco_schedule_1"].value_fn(None, attributes.get))
-
-    def test_eco_days_stay_raw(self) -> None:
-        # "7F" = every day. Only that value has ever been observed, so the bit order is
-        # not knowable and the mask is reported as the device spells it.
-        by_key = self._by_key()
-        self.assertEqual(by_key["eco_days"].value_fn("7F"), "7F")
 
     # --- the daily counters (v5.22.0) ----------------------------------------
 

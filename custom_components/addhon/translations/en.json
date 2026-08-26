@@ -581,44 +581,14 @@
       "heat_output_day": {
         "name": "Heat produced today"
       },
-      "timer_power_on": {
-        "name": "Timer switch-on"
-      },
-      "timer_power_off": {
-        "name": "Timer switch-off"
-      },
       "eco_schedule_1": {
         "name": "Heating window"
-      },
-      "eco_schedule_2": {
-        "name": "Heating windows (group 2)"
-      },
-      "eco_days": {
-        "name": "Heating window days"
-      },
-      "silent_schedule": {
-        "name": "Silent windows"
       },
       "sterilization_time": {
         "name": "Anti-legionella time"
       },
-      "sterilization_interval": {
-        "name": "Anti-legionella interval"
-      },
       "power_supply_source": {
         "name": "Power supply source"
-      },
-      "external_heat_source": {
-        "name": "External heat source"
-      },
-      "off_peak_period_scheme": {
-        "name": "Off-peak period scheme"
-      },
-      "off_peak_heat_mode": {
-        "name": "Off-peak heating mode"
-      },
-      "off_peak_heat_strategy": {
-        "name": "Off-peak heating strategy"
       }
     },
     "binary_sensor": {
@@ -769,26 +739,11 @@
       "defrost": {
         "name": "Defrost"
       },
-      "off_peak_signal": {
-        "name": "Off-peak signal"
-      },
       "vacation_active": {
         "name": "Vacation active"
       },
-      "timer_enabled": {
-        "name": "Timer"
-      },
       "sterilization_running": {
         "name": "Anti-legionella cycle"
-      },
-      "silent_running": {
-        "name": "Silent mode running"
-      },
-      "solar_heating": {
-        "name": "Solar heating"
-      },
-      "off_peak_input_enabled": {
-        "name": "Off-peak input"
       }
     },
     "switch": {
@@ -1123,18 +1078,6 @@
       },
       "heating_window_end": {
         "name": "Heating window end"
-      },
-      "silent_window_1_start": {
-        "name": "Silent window 1 start"
-      },
-      "silent_window_1_end": {
-        "name": "Silent window 1 end"
-      },
-      "silent_window_2_start": {
-        "name": "Silent window 2 start"
-      },
-      "silent_window_2_end": {
-        "name": "Silent window 2 end"
       }
     }
   },

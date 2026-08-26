@@ -89,17 +89,34 @@ Assistant is down. This is the best of the three.
 
 There is deliberately **one** heating window (the appliance carries nine slots across
 two groups; the job — "heat during my solar / cheap-tariff hours" — needs one, and the
-rest stays readable as sensors and writable via `addhon.send_command`). The two quiet
-windows exist as `time` entities too, disabled by default. A slot with both ends at the
-same time is unused — that is how the appliance spells an empty slot.
+rest stays writable via `addhon.send_command`). A slot with both ends at the same time
+is unused — that is how the appliance spells an empty slot.
 
-**The day mask rides along.** A window only runs on the days its mask (`opp1EcoDays`)
-selects, and the appliance's firmware *sanitizes* a window whose mask selects no days:
-the freshly written times revert to 00:00 on the next poll, and again at power-on
-(live-observed 2026-08-26 — the mask had been zeroed by a v5.25-era write, because the
-cloud mistypes it as a numeric range). Every heating-window write therefore checks the
-reported mask and, when it selects no days, restores `7F` (every day) in the same
-payload. A mask that already selects days is left exactly as it is.
+**Current status, honestly (2026-08-26):** the write is accepted by the cloud, echoes
+for about a minute, and is then **discarded by the appliance** — the whole schedule
+block reverts on the next state publish. Two theories died on the evidence: the
+operation name (disproved by the mandatory-flag experiments) and the day mask
+(disproved by the shadow history — `opp1EcoDays` read `7F` on all seven captures). The
+**leading explanation is the program**: the parameters are named `opp1Eco…`, and the
+appliance's own panel carries the whole schedule UI ("Programação horária" — heat only
+inside the window, same every day or per-day) in the **Eco** program's menus, while this
+unit runs `auto`. A window configured for a program that is not running is configuration
+the firmware has no owner for. The test uses only proven writes: switch the
+`water_heater` to **Eco**, set the window, watch whether it survives the polls.
+
+The panel's "different heating schedules per day" option is what the two period groups
+and the day mask exist for — per-weekday windows become reachable the moment the base
+case works. The day mask still rides along defensively on every window write (restored
+to `7F` when it reads as selecting no days).
+
+**v5.28 trim.** The v5.22 mirrors of the rest of the schedule subsystem (daily power
+timer, group 2, quiet windows, day mask, off-peak dry-contact tuning) and the
+settings-backed controls whose writes the pinned command swallows (boost, silent, child
+lock, anti-legionella toggle/temperature, the PV/SG/HC setpoints) were **removed** —
+dead controls and never-changing mirrors were clutter. What remains on the schedule
+side: the heating window, the proven anti-legionella hour, and `powerSupplySource`
+(disabled) as the diagnostic pointer. Everything removed returns the day a capture
+shows it alive.
 
 Two parts stay read-only, and not for want of trying: the daily power timer and the day
 mask are mandatory too, but the cloud declares them as numeric ranges while the appliance

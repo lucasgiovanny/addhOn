@@ -214,15 +214,15 @@ class FakeEntry:
 
 APPLIANCE_ID = "hw-1"
 
-# The slots backing ENTITIES: the heating window (off-peak slot 1) and the two quiet
-# windows. The appliance carries more (opp1 slots 2-3, all of group 2); those deliberately
-# get no entity -- one window does the job -- and the gate below proves none appears.
-_SLOTS = ["opp1EcoStartTime1", "opp1EcoEndTime1"] + [
+# The slots backing ENTITIES: the heating window (off-peak slot 1) alone since v5.28.
+_SLOTS = ["opp1EcoStartTime1", "opp1EcoEndTime1"]
+
+# Slots the appliance exposes but the platform must NOT build entities for: the other
+# off-peak slots AND the quiet windows (retired in v5.28 with the rest of the inactive
+# subsystem's mirrors).
+_UNEXPOSED = [f"opp1Eco{edge}Time{n}" for n in (2, 3) for edge in ("Start", "End")] + [
     f"silent{edge}Time{n}" for n in (1, 2) for edge in ("Start", "End")
 ]
-
-# Slots the appliance exposes but the platform must NOT build entities for.
-_UNEXPOSED = [f"opp1Eco{edge}Time{n}" for n in (2, 3) for edge in ("Start", "End")]
 
 
 class MaskParam:
@@ -289,26 +289,19 @@ def _by_key(entities):
 
 
 class GatingTest(unittest.TestCase):
-    def test_one_entity_per_exposed_slot(self) -> None:
-        entities, _ = _setup()
-        self.assertEqual(len(entities), len(_SLOTS))
-        self.assertIn("heating_window_start", _by_key(entities))
-        self.assertIn("silent_window_2_end", _by_key(entities))
-
-    def test_the_other_off_peak_slots_get_no_entity(self) -> None:
-        # The appliance exposes them and they are writable; ONE window is a product
-        # decision, and this pins it (the rest stays reachable via addhon.send_command).
-        keys = set(_by_key(_setup()[0]))
-        self.assertFalse({k for k in keys if "eco_window" in k})
-
-    def test_only_the_heating_pair_is_on_by_default(self) -> None:
+    def test_exactly_the_heating_pair_exists(self) -> None:
+        # The appliance exposes nine slots; ONE window is a product decision, and this
+        # pins it (the rest stays reachable via addhon.send_command).
         entities = _by_key(_setup()[0])
-        enabled = {
-            key
-            for key, entity in entities.items()
-            if entity._attr_entity_registry_enabled_default
-        }
-        self.assertEqual(enabled, {"heating_window_start", "heating_window_end"})
+        self.assertEqual(
+            set(entities), {"heating_window_start", "heating_window_end"}
+        )
+
+    def test_the_heating_pair_is_on_by_default(self) -> None:
+        entities = _by_key(_setup()[0])
+        self.assertTrue(
+            all(e._attr_entity_registry_enabled_default for e in entities.values())
+        )
 
     def test_a_parameter_the_command_would_swallow_gets_no_entity(self) -> None:
         # mandatory 0 on a PINNED command: the appliance accepts the payload and ignores
@@ -318,7 +311,7 @@ class GatingTest(unittest.TestCase):
 
     def test_an_unpinned_command_is_never_gated(self) -> None:
         entities, _ = _setup(commands=_hw_commands(mandatory=0, pinned=False))
-        self.assertEqual(len(entities), len(_SLOTS))
+        self.assertEqual(len(entities), len(_SLOTS))  # the heating pair
 
     def test_a_device_without_the_schedule_gets_nothing(self) -> None:
         entities, _ = _setup(commands={"settings": RecordingCommand({})})
@@ -386,26 +379,17 @@ class WriteTest(unittest.TestCase):
         # (shadow_overrides) carries the reported value through.
         self.assertEqual(commands["settings"].sent["opp1EcoDays"], "3E")
 
-    def test_a_silent_window_never_touches_the_mask(self) -> None:
-        entities, commands = _setup(attributes=_attrs(opp1EcoDays=0))
-        asyncio.run(
-            _by_key(entities)["silent_window_1_start"].async_set_value(datetime.time(23, 0))
-        )
-        sent = commands["settings"].sent
-        self.assertEqual(sent["silentStartTime1"], "23:00")
-        # No restore for a write that is not about the heating window: the shadow holds
-        # a plain 0, which the numeric parameter CAN hold, so nothing overrides it.
-        self.assertEqual(sent["opp1EcoDays"], "0")
+
 
     def test_it_writes_only_its_own_slot(self) -> None:
         entities, commands = _setup()
         asyncio.run(
-            _by_key(entities)["silent_window_1_start"].async_set_value(datetime.time(23, 0))
+            _by_key(entities)["heating_window_start"].async_set_value(datetime.time(23, 0))
         )
         params = commands["settings"].parameters
-        self.assertEqual(params["silentStartTime1"].value, "23:00")
-        self.assertEqual(params["silentEndTime1"].value, "00:00")
-        self.assertEqual(params["opp1EcoStartTime1"].value, "00:00")
+        self.assertEqual(params["opp1EcoStartTime1"].value, "23:00")
+        self.assertEqual(params["opp1EcoEndTime1"].value, "00:00")
+        self.assertEqual(params["silentStartTime1"].value, "00:00")
 
     def test_without_a_client_it_refuses(self) -> None:
         from custom_components.addhon import time as time_platform

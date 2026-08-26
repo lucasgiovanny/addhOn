@@ -335,6 +335,13 @@ def _appliance_switches(coordinator, appliance_id: str, data: dict, client) -> l
             # capability-gate: only if the parameter exists in the settings command
             if settings_param(appliance, desc.param) is None:
                 continue
+            # ...and only if a write would actually LAND. On a settings command pinned
+            # to one operation the appliance discards every non-mandatory parameter
+            # (live-verified on the HP250M7C-F9, five data points), so the toggle would
+            # be a control that errors on every touch. No entity beats a dead one; the
+            # registry cleanup in __init__ retires the ones v5.22-v5.27 shipped.
+            if settings_write_blocked(appliance, desc.param) is not None:
+                continue
             found.append(HonSettingsSwitch(coordinator, appliance_id, desc, client))
             created.append(desc.key)
         _LOGGER.debug(

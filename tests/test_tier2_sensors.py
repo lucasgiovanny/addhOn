@@ -389,7 +389,6 @@ class HeatPumpAttributeRealityTest(unittest.TestCase):
         "waterVolume",
         "remainingTimeMMHeating",
         "prPhase",
-        "offpeakSignalHeatStrategy",
     }
 
     @staticmethod
@@ -436,29 +435,28 @@ class HeatPumpAttributeRealityTest(unittest.TestCase):
 class HeatPumpBinaryTest(unittest.IsolatedAsyncioTestCase):
     """The HW binary sensors added in v5.22.0, against the real HP250M7C-F9 shadow."""
 
-    # The 2026-08-25 capture, verbatim for the keys under test: the anti-legionella
-    # cycle was up (sterilizationTime 22:00, capture at 21:54, compressor running) while
-    # the quiet mode, the solar coil and the off-peak input were all idle/disabled.
+    # The 2026-08-25 capture, verbatim: the anti-legionella cycle was up
+    # (sterilizationTime 22:00, capture at 21:54, compressor running).
     _SHADOW = {
-        "timingOnOffStatus": 0,
         "sterilizationCurrentStatus": 1,
-        "silentCurrentStatus": 0,
-        "solarHeatingCurrentStatus": 0,
-        "offpeakSignalSwitch": 0,
-        "offpeakSignalCurrentStatus": 0,
     }
 
-    def test_the_new_keys_are_in_the_table(self) -> None:
+    def test_the_sterilization_flag_survived_the_trim(self) -> None:
+        # v5.28 removed the mirrors of the inactive schedule subsystem (timer, quiet,
+        # solar coil, off-peak pair); the anti-legionella flag is the one v5.22 binary
+        # that stays -- it is PROVEN (observed 1 minutes before the configured hour).
         keys = set(_binary_keys("HW"))
-        self.assertLessEqual(
-            {
+        self.assertIn("sterilization_running", keys)
+        self.assertEqual(
+            keys
+            & {
                 "timer_enabled",
-                "sterilization_running",
                 "silent_running",
                 "solar_heating",
                 "off_peak_input_enabled",
+                "off_peak_signal",
             },
-            keys,
+            set(),
         )
 
     async def test_states_follow_the_shadow(self) -> None:
@@ -466,39 +464,11 @@ class HeatPumpBinaryTest(unittest.IsolatedAsyncioTestCase):
             e.entity_description.key: e for e in await _build_binary("HW", self._SHADOW)
         }
         self.assertIs(entities["sterilization_running"].is_on, True)
-        self.assertIs(entities["timer_enabled"].is_on, False)
-        self.assertIs(entities["silent_running"].is_on, False)
-        self.assertIs(entities["off_peak_input_enabled"].is_on, False)
 
     async def test_they_are_capability_gated(self) -> None:
-        # A model that reports none of them creates none of them, rather than five
-        # confident "off" entities.
+        # A model that reports nothing creates nothing, rather than a confident "off".
         created = {e.entity_description.key for e in await _build_binary("HW", {})}
-        self.assertEqual(
-            created
-            & {
-                "timer_enabled",
-                "sterilization_running",
-                "silent_running",
-                "solar_heating",
-                "off_peak_input_enabled",
-            },
-            set(),
-        )
-
-    def test_the_off_peak_pair_is_input_enabled_plus_signal(self) -> None:
-        # Two different questions: is the dry contact WIRED UP at all, and is it closed
-        # right now. Reading one for the other would misreport a PV install.
-        by_key = {
-            d.key: d
-            for d in __import__(
-                "custom_components.addhon.binary_sensor", fromlist=["BINARY_SENSORS"]
-            ).BINARY_SENSORS["HW"]
-        }
-        self.assertEqual(by_key["off_peak_input_enabled"].attr_key, "offpeakSignalSwitch")
-        self.assertEqual(
-            by_key["off_peak_signal"].attr_key, "offpeakSignalCurrentStatus"
-        )
+        self.assertNotIn("sterilization_running", created)
 
 
 class Tier2GatingTest(unittest.IsolatedAsyncioTestCase):

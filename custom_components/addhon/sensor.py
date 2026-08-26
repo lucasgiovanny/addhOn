@@ -112,14 +112,12 @@ from .air_purifier import (
 from .debug_utils import redact_id
 from .hw_values import (
     HW_ACTIONS,
-    HW_ECO_DAYS_ATTR,
     HW_HEAT_SOURCES,
     HW_SOURCES,
     HW_WATER_LEVEL_ATTR,
     hw_action,
     hw_eco_schedule,
     hw_heat_source,
-    hw_silent_schedule,
     hw_time,
     hw_water_level,
     hw_weekday,
@@ -1023,16 +1021,6 @@ def _hw_eco_schedule_1(_raw, get_attr: Callable[[str], object]) -> str | None:
     return hw_eco_schedule(get_attr, 1)
 
 
-def _hw_eco_schedule_2(_raw, get_attr: Callable[[str], object]) -> str | None:
-    """The three "cheap energy" windows of period group 2."""
-    return hw_eco_schedule(get_attr, 2)
-
-
-def _hw_silent_schedule(_raw, get_attr: Callable[[str], object]) -> str | None:
-    """The two quiet-mode windows."""
-    return hw_silent_schedule(get_attr)
-
-
 def _g_hw_time(key: str, attr: str, *, icon: str | None = None,
                enabled_default: bool = True) -> HonSensorEntityDescription:
     """Capability-gated clock readout ("HH:MM") from the appliance's own schedule.
@@ -1207,54 +1195,21 @@ _HEAT_PUMP_WH: tuple[HonSensorEntityDescription, ...] = _WATER_HEATER + (
     _g_hw_energy("heat_output_day", "accumulatedHeatDay", _hw_pick_day,
                  enabled_default=False, device_class=None, icon="mdi:heat-wave"),
     # --- the appliance's own schedule, mirrored read-only --------------------
-    # Ground truth: the HP250M7C-F9 command + shadow dumps (see hw_values). This is the
-    # answer to "can the appliance run only during certain hours" -- it can, three
-    # different ways, and none of them was visible in Home Assistant before v5.22.0.
-    # Every one is configured in the official app and mirrored here.
-    _g_hw_time("timer_power_on", "timingPowerOn", icon="mdi:timer-play-outline"),
-    _g_hw_time("timer_power_off", "timingPowerOff", icon="mdi:timer-stop-outline"),
+    # Deliberately SMALL since v5.28.0. The v5.22 cut mirrored the whole schedule
+    # subsystem (daily power timer, both off-peak groups, day mask, quiet windows,
+    # off-peak dry-contact tuning) -- and the 2026-08-26 experiments showed the appliance
+    # DISCARDS writes to all of it, almost certainly because the off-peak function is not
+    # selected (powerSupplySource reads 0 on every capture). A page of diagnostic mirrors
+    # for a subsystem the appliance ignores was clutter, not information, so only three
+    # survive:
+    #   - the heating window (the one being actively pursued -- see time.py),
+    #   - the anti-legionella hour (PROVEN live: changed in the app, landed here),
+    #   - powerSupplySource (disabled): the value that decides whether the schedule
+    #     subsystem is active at all, i.e. the lead for unlocking the window.
     _g_hw_schedule("eco_schedule_1", "opp1EcoStartTime1", _hw_eco_schedule_1),
-    _g_hw_schedule("eco_schedule_2", "opp2EcoStartTime1", _hw_eco_schedule_2,
-                   enabled_default=False),
-    # The day mask as the device spells it ("7F" = every day). Raw on purpose: see
-    # HW_ECO_DAYS_ATTR -- only the all-days value has ever been observed, so decoding it
-    # into weekday names would assert a bit order nothing supports.
-    HonSensorEntityDescription(
-        key="eco_days",
-        attr_key=HW_ECO_DAYS_ATTR,
-        icon="mdi:calendar-week",
-        value_fn=_as_text,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        gated=True,
-        enabled_default=False,
-    ),
-    _g_hw_schedule("silent_schedule", "silentStartTime1", _hw_silent_schedule,
-                   icon="mdi:volume-off", enabled_default=False),
     _g_hw_time("sterilization_time", "sterilizationTime",
                icon="mdi:bacteria-outline"),
-    HonSensorEntityDescription(
-        key="sterilization_interval",
-        attr_key="sterilizationInterval",
-        icon="mdi:calendar-refresh",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        gated=True,
-        enabled_default=False,
-    ),
-    # --- auxiliary-input configuration, raw ----------------------------------
-    # The photovoltaic / smart-grid / off-peak dry-contact setup. Its SETPOINTS are the
-    # target_temp_pv/sg/hc numbers; these are the switches that decide when the appliance
-    # honours them. Raw values, see _g_hw_config.
-    #
-    # off_peak_heat_strategy is listed even though the HP250M7C-F9 does NOT mirror it into
-    # the shadow (it exists only on the settings command): the capability gate then simply
-    # creates no entity there, while a model that does report it gets one. Reading the
-    # command mirror instead is deliberately not done -- that value is the schema default
-    # refreshed only at load, i.e. a confidently stale reading.
     _g_hw_config("power_supply_source", "powerSupplySource", icon="mdi:transmission-tower"),
-    _g_hw_config("external_heat_source", "externalHeatSource", icon="mdi:fire"),
-    _g_hw_config("off_peak_period_scheme", "offPeakPeriodScheme", icon="mdi:calendar-clock"),
-    _g_hw_config("off_peak_heat_mode", "offpeakSignalHeatMode", icon="mdi:transmission-tower"),
-    _g_hw_config("off_peak_heat_strategy", "offpeakSignalHeatStrategy", icon="mdi:strategy"),
 )
 
 # Robot vacuum (RVC): battery, state, time, power, areas, errors.

@@ -581,44 +581,14 @@
       "heat_output_day": {
         "name": "Calore prodotto oggi"
       },
-      "timer_power_on": {
-        "name": "Accensione programmata"
-      },
-      "timer_power_off": {
-        "name": "Spegnimento programmato"
-      },
       "eco_schedule_1": {
         "name": "Finestra di riscaldamento"
-      },
-      "eco_schedule_2": {
-        "name": "Finestre di riscaldamento (gruppo 2)"
-      },
-      "eco_days": {
-        "name": "Giorni della finestra di riscaldamento"
-      },
-      "silent_schedule": {
-        "name": "Fasce silenziose"
       },
       "sterilization_time": {
         "name": "Orario anti-legionella"
       },
-      "sterilization_interval": {
-        "name": "Intervallo anti-legionella"
-      },
       "power_supply_source": {
         "name": "Sorgente di alimentazione"
-      },
-      "external_heat_source": {
-        "name": "Fonte di calore esterna"
-      },
-      "off_peak_period_scheme": {
-        "name": "Schema fasce economiche"
-      },
-      "off_peak_heat_mode": {
-        "name": "Modalità riscaldamento fascia economica"
-      },
-      "off_peak_heat_strategy": {
-        "name": "Strategia riscaldamento fascia economica"
       }
     },
     "binary_sensor": {
@@ -769,26 +739,11 @@
       "defrost": {
         "name": "Sbrinamento"
       },
-      "off_peak_signal": {
-        "name": "Segnale fascia economica"
-      },
       "vacation_active": {
         "name": "Vacanza attiva"
       },
-      "timer_enabled": {
-        "name": "Timer"
-      },
       "sterilization_running": {
         "name": "Ciclo anti-legionella"
-      },
-      "silent_running": {
-        "name": "Modalità silenziosa attiva"
-      },
-      "solar_heating": {
-        "name": "Riscaldamento solare"
-      },
-      "off_peak_input_enabled": {
-        "name": "Ingresso fascia economica"
       }
     },
     "switch": {
@@ -1123,18 +1078,6 @@
       },
       "heating_window_end": {
         "name": "Fine finestra di riscaldamento"
-      },
-      "silent_window_1_start": {
-        "name": "Inizio fascia silenziosa 1"
-      },
-      "silent_window_1_end": {
-        "name": "Fine fascia silenziosa 1"
-      },
-      "silent_window_2_start": {
-        "name": "Inizio fascia silenziosa 2"
-      },
-      "silent_window_2_end": {
-        "name": "Fine fascia silenziosa 2"
       }
     }
   },

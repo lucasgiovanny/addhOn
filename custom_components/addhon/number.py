@@ -445,6 +445,12 @@ async def async_setup_entry(
             if found is None:
                 continue
             command_name, param = found
+            # A setpoint the pinned settings command would swallow gets NO entity: the
+            # write raised a clear error since v5.22, but a number that errors on every
+            # nudge is still a dead control (see switch.py; registry cleanup in
+            # __init__). The READ side survives where a sensor covers it.
+            if settings_write_blocked(appliance, description.param, command_name) is not None:
+                continue
             # An enum-typed setpoint (e.g. tempSelZ3 = ['0','2','5'] on some multidoor
             # models) has no min/max/step, so a plain number would fabricate 0..100
             # bounds and the cloud enum setter would reject every legitimate pick. Derive

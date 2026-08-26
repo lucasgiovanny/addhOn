@@ -15,20 +15,31 @@ that matters: an off-peak window written straight through `settings` -- no opera
 touched -- landed on the appliance and came back as 11:00-16:00 (2026-08-25). Every
 schedule field is mandatory on that schema; every toggle that never worked is not.
 
-WHAT IS EXPOSED. ONE heating window -- the first slot of off-peak period group 1 -- plus
-the two quiet windows (disabled by default). One window, not the nine slots the appliance
-carries, is a deliberate product decision: the job to be done is "heat during my solar /
-cheap-tariff hours", one window does it, and a page of start/end pairs buries the two
-that matter. The remaining slots stay readable through the schedule sensors and writable
-through addhon.send_command for whoever needs them.
+WHAT IS EXPOSED. ONE heating window -- the first slot of off-peak period group 1. One
+window, not the nine slots the appliance carries, is a deliberate product decision: the
+job to be done is "heat during my solar / cheap-tariff hours", and one window does it.
 
-THE DAY MASK RIDES ALONG. A window is only real if its day mask (`opp1EcoDays`) selects
-at least one day. The mask is mistyped by the cloud (declared range[0,40], real value
-"7F"), so a v5.25-era write reset it to 0 -- and the appliance's firmware SANITIZES a
-window with no days: the freshly written times reverted to 00:00 on the next poll, and
-again at power-on (live-observed 2026-08-26). So every window write checks the reported
-mask and, when it selects no days, restores "7F" (every day -- the only value ever
-observed) in the same payload, bypassing the mistyped setter via payload_overrides.
+CURRENT STATUS ON THE HP250M7C-F9, honestly: the write is ACCEPTED by the cloud, echoes
+back for about a minute, and is then DISCARDED by the appliance -- the whole schedule
+block reverts on the next report. The day-mask theory (v5.27) was disproved by the
+shadow history: `opp1EcoDays` read "7F" on every one of seven captures, so the mask was
+never broken appliance-side.
+
+THE LEADING EXPLANATION is the PROGRAM. The parameters are named `opp1ECO...` and the
+appliance's own panel carries the schedule UI ("Programacao horaria" -- heating only
+within the defined window, same every day or per-day) in the ECO program's menus, while
+this unit runs `auto` (machMode 1) -- found by the user on the physical panel,
+2026-08-26. A window configured for a program that is not running is configuration the
+firmware has no owner for, and discarding it on the next state publish is exactly what
+was observed. The test is cheap and uses only proven writes: switch the water_heater to
+Eco (startProgram, solid), write the window, watch whether it survives the next polls.
+The panel's "different heating schedules per day" option is also what the two period
+groups and the day mask exist for -- per-weekday windows become reachable the moment the
+base case works.
+
+THE DAY MASK still rides along defensively: when the reported mask selects no days the
+write restores "7F" (every day) in the same payload, bypassing the mistyped range
+setter via payload_overrides. A mask that selects days is left exactly as it is.
 
 WHAT IS NOT EXPOSED, AND WHY:
 - the other off-peak slots and period group 2: see above. For group 2 additionally,
@@ -71,7 +82,6 @@ from .hon_commands import (
 from .hw_values import (
     HW_ECO_DAYS_ALL,
     HW_ECO_DAYS_ATTR,
-    HW_SILENT_SLOTS,
     hw_eco_days,
     hw_time,
 )
@@ -124,16 +134,10 @@ _SCHEDULE_TIMES: tuple[HonTimeEntityDescription, ...] = (
         enabled_default=True,
         restores_day_mask=True,
     ),
-) + tuple(
-    _window(
-        f"silent_window_{slot}_{edge.lower()}",
-        f"silent{edge}Time{slot}",
-        icon="mdi:volume-off",
-        enabled_default=False,
-    )
-    for slot in HW_SILENT_SLOTS
-    for edge in ("Start", "End")
 )
+# The quiet-window entities v5.26 added were removed in v5.28 (registry cleanup in
+# __init__): they belong to the same inactive subsystem, their writes are discarded the
+# same way, and unlike the heating window nobody is trying to make them work.
 
 # HW is the ground-truthed type; WH is included so a plain water heater that DOES expose
 # the schedule gets the entities, and one that does not simply fails the gate.
