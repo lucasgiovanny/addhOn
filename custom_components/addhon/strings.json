@@ -582,6 +582,17 @@
       },
       "timer_mm": {
         "name": "Timer minutes"
+      },
+      "my_zone_mode": {
+        "name": "My Zone mode",
+        "state": {
+          "zero_fresh": "0 °C fresh",
+          "quick_cool": "Quick cool",
+          "chiller": "Chiller",
+          "cool_drink": "Cool drink",
+          "cheese": "Cheese",
+          "fruit_and_veg": "Fruit and vegetables"
+        }
       }
     },
     "binary_sensor": {
@@ -642,6 +653,9 @@
       "door_zone3": {
         "name": "Zone 3 door"
       },
+      "door_zone4": {
+        "name": "Zone 4 door"
+      },
       "door_cavity1": {
         "name": "Cavity 1 door"
       },
@@ -658,16 +672,16 @@
         "name": "Energy saving"
       },
       "quick_cool": {
-        "name": "Super cool"
+        "name": "Super cool (reading)"
       },
       "quick_freeze": {
-        "name": "Super freeze"
+        "name": "Super freeze (reading)"
       },
       "auto_set": {
-        "name": "Auto-set"
+        "name": "Auto-set (reading)"
       },
       "holiday_mode": {
-        "name": "Holiday mode"
+        "name": "Holiday mode (reading)"
       },
       "filter_change": {
         "name": "Filter change"
@@ -895,29 +909,41 @@
       },
       "power": {
         "name": "Power"
+      },
+      "auto_set": {
+        "name": "Auto-set"
+      },
+      "super_cool": {
+        "name": "Super cool"
+      },
+      "super_freeze": {
+        "name": "Super freeze"
+      },
+      "holiday_mode": {
+        "name": "Holiday mode"
       }
     },
     "number": {
       "target_temp_zone1": {
-        "name": "Zone 1 temperature"
+        "name": "Zone 1 target temperature"
       },
       "target_temp_zone2": {
-        "name": "Zone 2 temperature"
+        "name": "Zone 2 target temperature"
       },
       "target_temp_zone3": {
-        "name": "Zone 3 temperature"
+        "name": "Zone 3 target temperature"
       },
       "target_temp_zone4": {
-        "name": "Zone 4 temperature"
+        "name": "Zone 4 target temperature"
       },
       "target_temp_upper": {
-        "name": "Upper zone temperature"
+        "name": "Upper zone target temperature"
       },
       "target_temp_lower": {
-        "name": "Lower zone temperature"
+        "name": "Lower zone target temperature"
       },
       "target_temp": {
-        "name": "Temperature"
+        "name": "Target temperature"
       },
       "target_temp_oven": {
         "name": "Oven temperature"
@@ -975,6 +1001,14 @@
           "iot_extra_ice": "Extra ice",
           "iot_high_efficiency": "High efficiency",
           "iot_special_food_core": "Special food"
+        }
+      },
+      "my_zone_mode": {
+        "name": "My Zone mode",
+        "state": {
+          "zero_fresh": "0 °C fresh",
+          "quick_cool": "Quick cool",
+          "fruit_and_veg": "Fruit and vegetables"
         }
       },
       "spin_speed": {
@@ -1066,6 +1100,24 @@
       "stop_program": {
         "name": "Stop program"
       },
+      "ref_preset_iot_daily_use": {
+        "name": "Apply daily use"
+      },
+      "ref_preset_iot_extra_cold": {
+        "name": "Apply extra cold"
+      },
+      "ref_preset_iot_extra_cold_water": {
+        "name": "Apply extra cold (water)"
+      },
+      "ref_preset_iot_extra_ice": {
+        "name": "Apply extra ice"
+      },
+      "ref_preset_iot_high_efficiency": {
+        "name": "Apply high efficiency"
+      },
+      "ref_preset_iot_special_food_core": {
+        "name": "Apply special food"
+      },
       "force_refresh": {
         "name": "Refresh now"
       },
@@ -1104,6 +1156,9 @@
     "program_not_supported": {
       "message": "Program \"{program}\" is not supported by this device."
     },
+    "setpoint_owned_by_mode": {
+      "message": "{mode} is running and the appliance is choosing this temperature. Switch the mode off first."
+    },
     "purifier_not_running": {
       "message": "The purifier must be confirmed running to change this."
     },
@@ -1121,6 +1176,12 @@
     },
     "speed_not_supported": {
       "message": "This purifier runs in discrete modes and has no fan speed. Set a preset mode instead of a percentage."
+    }
+  },
+  "issues": {
+    "ref_program_select_replaced": {
+      "title": "The fridge program dropdown has been replaced",
+      "description": "Your fridge's single program dropdown (`select.…_ref_program`) was removed, because the appliance does not work that way: Super Cool, Super Freeze, Auto-set and Holiday are four independent settings and can run at the same time, and turning one off used to turn the other three off with it.\n\nThey are now four switches. The My Zone drawer has its own mode select, and each downloaded preset has a button that sends it.\n\n**Any automation or script that called `select.select_option` on the old entity needs updating.** It will not report an error: Home Assistant answers a call to an entity that no longer exists with a warning in the log and a successful service call, so the automation keeps running and does nothing.\n\nDismiss this notice once you have checked."
     }
   }
 }

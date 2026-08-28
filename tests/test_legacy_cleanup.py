@@ -44,6 +44,13 @@ def _install_stubs() -> None:
     uc.UpdateFailed = getattr(uc, "UpdateFailed", type("UpdateFailed", (Exception,), {}))
     _mod("homeassistant.helpers.entity_registry")  # functions set per-test
     _mod("homeassistant.helpers.device_registry")   # idem
+    # The repair registry. Imported lazily by `_raise_ref_program_repair`, and that
+    # import is wrapped in a bare except -- so WITHOUT this stub the notice would fail
+    # silently and every assertion about it would pass for the wrong reason.
+    ir = _mod("homeassistant.helpers.issue_registry")
+    ir.IssueSeverity = getattr(
+        ir, "IssueSeverity", type("IssueSeverity", (), {"WARNING": "warning"})
+    )
     # The two entity BASE classes conftest does not install (it installs their
     # descriptions and device classes). The zone-clone trap below imports the real
     # hob tables to drive itself, which pulls the two platform modules in.
@@ -62,12 +69,14 @@ def _install_stubs() -> None:
     ha.helpers.update_coordinator = uc
     ha.helpers.entity_registry = sys.modules["homeassistant.helpers.entity_registry"]
     ha.helpers.device_registry = sys.modules["homeassistant.helpers.device_registry"]
+    ha.helpers.issue_registry = sys.modules["homeassistant.helpers.issue_registry"]
 
 
 _install_stubs()
 
 import homeassistant.helpers.device_registry as dr  # noqa: E402
 import homeassistant.helpers.entity_registry as er  # noqa: E402
+import homeassistant.helpers.issue_registry as ir  # noqa: E402
 from custom_components.addhon import (  # noqa: E402
     DOMAIN,
     _remove_legacy_entities,
@@ -119,7 +128,19 @@ class FakeDeviceRegistry:
         self._devices[:] = [d for d in self._devices if d.id != device_id]
 
 
-def _run(entries, coord_data=None, devices=()):
+def _run(entries, coord_data=None, devices=(), issues=None, on_issue=None):
+    # Always rebound, never left pointing at a previous test's list: a run that does not
+    # ask about repairs must not append into one that does, or the assertions here would
+    # depend on collection order. `on_issue` is the escape hatch for the one test that
+    # needs the repair registry to FAIL -- binding it here rather than around the call
+    # is what keeps the rebind unconditional and the failing stub reachable.
+    if on_issue is not None:
+        ir.async_create_issue = on_issue
+    else:
+        sink = [] if issues is None else issues
+        ir.async_create_issue = lambda hass, domain, key, **kw: sink.append(
+            (domain, key, kw)
+        )
     reg = FakeRegistry(entries)
     er.async_get = lambda hass: reg
     er.async_entries_for_config_entry = lambda registry, entry_id: list(registry._entries)
@@ -173,6 +194,300 @@ class LegacyCleanupTest(unittest.TestCase):
             coord_data={"wmid": {"type": "WM"}},
         )
         self.assertEqual(removed, [])
+
+    # --- #93: the fridge program select, replaced rather than dropped.
+
+    @staticmethod
+    def _fridge_appliance(*, flags=True, drawer=False, zones="fridge|freezer|vtRoom1"):
+        """A fridge whose live schema decides whether it was superseded.
+
+        Built as the production predicate reads it: the program enum off
+        `startProgram.program`, the clearable flags off `stopProgram`, and -- for the
+        drawer -- one category pinning `tempSelZ3`, zoned on the drawer alone.
+        """
+        class _Param:
+            def __init__(self, values=None, value=None, typology="enum"):
+                self.values = values
+                self.value = value
+                self.typology = typology
+
+        class _Cmd:
+            def __init__(self, parameters, categories=None):
+                self.parameters = parameters
+                if categories is not None:
+                    self.categories = categories
+
+        codes = []
+        categories = {}
+        if flags:
+            codes.append("super_cool")
+            categories["super_cool"] = _Cmd(
+                {"quickModeZ1": _Param(value="1", typology="fixed")}
+            )
+        if drawer:
+            codes.append("zero_fresh")
+            categories["zero_fresh"] = _Cmd(
+                {
+                    "tempSelZ3": _Param(value="0", typology="fixed"),
+                    "zone": _Param(values=["vtroom1"]),
+                    "programFamily": _Param(values=["dashboard"]),
+                }
+            )
+        commands = {
+            "startProgram": _Cmd({"program": _Param(values=codes)}, categories),
+            "stopProgram": _Cmd(
+                {"quickModeZ1": _Param(value="0", typology="fixed")}
+                if flags
+                else {"onOffStatus": _Param(value="0", typology="fixed")}
+            ),
+        }
+        return types.SimpleNamespace(
+            commands=commands,
+            model_attributes={} if zones is None else {"zones": zones},
+        )
+
+    def test_the_superseded_fridge_program_select_is_removed(self) -> None:
+        # Replaced, not dropped: four mode switches now write the same registers with a
+        # per-flag `off`. Left behind, the select would sit `unavailable` with the '?'
+        # badge -- and an automation calling `select.select_option` on it logs a WARNING
+        # and reports SUCCESS, which is the quietest way this change could fail.
+        removed, _detached = _run(
+            [FakeRegEntry("select.fridge_ref_program", "refid_ref_program")],
+            coord_data={"refid": {"type": "REF", "appliance": self._fridge_appliance()}},
+        )
+        self.assertEqual(removed, ["select.fridge_ref_program"])
+
+    def test_a_fridge_that_keeps_its_select_keeps_the_entity(self) -> None:
+        # THE reason this rule is conditional, and the only one of the five that is. A
+        # fridge offering no clearable flag and no drawer program still gets the select,
+        # so removing its registry entry would delete a LIVE entity on the next start.
+        removed, _detached = _run(
+            [FakeRegEntry("select.fridge_ref_program", "refid_ref_program")],
+            coord_data={
+                "refid": {
+                    "type": "REF",
+                    "appliance": self._fridge_appliance(flags=False),
+                }
+            },
+        )
+        self.assertEqual(removed, [])
+
+    def test_a_drawer_alone_also_supersedes_it(self) -> None:
+        # The other half of the predicate: no clearable flag, but the drawer select is
+        # buildable, so the single select does step aside and its entry must go.
+        removed, _detached = _run(
+            [FakeRegEntry("select.fridge_ref_program", "refid_ref_program")],
+            coord_data={
+                "refid": {
+                    "type": "REF",
+                    "appliance": self._fridge_appliance(flags=False, drawer=True),
+                }
+            },
+        )
+        self.assertEqual(removed, ["select.fridge_ref_program"])
+
+    def test_another_domain_with_the_same_suffix_is_kept(self) -> None:
+        # Scoped to `select` for the reason the panel-light rule is: an entity of another
+        # domain sharing the unique_id is a different entity.
+        removed, _detached = _run(
+            [FakeRegEntry("sensor.fridge_ref_program", "refid_ref_program")],
+            coord_data={"refid": {"type": "REF", "appliance": self._fridge_appliance()}},
+        )
+        self.assertEqual(removed, [])
+
+    def test_a_select_of_another_appliance_is_kept(self) -> None:
+        # Double-anchored: the id must be a superseded fridge in THIS snapshot, not just
+        # any entity whose unique_id ends the right way.
+        removed, _detached = _run(
+            [FakeRegEntry("select.other_ref_program", "otherid_ref_program")],
+            coord_data={"refid": {"type": "REF", "appliance": self._fridge_appliance()}},
+        )
+        self.assertEqual(removed, [])
+
+    def test_nothing_is_purged_without_a_snapshot(self) -> None:
+        # A degraded start postpones the purge instead of guessing, exactly like the
+        # tumble-dryer and hob rules.
+        removed, _detached = _run(
+            [FakeRegEntry("select.fridge_ref_program", "refid_ref_program")],
+            coord_data={},
+        )
+        self.assertEqual(removed, [])
+
+    def test_a_broken_schema_costs_the_purge_and_not_the_setup(self) -> None:
+        # The predicate reads a live schema, so it can raise on an appliance the cloud
+        # answered badly for. That must postpone this one removal, never abort setup and
+        # never take the other four rules with it.
+        class _Exploding:
+            @property
+            def commands(self):
+                raise RuntimeError("schema unreadable")
+
+            model_attributes = {"zones": "fridge|vtRoom1"}
+
+        removed, _detached = _run(
+            [
+                FakeRegEntry("select.fridge_ref_program", "refid_ref_program"),
+                FakeRegEntry("switch.foo_power", "ID_power"),
+            ],
+            coord_data={"refid": {"type": "REF", "appliance": _Exploding()}},
+        )
+        self.assertEqual(removed, ["switch.foo_power"])
+
+    def test_the_removal_log_redacts_identity(self) -> None:
+        import custom_components.addhon as init_mod
+
+        mac = "AA:BB:CC:DD:EE:FF"
+        with self.assertLogs(init_mod._LOGGER.name, level="INFO") as logs:
+            _run(
+                [FakeRegEntry("select.fridge_ref_program", f"{mac}_ref_program")],
+                coord_data={
+                    "AA:BB:CC:DD:EE:FF": {
+                        "type": "REF",
+                        "appliance": self._fridge_appliance(),
+                    }
+                },
+            )
+        blob = "\n".join(logs.output)
+        self.assertIn("Removed the fridge program select", blob)
+        self.assertNotIn(mac, blob)
+        self.assertNotIn("AA:BB", blob)
+
+    def test_removing_the_select_raises_a_repair(self) -> None:
+        """The removal itself is silent, and so is the breakage it causes.
+
+        Home Assistant answers `select.select_option` on an entity that no longer exists
+        with a WARNING in the log and a SUCCESSFUL service call, so an automation that
+        used to set the fridge to Holiday keeps reporting as run and does nothing. The
+        repair is the only place a user is told.
+        """
+        issues: list = []
+        _run(
+            [FakeRegEntry("select.fridge_ref_program", "refid_ref_program")],
+            coord_data={"refid": {"type": "REF", "appliance": self._fridge_appliance()}},
+            issues=issues,
+        )
+        self.assertEqual(1, len(issues))
+        domain, key, kwargs = issues[0]
+        self.assertEqual(DOMAIN, domain)
+        self.assertEqual("ref_program_select_replaced", key)
+        self.assertFalse(kwargs["is_fixable"])
+        self.assertEqual("ref_program_select_replaced", kwargs["translation_key"])
+
+    def test_no_repair_when_nothing_was_removed(self) -> None:
+        # A fresh install, and every start after the one that did the removal: the purge
+        # is idempotent, so the notice must fire once and never again.
+        issues: list = []
+        _run(
+            [FakeRegEntry("sensor.fridge_temp_zone1", "refid_temp_zone1")],
+            coord_data={"refid": {"type": "REF", "appliance": self._fridge_appliance()}},
+            issues=issues,
+        )
+        self.assertEqual([], issues)
+
+    def test_no_repair_for_the_other_four_purges(self) -> None:
+        # Only THIS removal breaks something a user may still be calling. The legacy
+        # power switch and the dryer's washer sensors were dead entities; a notice for
+        # them would be noise.
+        issues: list = []
+        _run([FakeRegEntry("switch.foo_power", "ID_power")], issues=issues)
+        self.assertEqual([], issues)
+
+    def test_the_repair_carries_no_appliance_identity(self) -> None:
+        # One notice per config entry, and it names the generic keys, never this user's
+        # appliance -- the same rule the removal log follows.
+        issues: list = []
+        mac = "AA:BB:CC:DD:EE:FF"
+        _run(
+            [FakeRegEntry("select.fridge_ref_program", f"{mac}_ref_program")],
+            coord_data={mac: {"type": "REF", "appliance": self._fridge_appliance()}},
+            issues=issues,
+        )
+        blob = repr(issues)
+        self.assertNotIn(mac, blob)
+        self.assertNotIn("AA:BB", blob)
+
+    def test_a_broken_repair_registry_does_not_cost_the_purge(self) -> None:
+        # The notice is a courtesy; the cleanup is the job. A Home Assistant whose repair
+        # helper raises must not undo the removal or abort the setup.
+        #
+        # The failing stub is handed to `_run`, not assigned around it: `_run` rebinds
+        # `ir.async_create_issue` unconditionally (so no test appends into another
+        # test's list), which used to overwrite it before the cleanup ever ran -- this
+        # test passed while exercising the success path.
+        calls: list = []
+
+        def _boom(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("no repairs here")
+
+        removed, _detached = _run(
+            [FakeRegEntry("select.fridge_ref_program", "refid_ref_program")],
+            coord_data={
+                "refid": {"type": "REF", "appliance": self._fridge_appliance()}
+            },
+            on_issue=_boom,
+        )
+        # The raiser really ran -- otherwise this asserts nothing about the failure path.
+        self.assertEqual(1, len(calls))
+        self.assertEqual(removed, ["select.fridge_ref_program"])
+
+    # --- #93: the My Zone mode sensor, replaced by the writable select.
+
+    def test_the_superseded_my_zone_sensor_is_removed(self) -> None:
+        # Shipped in 5.20.0 and suppressed here wherever the writable select is built,
+        # so on those fridges it would otherwise sit unavailable under the same name as
+        # the control that replaced it.
+        removed, _detached = _run(
+            [FakeRegEntry("sensor.fridge_my_zone_mode", "refid_my_zone_mode")],
+            coord_data={
+                "refid": {
+                    "type": "REF",
+                    "appliance": self._fridge_appliance(flags=False, drawer=True),
+                }
+            },
+        )
+        self.assertEqual(removed, ["sensor.fridge_my_zone_mode"])
+
+    def test_the_my_zone_sensor_survives_without_drawer_programs(self) -> None:
+        # A NARROWER predicate than the select's, and this is the case that proves it:
+        # the four mode switches supersede `select.ref_program`, but nothing replaces
+        # the sensor unless the DRAWER select is really built.
+        removed, _detached = _run(
+            [FakeRegEntry("sensor.fridge_my_zone_mode", "refid_my_zone_mode")],
+            coord_data={"refid": {"type": "REF", "appliance": self._fridge_appliance()}},
+        )
+        self.assertEqual(removed, [])
+
+    def test_the_my_zone_select_that_replaces_it_is_never_removed(self) -> None:
+        # The select carries the SAME unique_id suffix in another domain, which is why
+        # the rule is scoped -- removing by suffix alone would delete the replacement.
+        removed, _detached = _run(
+            [FakeRegEntry("select.fridge_my_zone_mode", "refid_my_zone_mode")],
+            coord_data={
+                "refid": {
+                    "type": "REF",
+                    "appliance": self._fridge_appliance(flags=False, drawer=True),
+                }
+            },
+        )
+        self.assertEqual(removed, [])
+
+    def test_the_my_zone_removal_raises_no_repair(self) -> None:
+        # The sensor was read-only: nothing could have called a service on it, so there
+        # is nothing to warn about. The notice is reserved for the control whose loss
+        # breaks automations silently.
+        issues: list = []
+        _run(
+            [FakeRegEntry("sensor.fridge_my_zone_mode", "refid_my_zone_mode")],
+            coord_data={
+                "refid": {
+                    "type": "REF",
+                    "appliance": self._fridge_appliance(flags=False, drawer=True),
+                }
+            },
+            issues=issues,
+        )
+        self.assertEqual([], issues)
 
     def test_legacy_power_removal_log_redacts_identity(self) -> None:
         # Privacy: the INFO removal log must carry the redacted id, never the

@@ -27,8 +27,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     ACCOUNT_DEVICE_SUFFIX,
+    APPLIANCE_FR,
+    APPLIANCE_FRE,
     APPLIANCE_HOB,
     APPLIANCE_IH,
+    APPLIANCE_REF,
     APPLIANCE_TD,
     ATTR_LEVEL,
     CONF_ENABLE_DEBUG,
@@ -499,6 +502,18 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
       select with the same unique_id in a different domain. Scoped to the light
       domain for that reason: removing by unique_id alone would delete the
       replacement along with the entity it replaces.
+    - The fridge program SELECT (unique_id '<id>_ref_program'), replaced in #93 by
+      four independent mode switches, a My Zone select and one button per download
+      preset. The only CONDITIONAL rule here: that select still ships on a fridge
+      where none of those can be built, so the id must also be one this session
+      really superseded (`_superseded_ref_program_ids`). Scoped to the select
+      domain for the same reason the panel light is: nothing else may match.
+    - The My Zone mode SENSOR (unique_id '<id>_my_zone_mode'), shipped in 5.20.0 and
+      replaced in #93 by a writable select of the same name. Conditional too, and on
+      a NARROWER predicate than the select above: the sensor steps aside only where
+      the drawer select is really built, so a fridge with the mode switches and no
+      drawer programs keeps its sensor. Scoped to the sensor domain, since the select
+      that replaces it carries the same unique_id suffix.
     - Everything that belonged to a per-zone CLONE of an induction hob
       ('<base>_z<N>_<key>'), which the session no longer creates. Double-anchored:
       the id must have the clone shape AND its base must be a hob in the current
@@ -522,10 +537,15 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
         for suffix in _TD_REMOVED_SUFFIXES
     }
     hob_ids = _hob_ids(coord_data)
+    superseded_refs = _superseded_ref_program_ids(coord_data)
+    superseded_my_zones = _superseded_my_zone_ids(coord_data)
 
     registry = er.async_get(hass)
     checked = 0
     removed = 0
+    # Counted apart from `removed` because this is the only rule whose removal BREAKS
+    # something a user may still be calling; see the repair below.
+    removed_ref_programs = 0
     for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         checked += 1
         unique_id = reg_entry.unique_id or ""
@@ -548,6 +568,31 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 "Removed invalid consumption entity for tumble dryer: id=%s",
                 redact_id(reg_entry.unique_id),
             )
+        elif (
+            domain == "select"
+            and unique_id.endswith("_ref_program")
+            and unique_id.removesuffix("_ref_program") in superseded_refs
+        ):
+            registry.async_remove(reg_entry.entity_id)
+            removed += 1
+            removed_ref_programs += 1
+            _LOGGER.info(
+                "Removed the fridge program select replaced by the per-mode controls: "
+                "id=%s",
+                redact_id(reg_entry.unique_id),
+            )
+        elif (
+            domain == "sensor"
+            and unique_id.endswith("_my_zone_mode")
+            and unique_id.removesuffix("_my_zone_mode") in superseded_my_zones
+        ):
+            registry.async_remove(reg_entry.entity_id)
+            removed += 1
+            _LOGGER.info(
+                "Removed the My Zone mode sensor replaced by the writable select: "
+                "id=%s",
+                redact_id(reg_entry.unique_id),
+            )
         elif _is_hob_zone_clone(unique_id, hob_ids):
             registry.async_remove(reg_entry.entity_id)
             removed += 1
@@ -555,6 +600,8 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 "Removed duplicate per-zone entity of an induction hob: id=%s",
                 redact_id(reg_entry.unique_id),
             )
+    if removed_ref_programs:
+        _raise_ref_program_repair(hass, entry)
     _LOGGER.debug(
         "Setup debug: legacy cleanup completed for entry=%s, checked=%d, removed=%d",
         entry.entry_id,
@@ -562,6 +609,110 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
         removed,
     )
     _remove_zone_clone_devices(hass, entry, coord_data, hob_ids)
+
+
+def _raise_ref_program_repair(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Tell the user their fridge program select is gone, and what replaced it.
+
+    Raised ONLY when this run actually removed one, so it fires once and never on a
+    fresh install. The purge above is idempotent, so a later start removes nothing and
+    says nothing more.
+
+    A repair rather than a log line, because the way this breaks is silent: Home
+    Assistant answers `select.select_option` on an entity that no longer exists with a
+    WARNING in the log and a SUCCESSFUL service call, so an automation that used to set
+    the fridge to Holiday keeps reporting as run and does nothing. Nothing in the UI
+    would say so.
+
+    `is_fixable=False`: there is no button we could offer. The old option maps to three
+    different kinds of entity depending on which one it was -- a switch, the My Zone
+    select, or a preset button -- and only the person who wrote the automation knows
+    which they meant. The repair carries no appliance id or name: it is one notice per
+    config entry, and the entities it names are the generic keys, never this user's.
+    """
+    try:
+        from homeassistant.helpers import issue_registry as ir
+
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            "ref_program_select_replaced",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="ref_program_select_replaced",
+        )
+    except Exception:  # noqa: BLE001 - a notice must never cost a setup
+        _LOGGER.debug("Setup debug: could not raise the ref_program repair", exc_info=True)
+
+
+def _superseded_my_zone_ids(coord_data) -> set[str]:
+    """Appliance ids whose My Zone mode SENSOR was replaced by the writable select (#93).
+
+    A sibling of `_superseded_ref_program_ids`, and deliberately NOT the same predicate.
+    `has_replacement_controls` is true as soon as the flag switches can be built, but the
+    read-only sensor steps aside only where the DRAWER select really appears -- so a
+    fridge with the four switches and no drawer programs keeps its sensor, and reusing
+    the broader predicate here would delete a live entity on the next start.
+
+    The condition is `my_zone_codes`, which is exactly what `sensor.async_setup_entry`
+    consults to skip creating it. One question, answered once, for the same reason the
+    program select's gate was folded into that function.
+    """
+    from .ref_programs import my_zone_codes
+
+    superseded: set[str] = set()
+    for appliance_id, device in (coord_data or {}).items():
+        if not isinstance(device, dict):
+            continue
+        if device.get("type") not in (APPLIANCE_REF, APPLIANCE_FR, APPLIANCE_FRE):
+            continue
+        try:
+            if my_zone_codes(device.get("appliance")):
+                superseded.add(appliance_id)
+        except Exception:  # noqa: BLE001 - a degraded schema must not cost a setup
+            _LOGGER.debug(
+                "Setup debug: My Zone supersession check failed for id=%s",
+                redact_id(appliance_id),
+                exc_info=True,
+            )
+    return superseded
+
+
+def _superseded_ref_program_ids(coord_data) -> set[str]:
+    """Appliance ids whose fridge program select was REPLACED, not merely dropped (#93).
+
+    The fifth purge rule, and the first conditional one. The four above are
+    unconditional -- that entity is not created any more, full stop -- while
+    `select.ref_program` still ships on a fridge where no per-mode control can be built
+    (one offering `iot_*` download presets alone). So the anchor is not "this is a
+    fridge", it is `ref_programs.has_replacement_controls`: the SAME predicate
+    `HonRefProgramSelect.supports_appliance` consults to step aside. Anything else would
+    be a second opinion about which appliances lost the entity, and the two could differ.
+
+    Double-anchored like the tumble-dryer and hob purges: the id must be a cooling
+    appliance IN THE CURRENT SNAPSHOT and its live schema must really offer the
+    replacement. An empty or degraded snapshot yields an empty set and removes nothing --
+    the purge is idempotent and runs on every setup, so a bad start postpones it rather
+    than guessing.
+    """
+    from .ref_programs import has_replacement_controls
+
+    superseded: set[str] = set()
+    for appliance_id, device in (coord_data or {}).items():
+        if not isinstance(device, dict):
+            continue
+        if device.get("type") not in (APPLIANCE_REF, APPLIANCE_FR, APPLIANCE_FRE):
+            continue
+        try:
+            if has_replacement_controls(device.get("appliance")):
+                superseded.add(appliance_id)
+        except Exception:  # noqa: BLE001 - a degraded schema must not cost a setup
+            _LOGGER.debug(
+                "Setup debug: supersession check failed for id=%s",
+                redact_id(appliance_id),
+                exc_info=True,
+            )
+    return superseded
 
 
 def _hob_ids(coord_data) -> set[str]:
