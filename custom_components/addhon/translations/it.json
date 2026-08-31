@@ -86,6 +86,30 @@
     }
   },
   "services": {
+    "refresh": {
+      "name": "Aggiorna ora",
+      "description": "Forza un polling immediato dal cloud per tutti gli account hOn configurati. L'equivalente richiamabile da automazione del pulsante \"Aggiorna ora\" per dispositivo: chiede a ogni coordinator caricato di recuperare subito i dati aggiornati, senza attendere il prossimo polling pianificato. Non richiede opzioni e si applica all'intera integrazione."
+    },
+    "set_log_level": {
+      "name": "Imposta livello log diagnostico",
+      "description": "Cambia il livello di log dell'integrazione Haier hOn e dei logger del client hOn nativo utili a diagnosticare login, discovery dispositivi, reauth e polling. Usa \"debug\" quando i dispositivi non appaiono, poi torna a \"warning\" per ridurre il rumore. Non abilita il rumore MQTT realtime: per quello usa il service dedicato set_mqtt_log_level.",
+      "fields": {
+        "level": {
+          "name": "Livello",
+          "description": "Livello di log diagnostico da applicare."
+        }
+      }
+    },
+    "set_mqtt_log_level": {
+      "name": "Imposta livello log MQTT",
+      "description": "Cambia il livello di log del canale MQTT realtime hOn. Di default il rumore dei tentativi di riconnessione è silenziato (warning). Imposta \"debug\" per diagnosticare i problemi di push realtime, poi \"warning\" per risilenziare. Non persiste: al riavvio di Home Assistant torna silenziato.",
+      "fields": {
+        "level": {
+          "name": "Livello",
+          "description": "Livello di log da applicare al canale MQTT realtime hOn."
+        }
+      }
+    },
     "probe_settings_operation": {
       "name": "Trova il nome di un'operazione settings (avanzato)",
       "description": "Diagnostico. Prova una scala di candidati `operationName` su un parametro finché l'elettrodomestico ne accetta uno, poi segnala il vincitore con una notifica. È il modo per rendere scrivibile un'impostazione di sola lettura (un timer, una fascia oraria): l'operazione a cui appartiene non si può leggere da nessuna parte, si può solo provare.",
@@ -116,10 +140,6 @@
         }
       }
     },
-    "refresh": {
-      "name": "Aggiorna ora",
-      "description": "Forza un polling immediato dal cloud per tutti gli account hOn configurati. L'equivalente richiamabile da automazione del pulsante \"Aggiorna ora\" per dispositivo: chiede a ogni coordinator caricato di recuperare subito i dati aggiornati, senza attendere il prossimo polling pianificato. Non richiede opzioni e si applica all'intera integrazione."
-    },
     "send_command": {
       "name": "Invia un comando grezzo (avanzato)",
       "description": "Diagnostico. Invia un comando a un elettrodomestico esattamente come indicato, senza alcun controllo di sicurezza. Serve a provare un singolo candidato `operationName` sugli elettrodomestici il cui comando `settings` esegue una sola operazione per volta. Un nome sbagliato non cambia nulla.",
@@ -135,26 +155,6 @@
         "parameters": {
           "name": "Parametri",
           "description": "I parametri da inviare, come nome: valore. Includi `operationName` quando provi un'operazione."
-        }
-      }
-    },
-    "set_log_level": {
-      "name": "Imposta livello log diagnostico",
-      "description": "Cambia il livello di log dell'integrazione Haier hOn e dei logger del client hOn nativo utili a diagnosticare login, discovery dispositivi, reauth e polling. Usa \"debug\" quando i dispositivi non appaiono, poi torna a \"warning\" per ridurre il rumore. Non abilita il rumore MQTT realtime: per quello usa il service dedicato set_mqtt_log_level.",
-      "fields": {
-        "level": {
-          "name": "Livello",
-          "description": "Livello di log diagnostico da applicare."
-        }
-      }
-    },
-    "set_mqtt_log_level": {
-      "name": "Imposta livello log MQTT",
-      "description": "Cambia il livello di log del canale MQTT realtime hOn. Di default il rumore dei tentativi di riconnessione è silenziato (warning). Imposta \"debug\" per diagnosticare i problemi di push realtime, poi \"warning\" per risilenziare. Non persiste: al riavvio di Home Assistant torna silenziato.",
-      "fields": {
-        "level": {
-          "name": "Livello",
-          "description": "Livello di log da applicare al canale MQTT realtime hOn."
         }
       }
     }
@@ -352,6 +352,9 @@
       "temp_zone5": {
         "name": "Temperatura Zona 5"
       },
+      "temp_zone6": {
+        "name": "Temperatura Zona 6"
+      },
       "temp_upper": {
         "name": "Temperatura Zona Superiore"
       },
@@ -529,6 +532,116 @@
       "last_refresh": {
         "name": "Ultimo aggiornamento"
       },
+      "last_work_time": {
+        "name": "Ultimo tempo di lavoro"
+      },
+      "power_zone1": {
+        "name": "Livello potenza zona 1"
+      },
+      "power_zone2": {
+        "name": "Livello potenza zona 2"
+      },
+      "power_zone3": {
+        "name": "Livello potenza zona 3"
+      },
+      "power_zone4": {
+        "name": "Livello potenza zona 4"
+      },
+      "power_zone5": {
+        "name": "Livello potenza zona 5"
+      },
+      "power_zone6": {
+        "name": "Livello potenza zona 6"
+      },
+      "remaining_time_zone1": {
+        "name": "Tempo rimanente zona 1"
+      },
+      "remaining_time_zone2": {
+        "name": "Tempo rimanente zona 2"
+      },
+      "remaining_time_zone3": {
+        "name": "Tempo rimanente zona 3"
+      },
+      "remaining_time_zone4": {
+        "name": "Tempo rimanente zona 4"
+      },
+      "remaining_time_zone5": {
+        "name": "Tempo rimanente zona 5"
+      },
+      "remaining_time_zone6": {
+        "name": "Tempo rimanente zona 6"
+      },
+      "plate_temp_zone1": {
+        "name": "Temperatura piastra zona 1"
+      },
+      "plate_temp_zone2": {
+        "name": "Temperatura piastra zona 2"
+      },
+      "plate_temp_zone3": {
+        "name": "Temperatura piastra zona 3"
+      },
+      "plate_temp_zone4": {
+        "name": "Temperatura piastra zona 4"
+      },
+      "plate_temp_zone5": {
+        "name": "Temperatura piastra zona 5"
+      },
+      "plate_temp_zone6": {
+        "name": "Temperatura piastra zona 6"
+      },
+      "program_code_zone1": {
+        "name": "Codice programma zona 1"
+      },
+      "program_code_zone2": {
+        "name": "Codice programma zona 2"
+      },
+      "program_code_zone3": {
+        "name": "Codice programma zona 3"
+      },
+      "program_code_zone4": {
+        "name": "Codice programma zona 4"
+      },
+      "program_code_zone5": {
+        "name": "Codice programma zona 5"
+      },
+      "program_code_zone6": {
+        "name": "Codice programma zona 6"
+      },
+      "program_phase_zone1": {
+        "name": "Fase programma zona 1"
+      },
+      "program_phase_zone2": {
+        "name": "Fase programma zona 2"
+      },
+      "program_phase_zone3": {
+        "name": "Fase programma zona 3"
+      },
+      "program_phase_zone4": {
+        "name": "Fase programma zona 4"
+      },
+      "program_phase_zone5": {
+        "name": "Fase programma zona 5"
+      },
+      "program_phase_zone6": {
+        "name": "Fase programma zona 6"
+      },
+      "timer_hh": {
+        "name": "Timer ore"
+      },
+      "timer_mm": {
+        "name": "Timer minuti"
+      },
+      "my_zone_mode": {
+        "name": "Modalità My Zone (lettura)",
+        "state": {
+          "zero_fresh": "Fresco 0 °C",
+          "quick_cool": "Raffreddamento rapido",
+          "chiller": "Chiller",
+          "cool_drink": "Bevande fresche",
+          "cheese": "Formaggi",
+          "fruit_and_veg": "Frutta e verdura"
+        }
+      },
       "heating_status": {
         "name": "Stato riscaldamento",
         "state": {
@@ -649,6 +762,9 @@
       "door_zone3": {
         "name": "Porta Zona 3"
       },
+      "door_zone4": {
+        "name": "Porta Zona 4"
+      },
       "door_cavity1": {
         "name": "Porta Cavità 1"
       },
@@ -665,16 +781,16 @@
         "name": "Risparmio Energetico"
       },
       "quick_cool": {
-        "name": "Super Cool"
+        "name": "Super Cool (lettura)"
       },
       "quick_freeze": {
-        "name": "Super Freeze"
+        "name": "Super Freeze (lettura)"
       },
       "auto_set": {
-        "name": "Auto-Set"
+        "name": "Auto-Set (lettura)"
       },
       "holiday_mode": {
-        "name": "Modalità Vacanza"
+        "name": "Modalità Vacanza (lettura)"
       },
       "filter_change": {
         "name": "Cambio Filtro"
@@ -720,6 +836,84 @@
       },
       "update_ok": {
         "name": "Aggiornamento OK"
+      },
+      "filter_cleaning": {
+        "name": "Pulizia filtro"
+      },
+      "running": {
+        "name": "In funzione"
+      },
+      "zone_on_zone1": {
+        "name": "Zona 1 accesa"
+      },
+      "zone_on_zone2": {
+        "name": "Zona 2 accesa"
+      },
+      "zone_on_zone3": {
+        "name": "Zona 3 accesa"
+      },
+      "zone_on_zone4": {
+        "name": "Zona 4 accesa"
+      },
+      "zone_on_zone5": {
+        "name": "Zona 5 accesa"
+      },
+      "zone_on_zone6": {
+        "name": "Zona 6 accesa"
+      },
+      "hot_zone1": {
+        "name": "Zona 1 calda"
+      },
+      "hot_zone2": {
+        "name": "Zona 2 calda"
+      },
+      "hot_zone3": {
+        "name": "Zona 3 calda"
+      },
+      "hot_zone4": {
+        "name": "Zona 4 calda"
+      },
+      "hot_zone5": {
+        "name": "Zona 5 calda"
+      },
+      "hot_zone6": {
+        "name": "Zona 6 calda"
+      },
+      "error_zone1": {
+        "name": "Errore zona 1"
+      },
+      "error_zone2": {
+        "name": "Errore zona 2"
+      },
+      "error_zone3": {
+        "name": "Errore zona 3"
+      },
+      "error_zone4": {
+        "name": "Errore zona 4"
+      },
+      "error_zone5": {
+        "name": "Errore zona 5"
+      },
+      "error_zone6": {
+        "name": "Errore zona 6"
+      },
+      "combi_mode_zone1": {
+        "name": "Zona 1 unita"
+      },
+      "combi_mode_zone2": {
+        "name": "Zona 2 unita"
+      },
+      "combi_mode_zone3": {
+        "name": "Zona 3 unita"
+      },
+      "combi_mode_zone4": {
+        "name": "Zona 4 unita"
+      },
+      "combi_mode_zone5": {
+        "name": "Zona 5 unita"
+      },
+      "combi_mode_zone6": {
+        "name": "Zona 6 unita"
       },
       "compressor_running": {
         "name": "Compressore"
@@ -843,6 +1037,24 @@
       "mqtt_realtime_debug": {
         "name": "Debug MQTT realtime"
       },
+      "delay_timer": {
+        "name": "Timer di spegnimento"
+      },
+      "power": {
+        "name": "Alimentazione"
+      },
+      "auto_set": {
+        "name": "Auto-Set"
+      },
+      "super_cool": {
+        "name": "Super Cool"
+      },
+      "super_freeze": {
+        "name": "Super Freeze"
+      },
+      "holiday_mode": {
+        "name": "Modalità Vacanza"
+      },
       "boost": {
         "name": "Boost"
       },
@@ -850,32 +1062,24 @@
         "name": "Modalità silenziosa"
       }
     },
-    "date": {
-      "vacation_start_date": {
-        "name": "Inizio vacanza"
-      },
-      "vacation_end_date": {
-        "name": "Fine vacanza"
-      }
-    },
     "number": {
       "target_temp_zone1": {
-        "name": "Temperatura Zona 1"
+        "name": "Temperatura impostata Zona 1"
       },
       "target_temp_zone2": {
-        "name": "Temperatura Zona 2"
+        "name": "Temperatura impostata Zona 2"
       },
       "target_temp_zone3": {
-        "name": "Temperatura Zona 3"
+        "name": "Temperatura impostata Zona 3"
       },
       "target_temp_zone4": {
-        "name": "Temperatura Zona 4"
+        "name": "Temperatura impostata Zona 4"
       },
       "target_temp_upper": {
-        "name": "Temperatura Zona Superiore"
+        "name": "Temperatura impostata Zona Superiore"
       },
       "target_temp_lower": {
-        "name": "Temperatura Zona Inferiore"
+        "name": "Temperatura impostata Zona Inferiore"
       },
       "target_temp": {
         "name": "Temperatura target"
@@ -885,6 +1089,15 @@
       },
       "delay_time": {
         "name": "Partenza ritardata"
+      },
+      "aroma_time_on": {
+        "name": "Durata Aroma Attivo (sperimentale)"
+      },
+      "aroma_time_off": {
+        "name": "Durata Aroma Spento (sperimentale)"
+      },
+      "delay_off_time": {
+        "name": "Ritardo di spegnimento"
       },
       "target_temp_hc": {
         "name": "Temperatura target (resistenza + compressore)"
@@ -897,12 +1110,6 @@
       },
       "sterilization_temp": {
         "name": "Temperatura anti-legionella"
-      },
-      "aroma_time_on": {
-        "name": "Durata Aroma Attivo (sperimentale)"
-      },
-      "aroma_time_off": {
-        "name": "Durata Aroma Spento (sperimentale)"
       }
     },
     "select": {
@@ -945,6 +1152,14 @@
           "iot_extra_ice": "Extra ghiaccio",
           "iot_high_efficiency": "Alta efficienza",
           "iot_special_food_core": "Alimenti speciali"
+        }
+      },
+      "my_zone_mode": {
+        "name": "Modalità My Zone",
+        "state": {
+          "zero_fresh": "Fresco 0 °C",
+          "quick_cool": "Raffreddamento rapido",
+          "fruit_and_veg": "Frutta e verdura"
         }
       },
       "spin_speed": {
@@ -1012,6 +1227,72 @@
           "position_6": "Posizione 6",
           "swing": "Oscillazione"
         }
+      },
+      "power_limit": {
+        "name": "Limite di assorbimento",
+        "state": {
+          "no_limit": "Nessun limite",
+          "kw_2_5": "2,5 kW",
+          "kw_3_5": "3,5 kW",
+          "kw_4_5": "4,5 kW",
+          "kw_5_5": "5,5 kW",
+          "kw_6_5": "6,5 kW",
+          "kw_2_0": "2,0 kW",
+          "kw_3_0": "3,0 kW",
+          "kw_6_8": "6,8 kW",
+          "kw_7_2": "7,2 kW"
+        }
+      }
+    },
+    "button": {
+      "start_program": {
+        "name": "Avvia programma"
+      },
+      "stop_program": {
+        "name": "Ferma programma"
+      },
+      "ref_preset_iot_daily_use": {
+        "name": "Applica uso quotidiano"
+      },
+      "ref_preset_iot_extra_cold": {
+        "name": "Applica extra freddo"
+      },
+      "ref_preset_iot_extra_cold_water": {
+        "name": "Applica extra freddo (acqua)"
+      },
+      "ref_preset_iot_extra_ice": {
+        "name": "Applica extra ghiaccio"
+      },
+      "ref_preset_iot_high_efficiency": {
+        "name": "Applica alta efficienza"
+      },
+      "ref_preset_iot_special_food_core": {
+        "name": "Applica alimenti speciali"
+      },
+      "force_refresh": {
+        "name": "Aggiorna ora"
+      },
+      "reset_debug": {
+        "name": "Reset debug"
+      },
+      "clear_vacation": {
+        "name": "Cancella periodo di vacanza"
+      }
+    },
+    "fan": {
+      "purifier": {
+        "name": "Purificatore"
+      },
+      "hood": {
+        "name": "Cappa"
+      }
+    },
+    "date": {
+      "vacation_start_date": {
+        "name": "Inizio vacanza"
+      },
+      "vacation_end_date": {
+        "name": "Fine vacanza"
       }
     },
     "water_heater": {
@@ -1050,28 +1331,6 @@
         }
       }
     },
-    "button": {
-      "start_program": {
-        "name": "Avvia programma"
-      },
-      "stop_program": {
-        "name": "Ferma programma"
-      },
-      "force_refresh": {
-        "name": "Aggiorna ora"
-      },
-      "reset_debug": {
-        "name": "Reset debug"
-      },
-      "clear_vacation": {
-        "name": "Cancella periodo di vacanza"
-      }
-    },
-    "fan": {
-      "purifier": {
-        "name": "Purificatore"
-      }
-    },
     "time": {
       "heating_window_start": {
         "name": "Inizio finestra di riscaldamento"
@@ -1082,11 +1341,11 @@
     }
   },
   "exceptions": {
-    "appliance_or_client_unavailable": {
-      "message": "L'apparecchio o il client non è disponibile."
-    },
     "aroma_custom_not_active": {
       "message": "Le durate dell'aroma si possono cambiare solo mentre la modalità aroma personalizzata è in corso."
+    },
+    "appliance_or_client_unavailable": {
+      "message": "L'apparecchio o il client non è disponibile."
     },
     "command_error": {
       "message": "Comando non riuscito: {error}"
@@ -1097,17 +1356,14 @@
     "invalid_setpoint": {
       "message": "Il valore {value} non è ammesso (ammessi: {allowed})."
     },
-    "probe_parameter_not_reported": {
-      "message": "L'elettrodomestico non riporta \"{parameter}\", quindi la sonda non può verificare se un candidato ha funzionato."
-    },
-    "probe_value_already_set": {
-      "message": "\"{parameter}\" vale già {value}: scegli un altro valore, altrimenti ogni candidato sembrerebbe corretto."
-    },
     "program_not_found": {
       "message": "Programma \"{program}\" non trovato."
     },
     "program_not_supported": {
       "message": "Programma \"{program}\" non supportato da questo apparecchio."
+    },
+    "setpoint_owned_by_mode": {
+      "message": "{mode} è attiva e la temperatura la decide l'apparecchio. Spegni prima la modalità."
     },
     "purifier_not_running": {
       "message": "Il purificatore deve risultare in funzione per cambiare questa impostazione."
@@ -1118,6 +1374,21 @@
     "refresh_after_command_failed_error": {
       "message": "Aggiornamento dopo il comando non riuscito: {error}"
     },
+    "swing_not_supported": {
+      "message": "Questo apparecchio non supporta l'oscillazione verticale."
+    },
+    "swing_position_not_allowed": {
+      "message": "Posizione oscillazione {position} non ammessa (ammesse: {allowed})."
+    },
+    "speed_not_supported": {
+      "message": "Questo purificatore funziona a modalità discrete e non ha una velocità della ventola. Imposta una modalità preimpostata invece di una percentuale."
+    },
+    "probe_parameter_not_reported": {
+      "message": "L'elettrodomestico non riporta \"{parameter}\", quindi la sonda non può verificare se un candidato ha funzionato."
+    },
+    "probe_value_already_set": {
+      "message": "\"{parameter}\" vale già {value}: scegli un altro valore, altrimenti ogni candidato sembrerebbe corretto."
+    },
     "send_command_no_parameters": {
       "message": "Nessun parametro indicato: addhon.send_command richiede almeno un parametro da scrivere."
     },
@@ -1127,17 +1398,14 @@
     "settings_operation_locked": {
       "message": "\"{param}\" non è scrivibile su questo elettrodomestico: il suo comando settings esegue solo l'operazione \"{operation}\", quindi l'elettrodomestico ignorerebbe la modifica. Impostalo dall'app hOn."
     },
-    "speed_not_supported": {
-      "message": "Questo purificatore funziona a modalità discrete e non ha una velocità della ventola. Imposta una modalità preimpostata invece di una percentuale."
-    },
-    "swing_not_supported": {
-      "message": "Questo apparecchio non supporta l'oscillazione verticale."
-    },
-    "swing_position_not_allowed": {
-      "message": "Posizione oscillazione {position} non ammessa (ammesse: {allowed})."
-    },
     "vacation_dates_inverted": {
       "message": "Finestra vacanza non valida: l'inizio {start} è dopo la fine {end}."
+    }
+  },
+  "issues": {
+    "ref_program_select_replaced": {
+      "title": "Il menu a tendina dei programmi del frigo è stato sostituito",
+      "description": "Il menu a tendina unico dei programmi del frigo (`select.…_ref_program`) è stato rimosso, perché l'apparecchio non funziona così: Super Cool, Super Freeze, Auto-Set e Modalità Vacanza sono quattro impostazioni indipendenti e possono essere attive insieme, e spegnerne una ne spegneva altre tre.\n\nAdesso sono quattro interruttori. Il cassetto My Zone ha un suo selettore di modalità, e ogni preset scaricato ha un pulsante che lo invia.\n\n**Ogni automazione o script che chiamava `select.select_option` sulla vecchia entità va aggiornato.** Non segnalerà nessun errore: Home Assistant risponde a una chiamata verso un'entità che non esiste più con un avviso nel log e una chiamata di servizio riuscita, quindi l'automazione continua a girare senza fare niente.\n\nChiudi questo avviso quando hai controllato."
     }
   }
 }

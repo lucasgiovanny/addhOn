@@ -557,22 +557,42 @@ class AirPurifierBinaryTableTest(unittest.TestCase):
         self.assertEqual("ecoModeStatus", eco.attr_key)
         self.assertIs(is_engaged, eco.value_fn)
 
-    def test_the_value_fn_field_defaults_off_everywhere_else(self) -> None:
-        """Optional field: a non-AP binary uses it only where a SHARED derivation
-        exists (the HW vacation hold reads machMode through hw_values, the same
-        helper the water_heater entity uses -- see test_water_heater's drift guard).
-        Everything else must keep the plain on_value comparison."""
+    def test_the_value_fn_field_is_declared_and_not_inherited(self) -> None:
+        """Every binary sensor that derives its state names itself here.
+
+        The field is optional and defaults off, so a description that grows one by
+        accident -- copied from a sibling row, say -- silently stops honouring the
+        platform's shared `on_value` rule. Pinned as the exact set rather than as
+        "nothing outside the AP has one" so that adding a derived reading stays a
+        deliberate edit while the guard keeps covering every other row.
+        """
         from custom_components.addhon.binary_sensor import BINARY_SENSORS
 
-        shared_derivations = {("HW", "vacation_active")}
-        for app_type, descriptions in BINARY_SENSORS.items():
-            if app_type == APPLIANCE_AP:
-                continue
-            for description in descriptions:
-                if (app_type, description.key) in shared_derivations:
-                    self.assertIsNotNone(description.value_fn, description.key)
-                    continue
-                self.assertIsNone(description.value_fn, description.key)
+        declared = {
+            (app_type, description.key)
+            for app_type, descriptions in BINARY_SENSORS.items()
+            for description in descriptions
+            if description.value_fn is not None
+        }
+        self.assertEqual(
+            {
+                (APPLIANCE_AP, "problem"),
+                (APPLIANCE_AP, "eco_active"),
+                (APPLIANCE_AP, "co_alarm"),
+                # The hood spells this one as the text "false", not as 0/1, so the
+                # shared comparison would read every value as off.
+                ("HO", "filter_cleaning"),
+                # The HW vacation hold reads machMode through hw_values, the same
+                # shared derivation the water_heater entity uses -- see
+                # test_water_heater's drift guard.
+                ("HW", "vacation_active"),
+            }
+            # The hob's per-zone fault reads through `has_problem` because "no
+            # error" has three spellings on that device; the flex-bridge flag has
+            # two distinct "on" values.
+            | _hob_keys("error_zone", "combi_mode_zone"),
+            declared,
+        )
 
 
 class AirPurifierBinaryGatingTest(unittest.IsolatedAsyncioTestCase):
@@ -1047,16 +1067,35 @@ class AirPurifierFanErrorTest(unittest.IsolatedAsyncioTestCase):
 class AirPurifierFanArchitectureTest(unittest.TestCase):
     def test_the_fan_never_uses_the_legacy_sender(self) -> None:
         """Every AP write is transactional: `async_send_command` applies values to
-        a whole command and sends it, which is what the dispatcher replaces."""
-        source = (
+        a whole command and sends it, which is what the dispatcher replaces.
+
+        Scoped to the purifier CLASS, not to fan.py, because the platform also
+        hosts the cooker hood. The hood dispatches too now (it stopped using the
+        legacy sender when its off moved off `stopProgram`), so the file-level
+        statement would be true today by accident -- and would go back to being
+        wrong the moment a third fan arrived. Reading the class body keeps the
+        purifier's own invariant alive whatever its neighbours do.
+        """
+        import ast
+
+        path = (
             Path(__file__).parents[1]
             / "custom_components" / "addhon" / "fan.py"
-        ).read_text(encoding="utf-8")
+        )
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        purifier = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "HonAirPurifierFan"
+        )
+        body = ast.get_source_segment(source, purifier) or ""
+        self.assertTrue(body, "the purifier class body could not be read")
 
-        self.assertNotIn("async_send_command", source)
-        self.assertNotIn("async_send_settings", source)
-        self.assertNotIn("run_command_sync", source)
-        self.assertIn("async_dispatch_patch", source)
+        self.assertNotIn("async_send_command", body)
+        self.assertNotIn("async_send_settings", body)
+        self.assertNotIn("run_command_sync", body)
+        self.assertIn("async_dispatch_patch", body)
 
     def test_fan_is_a_declared_platform(self) -> None:
         from custom_components.addhon.const import PLATFORMS
@@ -1461,6 +1500,53 @@ class AirPurifierSwitchArchitectureTest(unittest.TestCase):
         source = inspect.getsource(switch.HonAirPurifierSwitch)
         self.assertIn("async_dispatch_patch", source)
         self.assertNotIn("async_send_settings", source)
+
+
+class AirPurifierSwitchAddTimeTest(unittest.IsolatedAsyncioTestCase):
+    """What Home Assistant does to the entity BEFORE it exists (issue #67).
+
+    Both toggles were built, logged as built, and then dropped by
+    `entity_platform._async_add_entity`, which reads `entity.name` -> device class
+    -> `entity_description.device_class`. The description was a plain dataclass
+    without that field, so all four (two toggles x two purifiers) died with
+    AttributeError. Every existing test built the entity and then asked it a
+    question of its own -- is_on, unique_id, the write path -- which is the one
+    thing HA does not do first.
+    """
+
+    async def test_the_toggles_survive_the_add_path(self) -> None:
+        entities, _client, _coordinator = await _build_switches(schema=_toggle_schema())
+        for key, entity in _switch_by_key(entities).items():
+            with self.subTest(key=key):
+                # The exact attribute lookup that raised, through HA's own
+                # precedence. No device class is intended: None, not a crash.
+                self.assertIsNone(entity.device_class, key)
+
+    def test_the_description_carries_what_home_assistant_reads(self) -> None:
+        """The description is published as `entity_description`, so it is HA's to
+        read: it must be an actual SwitchEntityDescription, not a look-alike."""
+        from custom_components.addhon import switch
+
+        self.assertTrue(
+            issubclass(
+                switch.HonAirPurifierSwitchDescription, switch.SwitchEntityDescription
+            )
+        )
+        for description in switch._AIR_PURIFIER_SWITCHES:
+            with self.subTest(key=description.key):
+                self.assertIsNone(description.device_class)
+
+    def test_only_the_published_description_needs_the_ha_base(self) -> None:
+        """The sibling description stays a plain dataclass on purpose: its entity
+        keeps it in `_desc`, so HA never reads it. Pinned so a future "make them
+        consistent" pass does not read the fix as a rule about all of them."""
+        import inspect
+
+        from custom_components.addhon import switch
+
+        source = inspect.getsource(switch.HonSettingsSwitch)
+        self.assertIn("self._desc = description", source)
+        self.assertNotIn("self.entity_description", source)
 
 
 class AirPurifierSwitchSkipLoggingTest(unittest.IsolatedAsyncioTestCase):
@@ -1881,6 +1967,23 @@ class AirPurifierAromaArchitectureTest(unittest.TestCase):
 # --- Task 9: the experimental option and the custom timing numbers -----------
 
 
+# The per-zone families the induction hob generates, spelled out here so the
+# "exact set" pins below stay hand-checkable while covering 30-odd rows. The zone
+# ceiling is repeated on purpose: widening the tables to seven zones has to fail
+# these tests rather than pass silently.
+_HOB_TYPES = ("IH", "HOB")
+_HOB_ZONE_RANGE = range(1, 7)
+
+
+def _hob_keys(*families: str) -> set[tuple[str, str]]:
+    return {
+        (app_type, f"{family}{zone}")
+        for app_type in _HOB_TYPES
+        for family in families
+        for zone in _HOB_ZONE_RANGE
+    }
+
+
 class ExperimentalGateTest(unittest.IsolatedAsyncioTestCase):
     """Nothing whose meaning is inferred from incomplete evidence may exist on a
     default installation."""
@@ -1907,7 +2010,13 @@ class ExperimentalGateTest(unittest.IsolatedAsyncioTestCase):
             for d in descs
             if d.experimental
         }
-        self.assertEqual({(APPLIANCE_AP, "air_quality_label")}, experimental)
+        self.assertEqual(
+            {(APPLIANCE_AP, "air_quality_label")}
+            | _hob_keys("plate_temp_zone", "program_code_zone", "program_phase_zone")
+            | {(app_type, key) for app_type in _HOB_TYPES
+               for key in ("timer_hh", "timer_mm")},
+            experimental,
+        )
 
     def test_the_flag_defaults_off_for_every_other_binary(self) -> None:
         from custom_components.addhon.binary_sensor import BINARY_SENSORS
@@ -1918,7 +2027,10 @@ class ExperimentalGateTest(unittest.IsolatedAsyncioTestCase):
             for d in descs
             if d.experimental
         }
-        self.assertEqual({(APPLIANCE_AP, "co_alarm")}, experimental)
+        self.assertEqual(
+            {(APPLIANCE_AP, "co_alarm")} | _hob_keys("combi_mode_zone"),
+            experimental,
+        )
 
     async def test_the_raw_co_sensor_stays_standard(self) -> None:
         """The interpreted alarm is experimental; the raw level it reads is not,
@@ -2316,17 +2428,23 @@ class AirPurifierTimeNumberArchitectureTest(unittest.TestCase):
         self.assertIn("async_dispatch_patch", source)
         self.assertNotIn("async_send_command", source)
 
-    def test_the_legacy_numbers_keep_the_legacy_sender(self) -> None:
+    def test_the_shared_number_keeps_both_senders(self) -> None:
+        # `HonNumber` serves the fridge/freezer/wine-cooler/oven setpoints, which
+        # need the whole command group on the wire, AND the cooker hood's delayed
+        # switch-off, which must not send it (the hood's `settings` group carries
+        # clock fields the device never mirrors back). One description field picks
+        # the channel, so BOTH senders have to be present here: losing the legacy
+        # one would make every fridge setpoint sparse, losing the dispatcher one
+        # would put the hood's clock back in the payload. Which appliance gets
+        # which is pinned behaviourally in test_number_setpoints and
+        # test_hood_entities.
         import inspect
 
         from custom_components.addhon import number
 
-        self.assertIn(
-            "async_send_command", inspect.getsource(number.HonNumber)
-        )
-        self.assertNotIn(
-            "async_dispatch_patch", inspect.getsource(number.HonNumber)
-        )
+        source = inspect.getsource(number.HonNumber)
+        self.assertIn("async_send_command", source)
+        self.assertIn("async_dispatch_patch", source)
 
 
 # --- Task 10: a schema ahead of the integration creates nothing ---------------

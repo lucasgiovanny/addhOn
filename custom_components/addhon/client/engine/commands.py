@@ -218,22 +218,55 @@ class HonCommand:
         params: dict[str, str | float],
         *,
         sync_shadow: bool,
+        program_name: str | None = None,
     ) -> bool:
+        """Transmit `params`; `program_name` overrides the category on the wire.
+
+        `program_name` is the top-level `programName` of a `startProgram` body, and
+        the default (None) keeps the historical behaviour: the command's own raw
+        cloud category key, which is what a washer or a fridge program start has to
+        carry. An explicit "" SUPPRESSES the key -- the caller is telling us this
+        `startProgram` is not a program start at all.
+
+        The cooker hood is why the override exists. Its `startProgram` is filed
+        under a placeholder category the cloud invented for a command that starts
+        nothing (the app never names it, and no such key exists in the app's
+        translation catalogue), while the app's own hood body -- proven three times
+        over in the decompiled sources -- carries no `programName` field whatsoever.
+        Without a way to say "not a program" the hood could not use the only command
+        that can set its `onOffStatus`. Every other caller passes nothing and is
+        unaffected.
+        """
         if not (
             isinstance(params, _CanonicalExactPayload)
             and params.command is self
         ):
             params = self.canonical_exact_payload(params)
-        ancillary_params = dict(
-            self.parameter_groups.get("ancillaryParameters", {})
-        )
-        ancillary_params.pop("programRules", None)
+        # Built from the parameters rather than from `parameter_groups`, which has
+        # already collapsed everything to `intern_value` and so cannot tell a value the
+        # schema asked for from one a subclass invented to keep reads non-None. Only
+        # the former belongs on the wire: a descriptor-only node such as the AC's
+        # windDirectionVerticalPositionSequence would otherwise travel as "0", a value
+        # outside its own enumValues, into the slot the app reads the louvre position
+        # sequence from. See `HonParameter.declares_value`.
+        #
+        # programRules is dropped deliberately, NOT for parity: the app does send it
+        # back on an AC startProgram. It is the constraint set the cloud handed us, we
+        # have already applied it locally, and echoing it risks re-pinning parameters
+        # the user has since moved.
+        ancillary_params = {
+            name: parameter.intern_value
+            for name, parameter in self._parameters.items()
+            if parameter.group == "ancillaryParameters"
+            and name != "programRules"
+            and parameter.declares_value
+        }
         result = await self.api.send_command(
             self._appliance,
             self._name,
             params,
             ancillary_params,
-            self._category_name,
+            self._category_name if program_name is None else program_name,
         )
         if not result:
             _LOGGER.error("Command rejected by cloud: %s", self._name)
@@ -259,8 +292,15 @@ class HonCommand:
             payload["prStr"] = self._category_name.upper()
         return payload
 
-    async def send_exact(self, params: dict[str, str | float]) -> bool:
-        return await self._send_parameters(params, sync_shadow=False)
+    async def send_exact(
+        self,
+        params: dict[str, str | float],
+        *,
+        program_name: str | None = None,
+    ) -> bool:
+        return await self._send_parameters(
+            params, sync_shadow=False, program_name=program_name
+        )
 
     @property
     def categories(self) -> dict[str, "HonCommand"]:

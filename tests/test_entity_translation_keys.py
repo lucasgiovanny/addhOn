@@ -251,6 +251,7 @@ def _collect_code_keys() -> dict[str, set[str]]:
         date,
         fan,
         number,
+        ref_programs,
         select,
         sensor,
         switch,
@@ -265,8 +266,13 @@ def _collect_code_keys() -> dict[str, set[str]]:
     used["sensor"] = {
         _tk(d) for descs in sensor.SENSORS.values() for d in descs
     }
-    # Derived custom-class sensor (not a description-table row).
+    # Derived custom-class sensors (not description-table rows): each combines
+    # several attributes, so the tables above cannot see them and each has to
+    # register the key it publishes here.
     used["sensor"].add(sensor.HonMeanWaterConsumption._attr_translation_key)
+    used["sensor"].update(
+        f"remaining_time_zone{zone}" for zone in sensor._HOB_ZONES
+    )
     # Account-level diagnostic sensors (fixed-key, not in the per-type table).
     used["sensor"].update(
         {"debug_status", "integration_log_level", "mqtt_log_level",
@@ -295,7 +301,15 @@ def _collect_code_keys() -> dict[str, set[str]]:
         {d.key for descs in switch._SETTINGS_SWITCHES.values() for d in descs}
         | {d.key for d in switch._PROGRAM_OPTION_SWITCHES}
         | {d.key for d in switch._AIR_PURIFIER_SWITCHES}
+        # The fridge boost modes: their own table, because they are neither settings
+        # parameters nor buffered program options -- one startProgram category for each
+        # direction's ON and a sparse stopProgram for its OFF.
+        | {d.key for d in switch._REF_MODE_SWITCHES}
         | {"pause", "debug_logging", "mqtt_realtime_debug"}
+        # The cooker hood's power switch is a fixed-key class, not a table row: it
+        # writes `onOffStatus`, which the hood's settings command does not declare,
+        # and it needs one command per direction.
+        | {switch.HonHoodPowerSwitch._attr_translation_key}
     )
     # Program select (fixed key) + the REF program/mode select (#40) + the
     # program-option selects (#35) + the AC fan-direction selects (#37). The HW
@@ -305,29 +319,40 @@ def _collect_code_keys() -> dict[str, set[str]]:
         {
             "program",
             "ref_program",
+            select.HonRefMyZoneSelect._attr_translation_key,
             select.HonAirPurifierAromaSelect._attr_translation_key,
             select.HonAirPurifierPanelLightSelect._attr_translation_key,
+            select.HonHobPowerLimitSelect._attr_translation_key,
         }
         | {d.translation_key for d in select._PROGRAM_OPTION_SELECTS}
         | {d.translation_key for d in select._AC_DIRECTION_SELECTS}
     )
     # Fixed-key buttons: they set _attr_translation_key on the class rather than
     # carrying a description row, so there is no table to read them from.
+    #
+    # The fridge preset buttons are one entity per download preset, and their keys are
+    # generated from the same closed tuple the entities are (#93). Harvested from that
+    # tuple rather than listed: a preset added there without its two labels must fail
+    # here, which is the whole job of this test.
     used["button"] = {
         "start_program",
         "stop_program",
         "force_refresh",
         "reset_debug",
         "clear_vacation",
-    }
+    } | {f"ref_preset_{code}" for code in ref_programs.REF_DOWNLOAD_PRESETS}
     # Vacation-window dates (HW/WH): translation_key defaults from description.key.
     used["date"] = {_tk(d) for descs in date.DATES.values() for d in descs}
     used["time"] = {_tk(d) for descs in time_platform.TIMES.values() for d in descs}
     # Water heater (HW/WH): one fixed-key entity. Its `name` comes from the device
     # (_attr_name = None), so the JSON block carries only the operation-mode states.
     used["water_heater"] = {water_heater.HonWaterHeater._attr_translation_key}
-    # Air purifier fan: a single fixed-key entity, not a description table.
-    used["fan"] = {fan.HonAirPurifierFan._attr_translation_key}
+    # The fans are fixed-key entities, not description tables: each one has to
+    # register itself here or the platform's key set silently loses it.
+    used["fan"] = {
+        fan.HonAirPurifierFan._attr_translation_key,
+        fan.HonHoodFan._attr_translation_key,
+    }
     return used
 
 
@@ -360,6 +385,27 @@ class EntityTranslationKeyTest(unittest.TestCase):
     def test_no_platform_only_in_one_language(self) -> None:
         self.assertEqual(set(_load_entity_block("en")), set(_load_entity_block("it")))
 
+    def test_every_repair_notice_is_written_in_both_languages(self) -> None:
+        """A repair is the one string a user reads at the moment something broke.
+
+        Both halves are checked, not just the key: a notice with a title and no
+        description renders as a heading over an empty panel, which is worse than no
+        notice at all -- the user knows something happened and not what.
+        """
+        blocks = {}
+        for lang in ("en", "it"):
+            data = json.loads(
+                (COMPONENT / "translations" / f"{lang}.json").read_text(encoding="utf-8")
+            )
+            blocks[lang] = data.get("issues", {})
+        self.assertEqual(set(blocks["en"]), set(blocks["it"]))
+        for lang, block in blocks.items():
+            for key, text in block.items():
+                for half in ("title", "description"):
+                    self.assertTrue(
+                        (text.get(half) or "").strip(), f"[{lang}] issues.{key}.{half}"
+                    )
+
 
 def _code_translation_key_literals() -> set[str]:
     """Every `translation_key="..."` / `_attr_translation_key = "..."` literal in the
@@ -384,7 +430,11 @@ class CodeTranslationKeyLiteralsTest(unittest.TestCase):
             # The device-name translation_key (the "addhOn diagnostica" service
             # device) lives under the top-level "device" section, not under entity.
             device_keys = set(data.get("device", {}))
-            missing = used - (entity_keys | exc_keys | device_keys)
+            # Repair notices (`issue_registry.async_create_issue`) name their text under
+            # the top-level "issues" section, which is where Home Assistant reads a
+            # repair's title and description from -- not under entity or exceptions.
+            issue_keys = set(data.get("issues", {}))
+            missing = used - (entity_keys | exc_keys | device_keys | issue_keys)
             self.assertFalse(
                 missing,
                 f"[{lang}] translation_key literals used in code with no entity/exceptions "

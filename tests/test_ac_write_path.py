@@ -207,8 +207,9 @@ def _program_climate(program_enum: list | None = None, *, with_onoff: bool = Fal
     NOT by onOffStatus/machMode in `settings`. temp/fan still live on `settings`.
 
     ``with_onoff=True`` adds onOffStatus to `settings` to reproduce the AS35-style
-    settings-based model even though startProgram/stopProgram also exist: the gate
-    must then stay on the settings path (regression guard).
+    model that declares BOTH write surfaces. The program path must still win: the
+    official app drives every RAC through startProgram/stopProgram regardless of
+    what `settings` happens to expose (see AcClimateProgramWinsOverSettingsTest).
 
     Returns (entity, settings_cmd, start_cmd, stop_cmd, coordinator).
     """
@@ -742,35 +743,64 @@ class AcClimateProgramWritePathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, coordinator.refreshes)
 
 
-class AcClimateSettingsRegressionTest(unittest.IsolatedAsyncioTestCase):
-    """Regression: an AS35-style settings-with-onOffStatus model keeps the settings
-    write path for on/off/mode EVEN IF startProgram/stopProgram also exist. The gate
-    keys on onOffStatus being present in `settings`, so it must never reroute here.
+class AcClimateProgramWinsOverSettingsTest(unittest.IsolatedAsyncioTestCase):
+    """A model declaring BOTH surfaces must still drive power/mode via programs.
+
+    The AS35 family exposes onOffStatus/machMode inside `settings` AND a full
+    startProgram/stopProgram pair. The gate used to read that as "settings-based"
+    and route power/mode into `settings`, which the official app never does on a
+    RAC: there, ON is startProgram, OFF is stopProgram and a mode change is just
+    another startProgram.
+
+    The divergence is not cosmetic. The cloud tracks the appliance's active
+    program from the last program command; a `settings` write updates values but
+    leaves that pointer untouched. On a unit driven only from Home Assistant the
+    pointer therefore keeps naming whatever program was last started by some other
+    channel, and the app renders the program screen from that stale schema node --
+    empty fan list, temperature picker collapsed to 0, `Fissa(NaN)` for the vertical
+    louvre. Observed on two units in the wild; see
+    apk/analysis/ac-power-mode-and-winddir-rendering.md.
+
+    temp/fan stay on `settings` in both models and are covered above.
     """
 
-    async def test_turn_on_uses_settings_onoffstatus(self) -> None:
+    async def test_turn_on_uses_startprogram(self) -> None:
         entity, settings, start, stop, coord = _program_climate(with_onoff=True)
         await entity.async_turn_on()
-        self.assertEqual(1, settings.send_calls)
-        self.assertEqual("1", settings.sent["onOffStatus"])
-        self.assertEqual(0, start.send_calls)
+        self.assertEqual(1, start.send_calls)
+        self.assertEqual(
+            {"onOffStatus": "1", "program": "iot_simple_start"}, start.sent
+        )
+        self.assertEqual(0, settings.send_calls)
         self.assertEqual(0, stop.send_calls)
         self.assertEqual(1, coord.refreshes)
 
-    async def test_set_mode_uses_settings_machmode(self) -> None:
+    async def test_set_mode_uses_startprogram(self) -> None:
         entity, settings, start, stop, _ = _program_climate(with_onoff=True)
-        await entity.async_set_hvac_mode(HVACMode.HEAT)  # golden machMode heat=4
-        self.assertEqual("4", settings.sent["machMode"])
-        self.assertEqual("1", settings.sent["onOffStatus"])
-        self.assertEqual(0, start.send_calls)
+        await entity.async_set_hvac_mode(HVACMode.HEAT)
+        self.assertEqual(1, start.send_calls)
+        self.assertEqual({"onOffStatus": "1", "program": "iot_heat"}, start.sent)
+        self.assertEqual(0, settings.send_calls)
         self.assertEqual(0, stop.send_calls)
 
-    async def test_off_uses_settings_onoffstatus(self) -> None:
+    async def test_off_uses_stopprogram(self) -> None:
         entity, settings, start, stop, _ = _program_climate(with_onoff=True)
         await entity.async_set_hvac_mode(HVACMode.OFF)
-        self.assertEqual("0", settings.sent["onOffStatus"])
-        self.assertEqual(0, stop.send_calls)
+        self.assertEqual(1, stop.send_calls)
+        self.assertEqual({"onOffStatus": "0"}, stop.sent)
+        self.assertEqual(0, settings.send_calls)
         self.assertEqual(0, start.send_calls)
+
+    async def test_settings_only_model_keeps_settings_path(self) -> None:
+        # The gate now keys on startProgram alone, so a model WITHOUT it must still
+        # write power/mode into `settings` -- otherwise this change would silently
+        # break every AC that has no program surface at all.
+        entity, settings, _ = _climate(
+            {"onOffStatus": Param("0"), "machMode": Param("0")}
+        )
+        await entity.async_turn_on()
+        self.assertEqual(1, settings.send_calls)
+        self.assertEqual("1", settings.sent["onOffStatus"])
 
 
 class AcClimateReadPathTest(unittest.IsolatedAsyncioTestCase):
@@ -912,6 +942,151 @@ class AcSwitchWritePathTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HomeAssistantError) as ctx:
             await entity.async_turn_on()
         self.assertEqual("inner_sw", getattr(ctx.exception, "translation_key", None))
+
+
+class SettingsSwitchChannelTest(unittest.IsolatedAsyncioTestCase):
+    """Which appliances still put the WHOLE `settings` group on the wire.
+
+    `HonSettingsSwitch` grew a second write channel for the cooker hood (#83),
+    whose `settings` group also carries clock fields the device never mirrors back
+    -- a full-group send reset the hood's clock on every toggle. The air
+    conditioner and the wine cooler must be untouched by that change: their toggles
+    have always transmitted every parameter of the group, and the air conditioner
+    NEEDS to, because `ac_command.sanitize_wind_direction` repairs sibling
+    parameters on the way out and a sparse payload would drop the repair on the
+    floor -- the cloud then rejects the whole command (the reason that sanitizer
+    exists at all).
+
+    The EXACT key set is asserted, not merely the toggled one: a switch quietly
+    moved to the dispatcher would send a single key and satisfy every other
+    assertion in this file. `FakeClient` implements only the legacy
+    `run_command_sync`, so such a move also fails loudly instead of silently.
+    """
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "entry-1"
+            self.options: dict = {}
+
+    @staticmethod
+    def _data(app_type: str, appliance_id: str, command) -> dict:
+        return {
+            appliance_id: {
+                "type": app_type,
+                "name": app_type,
+                "appliance": types.SimpleNamespace(commands={"settings": command}),
+                "attributes": {},
+                "settings": {},
+            }
+        }
+
+    async def _switches(self, app_type: str, appliance_id: str, params: dict):
+        """Every settings switch the SHIPPED table gives this appliance.
+
+        Built through the real platform setup so the descriptions are the ones the
+        integration ships, not a copy written here that could keep passing after
+        the table moved on.
+        """
+        from custom_components.addhon.const import DOMAIN
+
+        command = RecordingCommand(params)
+        coordinator = FakeCoordinator(self._data(app_type, appliance_id, command))
+        hass = FakeHass(
+            {DOMAIN: {"entry-1": {"coordinator": coordinator, "client": FakeClient()}}}
+        )
+        added: list = []
+        await switch.async_setup_entry(hass, self._Entry(), added.extend)
+        for entity in added:
+            entity.hass = hass
+        appliance_switches = [
+            e for e in added if not getattr(e, "_addhon_account", False)
+        ]
+        return appliance_switches, command
+
+    @staticmethod
+    def _fresh_ac_settings() -> dict:
+        """The air conditioner's `settings`, FRESH on every call.
+
+        A class attribute holding these would be copied by `dict(...)` one level
+        deep only, so every test would share the same mutable `Param` objects and
+        inherit whatever the previous send left in them. The louvre repair test
+        is the one that would rot: `windDirectionVertical` arriving already at
+        "2" makes it assert that the sanitizer did something it no longer had to
+        do, and it would keep passing after the sanitizer was removed. Test order
+        is not a contract, so the fixture must not depend on it.
+
+        Mirrors the part of the AS35PBPHRA-PRE schema that matters here: the
+        toggled flag, a louvre parameter the sanitizer has to repair, and two
+        unrelated siblings that must still travel.
+        """
+        return {
+            "lightStatus": Param("0"),
+            "windDirectionVertical": Param("0", values=["2", "4", "8"]),
+            "machMode": Param("1"),
+            "tempSel": Param("22"),
+        }
+
+    async def test_an_ac_toggle_still_sends_the_whole_settings_group(self) -> None:
+        switches, command = await self._switches("AC", "ac-1", self._fresh_ac_settings())
+        light = next(s for s in switches if s._attr_unique_id == "ac-1_light")
+        await light.async_turn_on()
+        self.assertEqual(
+            {
+                "lightStatus": "1",
+                # Repaired from the reported 0, which its own enum does not allow.
+                "windDirectionVertical": "2",
+                "machMode": "1",
+                "tempSel": "22",
+            },
+            command.sent,
+        )
+
+    async def test_an_ac_toggle_still_repairs_the_louvre_on_the_way_out(self) -> None:
+        # The concrete harm of a sparse conversion, stated on its own: the louvre
+        # value the device reports while it is off is not in its own enum, and the
+        # cloud rejects a command carrying it. A one-key payload cannot repair it.
+        switches, command = await self._switches("AC", "ac-1", self._fresh_ac_settings())
+        light = next(s for s in switches if s._attr_unique_id == "ac-1_light")
+        await light.async_turn_off()
+        self.assertIn("windDirectionVertical", command.sent)
+        self.assertNotEqual("0", command.sent["windDirectionVertical"])
+
+    async def test_a_wine_cooler_light_still_sends_the_whole_settings_group(
+        self,
+    ) -> None:
+        # Ground-truthed on the HWS77GDAU1 of discussion #62, the appliance whose
+        # own regression is the reason the hood's channel was changed rather than
+        # everyone's.
+        switches, command = await self._switches(
+            "WC",
+            "wc-1",
+            {
+                "lightStatus": Param("0"),
+                "tempSel": Param("12"),
+                "tempSelZ2": Param("16"),
+            },
+        )
+        light = next(s for s in switches if s._attr_unique_id == "wc-1_light")
+        await light.async_turn_on()
+        self.assertEqual(
+            {"lightStatus": "1", "tempSel": "12", "tempSelZ2": "16"}, command.sent
+        )
+
+    def test_only_the_hood_asks_for_the_sparse_channel(self) -> None:
+        # The table-level statement of the same fact, so a new appliance family
+        # added to `_SETTINGS_SWITCHES` has to declare its channel here rather than
+        # inherit one by accident.
+        tables = switch._SETTINGS_SWITCHES
+        self.assertEqual({"AC", "WC", "HO", "HW"}, set(tables))
+        # HW joins the full-group senders: the heat pump water heater's toggles are
+        # gated at send time by settings_write_blocked, not by a narrower channel.
+        for app_type in ("AC", "WC", "HW"):
+            self.assertTrue(tables[app_type], app_type)  # not vacuous
+            for desc in tables[app_type]:
+                self.assertIsNone(desc.sparse_command, f"{app_type}.{desc.key}")
+        self.assertTrue(tables["HO"])
+        for desc in tables["HO"]:
+            self.assertEqual("settings", desc.sparse_command, desc.key)
 
 
 class WithSelfCleanOffTest(unittest.TestCase):

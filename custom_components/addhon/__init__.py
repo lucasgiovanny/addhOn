@@ -3,7 +3,9 @@
 
 import asyncio
 import logging
-from datetime import timedelta
+import re
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import NoReturn
 
 from homeassistant.config_entries import ConfigEntry
@@ -28,7 +30,13 @@ except ImportError:  # pragma: no cover - only under the test stub
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    ACCOUNT_DEVICE_SUFFIX,
+    APPLIANCE_FR,
+    APPLIANCE_FRE,
+    APPLIANCE_HOB,
     APPLIANCE_HW,
+    APPLIANCE_IH,
+    APPLIANCE_REF,
     APPLIANCE_TD,
     APPLIANCE_WH,
     ATTR_LEVEL,
@@ -112,9 +120,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
     realtime MQTT noise. The service is global to the domain, not per-entry, so it
     is idempotent: if already present it does nothing.
 
-    voluptuous is imported here (not at module level) so the import of __init__
-    does not depend on voluptuous: the test harness imports the package without
-    always providing its stub, while this function only runs in real HA.
+    voluptuous and homeassistant.helpers.service are imported here (not at module
+    level) so the import of __init__ does not depend on them: the test harness
+    imports the package without always providing their stubs, while this function
+    only runs in real HA.
     """
     mqtt_service_exists = hass.services.has_service(DOMAIN, SERVICE_SET_MQTT_LOG_LEVEL)
     log_service_exists = hass.services.has_service(DOMAIN, SERVICE_SET_LOG_LEVEL)
@@ -133,6 +142,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         return
 
     import voluptuous as vol
+
+    from homeassistant.helpers.service import async_register_admin_service
 
     # First registration (HA start/restart): silence the noise by default.
     # On a reload of a single entry the service stays registered, so a debug level
@@ -244,8 +255,15 @@ def _async_register_services(hass: HomeAssistant) -> None:
         {vol.Required(ATTR_LEVEL, default="debug"): vol.In(tuple(MQTT_LOG_LEVELS))}
     )
 
+    # Admin-only. Both handlers end in logging.getLogger().setLevel(), which is
+    # global to the Python process: not per config entry, not per user. Registered
+    # plainly, any authenticated non-admin could turn integration-wide debug
+    # logging on through the REST/WebSocket API. async_register_admin_service
+    # resolves call.context.user_id and raises Unauthorized for non-admins; calls
+    # with no user attached (automations, internal) keep working.
     if not mqtt_service_exists:
-        hass.services.async_register(
+        async_register_admin_service(
+            hass,
             DOMAIN,
             SERVICE_SET_MQTT_LOG_LEVEL,
             _handle_set_mqtt_log_level,
@@ -253,7 +271,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         )
 
     if not log_service_exists:
-        hass.services.async_register(
+        async_register_admin_service(
+            hass,
             DOMAIN,
             SERVICE_SET_LOG_LEVEL,
             _handle_set_log_level,
@@ -564,6 +583,106 @@ async def _async_close_client(client) -> None:
         _LOGGER.warning("Error closing HonClient: %s", err)
 
 
+def _store_setup_failure(hass: HomeAssistant, entry: ConfigEntry, client) -> None:
+    """Leave behind WHY this setup failed, in place of the bucket it never filled.
+
+    Until this existed the two failure branches of async_setup_entry popped the entry
+    bucket whole, so a diagnostics download taken after a failed setup found no client
+    to ask and reported `{"status": "client_absent"}` -- true, and useless: it is the
+    same answer a dump gives while Home Assistant is still retrying, and it says
+    nothing about the classified code, the phase that burned the time, or the
+    appliance-list call. That is the state a reporter downloads a dump in most often,
+    and the artefacts built to explain it (the per-phase ledger of #76, the fetch
+    census) were unreachable in exactly that dump.
+
+    The bucket is REPLACED, never merged: whatever platforms and the coordinator were
+    handed must not survive a failed setup, and the record is the only key left. It is
+    overwritten by the next attempt (async_setup_entry stores the live bucket as one
+    literal) and removed by async_unload_entry / async_remove_entry, so the record
+    describes the LAST attempt and only while the entry has no working session.
+
+    Called BEFORE _async_close_client on both branches, because closing the client
+    nulls the session `last_appliance_fetch` reads through -- the census would be gone
+    by the time this ran after it. `last_setup_fetch` covers the other half: a failure
+    raised INSIDE setup_sync has already closed the session there, and that path
+    snapshots the census before it does (hon_client.py, the except of setup_sync).
+
+    Every value stored here is one this integration already emits in the dump through
+    `_last_error`: an ADDHON label, a phase token, the phase ledger, the census
+    primitives. No new class of value reaches hass.data, and diagnostics still
+    validates each one on the way out rather than trusting this record.
+
+    The reads are GUARDED, and the guard is not symmetry with `diagnostics._last_fetch`
+    -- it costs more here. `getattr(x, name, default)` swallows a MISSING attribute, not
+    an exception raised inside a property body, and `_setup_failure_record` reads four
+    HonClient properties that delegate to `_hon_instance` (`setup_drops` ends in
+    `dict(self._setup_drops)` on a session that setup may still be appending to from the
+    hOn loop thread -- `client/session.py:625-632`, and `_RaisingFetchClient` in the
+    diagnostics tests exists for exactly that). Unguarded, one such raise leaves this
+    helper propagating out of the `except` handler that called it, so
+    `_async_close_client` never runs and the dedicated loop thread and the owned
+    aiohttp session leak -- and in the CancelledError branch it would replace a
+    cancellation with an unrelated error. A dump that cannot say why setup failed is a
+    worse dump; a client nobody closed is a worse process.
+
+    On that path the bucket is still cleared and left EMPTY rather than filled with a
+    half-read record: `_last_error` then answers `client_absent`, which is exactly true
+    (there is no client, and nothing could be read about why).
+    """
+    record: dict | None = None
+    try:
+        record = _setup_failure_record(client)
+    except Exception:  # noqa: BLE001 - a diagnostics record must never block teardown
+        _LOGGER.debug(
+            "Setup debug: could not record the setup failure for entry=%s",
+            entry.entry_id,
+            exc_info=True,
+        )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = (
+        {"setup_failure": record} if record is not None else {}
+    )
+    _LOGGER.debug(
+        "Setup debug: recorded setup failure for entry=%s code=%s phase=%s fetch=%s",
+        entry.entry_id,
+        (record or {}).get("code"),
+        (record or {}).get("phase"),
+        ((record or {}).get("fetch") or {}).get("outcome"),
+    )
+
+
+def _setup_failure_record(client) -> dict:
+    """The record itself. Split from the guard above so that guard is the whole
+    degradation story: four property reads that may raise, none of them allowed to
+    keep a failed setup from closing its client."""
+    code = getattr(client, "last_error_code", None)
+    census = getattr(client, "last_appliance_fetch", None) or getattr(
+        client, "last_setup_fetch", None
+    )
+    fetch: dict | None = None
+    if isinstance(census, Mapping):
+        # The four counters live on the client, not in the census: they are what SETUP
+        # made of the list, while the census is what the CALL returned. Flattened into
+        # one mapping here so the reader in diagnostics has a single source for the
+        # block whether it is reading a live client or this record.
+        fetch = {
+            **dict(census),
+            "expanded": getattr(client, "setup_expanded", None),
+            "built": getattr(client, "appliance_count", None),
+            "skipped": getattr(client, "setup_drops", None),
+            "degraded": getattr(client, "degraded_census", None),
+        }
+    return {
+        # The LABEL only, never the code object: diagnostics resolves the reason from
+        # the catalog at read time, so the text in the dump comes from error_codes.py
+        # in the running version and cannot be a string that rode in here.
+        "code": getattr(code, "label", None),
+        "phase": getattr(client, "last_error_phase", None),
+        "phase_ledger": getattr(client, "last_phase_ledger", None) or None,
+        "fetch": fetch,
+        "at": datetime.now(timezone.utc),
+    }
+
+
 @callback
 def _persist_refresh_token(hass: HomeAssistant, entry: ConfigEntry, hon_client) -> None:
     """Copy a rotated refresh token into entry.data, once, only on a real change.
@@ -694,6 +813,22 @@ _HW_REMOVED = (
 )
 
 
+# The unique_id of an entity that belonged to a per-ZONE CLONE of an appliance.
+# `HonAppliance._check_name_zone` builds a clone's id as "<base>_z<N>", and every
+# entity's id is "<appliance_id>_<key>", so a clone's entity reads
+# "<base>_z<N>_<key>".
+#
+# ANCHORED and greedy on purpose. Unanchored it would also match a key that merely
+# CONTAINS the shape, and the hob's own tables are full of near misses:
+# `pan_zone1`, `temp_zone1`, `power_zone1`, `hot_zone1` all carry "zone" followed
+# by a digit and none of them is a clone. What distinguishes a clone is the
+# underscore-z-digits-underscore run in the DEVICE half of the id, before the key
+# begins. The greedy `.+` takes the LAST such run, which is the right one: a base
+# id built from the import-name fallback ("ih_<modelId>") contains underscores of
+# its own, and the zone suffix is always the final segment the engine appends.
+_ZONE_ONLY_RE = re.compile(r"^(?P<base>.+)_z\d+_")
+
+
 def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove from the registry the legacy entities no longer provided by the integration.
 
@@ -714,8 +849,26 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
       entity. Domain- AND type-scoped (HW/WH only, cross-checked with the
       coordinator): the wine cooler and the oven keep their own legitimate
       '<id>_target_temp' numbers.
+    - The fridge program SELECT (unique_id '<id>_ref_program'), replaced in #93 by
+      four independent mode switches, a My Zone select and one button per download
+      preset. The only CONDITIONAL rule here: that select still ships on a fridge
+      where none of those can be built, so the id must also be one this session
+      really superseded (`_superseded_ref_program_ids`). Scoped to the select
+      domain for the same reason the panel light is: nothing else may match.
+    - Everything that belonged to a per-zone CLONE of an induction hob
+      ('<base>_z<N>_<key>'), which the session no longer creates. Double-anchored:
+      the id must have the clone shape AND its base must be a hob in the current
+      snapshot, so a genuinely zoned appliance of another type keeps its entities.
 
     Without this cleanup there would be orphan 'unavailable' entities with the '?' badge.
+
+    Deliberately NOT a rule here: the My Zone mode SENSOR ('<id>_my_zone_mode'). 5.21.0
+    removed it wherever the writable select could be built; it is now created there and
+    merely disabled at first registration (`sensor.async_setup_entry`), like the fridge
+    flag readings the mode switches duplicate. Removal was the wrong answer because the
+    reading is not a strict duplicate: it reports the panel-set drawer modes -- chiller,
+    cool drink, cheese -- that no drawer PROGRAM pins, and for which the select, which
+    may only report its own options, has to answer unknown (#93).
     """
     from homeassistant.helpers import entity_registry as er
 
@@ -743,10 +896,15 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
         for appliance_id in hw_ids
         for domain, suffix in _HW_REMOVED
     }
+    hob_ids = _hob_ids(coord_data)
+    superseded_refs = _superseded_ref_program_ids(coord_data)
 
     registry = er.async_get(hass)
     checked = 0
     removed = 0
+    # Counted apart from `removed` because this is the only rule whose removal BREAKS
+    # something a user may still be calling; see the repair below.
+    removed_ref_programs = 0
     for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         checked += 1
         unique_id = reg_entry.unique_id or ""
@@ -776,12 +934,208 @@ def _remove_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 "Removed retired water-heater control surface: id=%s",
                 redact_id(reg_entry.unique_id),
             )
+        elif (
+            domain == "select"
+            and unique_id.endswith("_ref_program")
+            and unique_id.removesuffix("_ref_program") in superseded_refs
+        ):
+            registry.async_remove(reg_entry.entity_id)
+            removed += 1
+            removed_ref_programs += 1
+            _LOGGER.info(
+                "Removed the fridge program select replaced by the per-mode controls: "
+                "id=%s",
+                redact_id(reg_entry.unique_id),
+            )
+        elif _is_hob_zone_clone(unique_id, hob_ids):
+            registry.async_remove(reg_entry.entity_id)
+            removed += 1
+            _LOGGER.info(
+                "Removed duplicate per-zone entity of an induction hob: id=%s",
+                redact_id(reg_entry.unique_id),
+            )
+    if removed_ref_programs:
+        _raise_ref_program_repair(hass, entry)
     _LOGGER.debug(
         "Setup debug: legacy cleanup completed for entry=%s, checked=%d, removed=%d",
         entry.entry_id,
         checked,
         removed,
     )
+    _remove_zone_clone_devices(hass, entry, coord_data, hob_ids)
+
+
+def _raise_ref_program_repair(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Tell the user their fridge program select is gone, and what replaced it.
+
+    Raised ONLY when this run actually removed one, so it fires once and never on a
+    fresh install. The purge above is idempotent, so a later start removes nothing and
+    says nothing more.
+
+    A repair rather than a log line, because the way this breaks is silent: Home
+    Assistant answers `select.select_option` on an entity that no longer exists with a
+    WARNING in the log and a SUCCESSFUL service call, so an automation that used to set
+    the fridge to Holiday keeps reporting as run and does nothing. Nothing in the UI
+    would say so.
+
+    `is_fixable=False`: there is no button we could offer. The old option maps to three
+    different kinds of entity depending on which one it was -- a switch, the My Zone
+    select, or a preset button -- and only the person who wrote the automation knows
+    which they meant. The repair carries no appliance id or name: it is one notice per
+    config entry, and the entities it names are the generic keys, never this user's.
+    """
+    try:
+        from homeassistant.helpers import issue_registry as ir
+
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            "ref_program_select_replaced",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="ref_program_select_replaced",
+        )
+    except Exception:  # noqa: BLE001 - a notice must never cost a setup
+        _LOGGER.debug("Setup debug: could not raise the ref_program repair", exc_info=True)
+
+
+def _superseded_ref_program_ids(coord_data) -> set[str]:
+    """Appliance ids whose fridge program select was REPLACED, not merely dropped (#93).
+
+    The fifth purge rule, and the first conditional one. The four above are
+    unconditional -- that entity is not created any more, full stop -- while
+    `select.ref_program` still ships on a fridge where no per-mode control can be built
+    (one offering `iot_*` download presets alone). So the anchor is not "this is a
+    fridge", it is `ref_programs.has_replacement_controls`: the SAME predicate
+    `HonRefProgramSelect.supports_appliance` consults to step aside. Anything else would
+    be a second opinion about which appliances lost the entity, and the two could differ.
+
+    Double-anchored like the tumble-dryer and hob purges: the id must be a cooling
+    appliance IN THE CURRENT SNAPSHOT and its live schema must really offer the
+    replacement. An empty or degraded snapshot yields an empty set and removes nothing --
+    the purge is idempotent and runs on every setup, so a bad start postpones it rather
+    than guessing.
+    """
+    from .ref_programs import has_replacement_controls
+
+    superseded: set[str] = set()
+    for appliance_id, device in (coord_data or {}).items():
+        if not isinstance(device, dict):
+            continue
+        if device.get("type") not in (APPLIANCE_REF, APPLIANCE_FR, APPLIANCE_FRE):
+            continue
+        try:
+            if has_replacement_controls(device.get("appliance")):
+                superseded.add(appliance_id)
+        except Exception:  # noqa: BLE001 - a degraded schema must not cost a setup
+            _LOGGER.debug(
+                "Setup debug: supersession check failed for id=%s",
+                redact_id(appliance_id),
+                exc_info=True,
+            )
+    return superseded
+
+
+def _hob_ids(coord_data) -> set[str]:
+    """Appliance ids of the induction hobs in the current snapshot.
+
+    The second anchor of the zone-clone purge. Matching the '<base>_z<N>_' shape
+    alone would also delete the entities of an appliance whose zones are still
+    real -- a twin-cavity oven, say -- and those are not duplicates of anything.
+    Cross-checking against the snapshot's TYPE is the pattern the tumble-dryer
+    purge above already uses.
+
+    An empty snapshot yields an empty set and therefore removes nothing. That is
+    the safe direction: the purge is idempotent and runs on every setup, so a
+    degraded start postpones it instead of guessing.
+    """
+    return {
+        appliance_id
+        for appliance_id, device in (coord_data or {}).items()
+        if isinstance(device, dict) and device.get("type") in (APPLIANCE_IH, APPLIANCE_HOB)
+    }
+
+
+def _is_hob_zone_clone(unique_id: str, hob_ids: set[str]) -> bool:
+    """True for an entity that belonged to a zone clone of a hob in `hob_ids`."""
+    match = _ZONE_ONLY_RE.match(unique_id or "")
+    return bool(match) and match.group("base") in hob_ids
+
+
+def _remove_zone_clone_devices(hass: HomeAssistant, entry: ConfigEntry, coord_data, hob_ids) -> None:
+    """Detach the now-empty '<base>_z<N>' devices of a hob from this config entry.
+
+    Removing an entity does NOT remove its device: the row stays attached to the
+    config entry and keeps showing in the UI, now empty -- which is a worse result
+    than the duplicate it replaced, since an empty device looks like a broken one.
+
+    `remove_config_entry_id` rather than `async_remove_device`: it detaches only OUR
+    entry and lets Home Assistant drop the device once nothing else references it,
+    so a device an unrelated integration also claims is left alone.
+
+    The list is MATERIALISED before the loop. `async_entries_for_config_entry`
+    returns a live view over the registry, and detaching a device mutates exactly
+    what is being iterated.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    if not hob_ids:
+        return
+    live_ids = set(coord_data or {})
+    dev_reg = dr.async_get(hass)
+    for device in list(dr.async_entries_for_config_entry(dev_reg, entry.entry_id)):
+        ours = {ident for domain, ident in device.identifiers if domain == DOMAIN}
+        # `<base>_z<N>` with no trailing key: the DEVICE id, not an entity id, so
+        # the shared regex needs the separator the entity form always carries.
+        if not any(
+            _is_hob_zone_clone(f"{ident}_", hob_ids) and ident not in live_ids
+            for ident in ours
+        ):
+            continue
+        dev_reg.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
+        _LOGGER.info(
+            "Removed duplicate per-zone device of an induction hob: id=%s",
+            redact_id(sorted(ours)[0]),
+        )
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: ConfigEntry, device
+) -> bool:
+    """Let the user delete a device this entry no longer provides.
+
+    Home Assistant shows the "Delete" button on a device card only when the
+    integration implements this hook, and until now it did not: a device left over
+    from an older layout could not be removed by hand at all. The automatic purge
+    above covers the hob clones, so this is the safety net for anything it misses
+    -- a clone whose base has since left the account, for instance, which no
+    snapshot can identify as a hob any more.
+
+    Returns True only for a device NOT in the current snapshot: allowing a live
+    device to be deleted would let a user remove an appliance the next poll
+    recreates, which reads as the delete button not working.
+
+    The ACCOUNT's synthetic "diagnostics" device counts as live even though it is
+    not an appliance and so never appears in the snapshot. It is the one device
+    every entry of every account owns, it carries the debug toggles and the
+    refresh button, and setup recreates it on the next reload -- so offering to
+    delete it is offering to break the entry's own controls. Without this it was
+    the ONLY device this hook answered True for on a healthy single-appliance
+    account, which is the opposite of what the paragraph above promises.
+    """
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    coordinator = entry_data.get("coordinator")
+    coord_data = getattr(coordinator, "data", None)
+    if not isinstance(coord_data, Mapping):
+        # No snapshot means no way to tell a live device from a stale one, and
+        # answering True there would offer to delete every device of the entry.
+        return False
+    # Built from `entry` and not from the snapshot: the account device is ours by
+    # construction, whatever the poll returned. `base_entity.account_device_info`
+    # builds the same identifier from the same constant.
+    live_ids = set(coord_data) | {f"{entry.entry_id}{ACCOUNT_DEVICE_SUFFIX}"}
+    ours = {ident for domain, ident in device.identifiers if domain == DOMAIN}
+    return bool(ours) and not (ours & live_ids)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -1012,7 +1366,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await unload_platforms(entry, PLATFORMS)
                 except Exception as err:
                     _LOGGER.warning("Error unloading platforms after cancelled setup: %s", err)
-            hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        _store_setup_failure(hass, entry, hon_client)
         await _async_close_client(hon_client)
         raise
     except Exception:
@@ -1023,7 +1377,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await unload_platforms(entry, PLATFORMS)
                 except Exception as err:
                     _LOGGER.warning("Error unloading platforms after failed setup: %s", err)
-            hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        _store_setup_failure(hass, entry, hon_client)
         await _async_close_client(hon_client)
         raise
 
@@ -1061,3 +1415,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass.services.async_remove(DOMAIN, service)
                     _LOGGER.debug("Unload debug: removed service %s", service)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the setup-failure record when the entry itself is deleted.
+
+    The only hook that can. An entry whose setup never succeeded is never unloaded --
+    Home Assistant calls async_unload_entry for LOADED entries -- so without this the
+    record written by _store_setup_failure would outlive the entry it describes for the
+    rest of the process, and `hass.data[DOMAIN]` would stay non-empty, which is what
+    async_unload_entry reads to decide whether the last entry just went away and the
+    global debug services can go with it.
+
+    No client to close here: a failed setup left none, and a loaded entry has already
+    been through async_unload_entry by the time Home Assistant removes it.
+    """
+    removed = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    _LOGGER.debug(
+        "Remove debug: entry=%s dropped_record=%s",
+        entry.entry_id,
+        removed is not None,
+    )

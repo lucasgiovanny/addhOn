@@ -55,6 +55,10 @@ from .const import (
 from .air_purifier import co_alarm, has_problem, is_engaged
 from .debug_utils import redact_id
 from .hw_values import HW_MACH_MODE_ATTR, hw_vacation_active
+from .ref_programs import REF_FLAG_TO_PARAM, flag_codes
+
+# The fridge family, named because the mode-reading hiding rule below is its alone.
+_COOLING_TYPES: tuple[str, ...] = (APPLIANCE_REF, APPLIANCE_FR, APPLIANCE_FRE)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -184,6 +188,13 @@ _COOLING_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
     _door("door2_zone1", "door2StatusZ1"),
     _door("door_zone2", "doorStatusZ2"),
     _door("door_zone3", "doorStatusZ3"),
+    # Z4 was the one zone the table skipped, and a four-door fridge noticed
+    # (discussion #94, HCW58F18EWMP): its shadow publishes `doorStatusZ4` and the
+    # diagnostics printed it under `attributes_unmapped` while `doorStatusZ3` sat in
+    # `attributes_expected_absent` two lines away -- the dump saying, correctly, that we
+    # knew about the third door and not the fourth. The temperature side of that zone
+    # has always been here (`temp_zone4`), so the omission was the door alone.
+    _door("door_zone4", "doorStatusZ4"),
     HonBinarySensorEntityDescription(
         key="ice_maker",
         icon="mdi:snowflake",
@@ -200,9 +211,27 @@ _COOLING_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
         icon="mdi:leaf",
         attr_key="energySavingStatus",
     ),
-    # Active-mode flags (0/1). Read-only mirrors of the boost/special modes; the
-    # engine also folds these into the derived modeZ1/modeZ2 (ref.py). Live-confirmed
-    # present on the real fridge (quickModeZ1/quickModeZ2/intelligenceMode/holidayMode).
+    # Active-mode flags (0/1). Read-only mirrors of the boost/special modes, and the
+    # ONLY running-mode signal a fridge shadow carries: the app derives its own per-zone
+    # mode from these same four booleans rather than reading a mode field, because no
+    # such field exists (issue #93). Live-confirmed present on the real fridge
+    # (quickModeZ1/quickModeZ2/intelligenceMode/holidayMode).
+    #
+    # HIDDEN BY DEFAULT ONLY WHERE A SWITCH REPLACES THEM (issue #93, follow-up), and the
+    # decision is made per DEVICE in `async_setup_entry`, never here. `switch.py` now
+    # ships a writable switch on each of these four flags, reading the same attribute, so
+    # a fresh install would otherwise get two entities per mode -- one that acts and one
+    # that only watches. But the switch is gated on the WRITE schema (the program code in
+    # the live startProgram enum AND the flag on stopProgram) while these are gated on the
+    # shadow, so the two sets do not coincide: a fridge whose `stopProgram` declares only
+    # `quickModeZ1` gets one switch, and hiding all four readings there would leave it
+    # with a single control and no readings at all. A static flag on the row cannot tell
+    # those cases apart, so it is not one.
+    #
+    # Hidden and not REMOVED, either way: every dashboard, automation and history graph
+    # built on them since 5.x would go with them, and history cannot be given back. Home
+    # Assistant reads the flag only when an entity is registered for the FIRST time, so an
+    # existing user keeps all four enabled regardless.
     HonBinarySensorEntityDescription(
         key="quick_cool",
         icon="mdi:snowflake",
@@ -265,17 +294,102 @@ _WINE_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
     ),
 )
 
-# Hob (IH/HOB): pan detected per zone.
-_HOB_BINARY: tuple[HonBinarySensorEntityDescription, ...] = tuple(
-    HonBinarySensorEntityDescription(
-        key=f"pan_zone{z}",
-        icon="mdi:pot-steam",
-        attr_key=f"panStatusZ{z}",
-    )
-    for z in range(1, 7)
+# The zone index the per-zone hob families are generated over. Kept as the six the
+# pan sensors have always used: the app's own IH parameter list runs to Z6, and the
+# per-attribute gate is what reduces it to the four a HA2MTSJ68MC reports.
+_HOB_ZONES = range(1, 7)
+
+# Hob (IH/HOB): everything the shadow says about each cooking zone, plus the
+# panel lock.
+#
+# `child_lock` REUSES the wash group's description object rather than declaring a
+# hob-specific twin. It is the same `lockStatus` parameter with the same meaning,
+# so it gets the same key, the same icon and the same translation -- and no
+# device_class: BinarySensorDeviceClass.LOCK is inverted in Home Assistant (on
+# means UNlocked), so a hob reporting lockStatus=1 would display as unlocked.
+_HOB_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"pan_zone{z}",
+            icon="mdi:pot-steam",
+            attr_key=f"panStatusZ{z}",
+        )
+        for z in _HOB_ZONES
+    ),
+    # Whether the zone is switched on at all. Distinct from `pan_zone*`, which
+    # says only that the hob can see cookware on the ring.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"zone_on_zone{z}",
+            attr_key=f"onOffStatusZ{z}",
+            device_class=BinarySensorDeviceClass.RUNNING,
+        )
+        for z in _HOB_ZONES
+    ),
+    # Residual heat: the "H" the panel shows after a zone is switched off. This is
+    # the reading issue #84 asks for by name.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"hot_zone{z}",
+            attr_key=f"hotStatusZ{z}",
+            device_class=BinarySensorDeviceClass.HEAT,
+        )
+        for z in _HOB_ZONES
+    ),
+    # Per-zone fault. `has_problem` and NOT the platform's `on_value`
+    # comparison: the hob spells "no error" as 0 AND as the app's zero-padded
+    # "00", and the client folds "01" to "1" on the way in, so a comparison
+    # against a raw code would light a PROBLEM permanently on all four zones.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"error_zone{z}",
+            attr_key=f"errorZ{z}",
+            device_class=BinarySensorDeviceClass.PROBLEM,
+            value_fn=has_problem,
+        )
+        for z in _HOB_ZONES
+    ),
+    # Flex zones bridged into one cooking surface. Behind the experimental option:
+    # the value is 0 on every zone of the only hob we have, and the app reads 1
+    # and 2 as two different halves of a bridged pair, a distinction a boolean
+    # cannot carry and nothing here can verify.
+    *(
+        HonBinarySensorEntityDescription(
+            key=f"combi_mode_zone{z}",
+            icon="mdi:link-variant",
+            attr_key=f"combiModeZ{z}",
+            value_fn=lambda raw: str(raw).strip() not in ("", "0", "0.0"),
+            experimental=True,
+        )
+        for z in _HOB_ZONES
+    ),
+    _CHILD_LOCK,
 )
 
-# Hood (HO).
+def _hood_filter_cleaning(raw) -> bool | None:
+    """True while the hood reports a filter-cleaning cycle in progress.
+
+    Its own reader because this is the one hood flag the device spells as a
+    TEXTUAL boolean: the reporting HADG6DS46BWIFI publishes the string "false",
+    not 0/1, so the platform's default `raw == on_value` comparison would read
+    every value -- "true" included -- as off. Both spellings are accepted, and an
+    unrecognized one reads as unknown rather than being forced to a side: the
+    decompiled app never touches this attribute, so there is no third spelling we
+    can claim to know the meaning of.
+    """
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "on", "yes"):
+        return True
+    if text in ("0", "false", "off", "no"):
+        return False
+    return None
+
+
+# Hood (HO). `filter_clean_needed` (filterCleaningAlarmStatus) and `filter_cleaning`
+# (filterCleaningStatus) are DELIBERATELY two entities: the first is the alarm flag
+# the settings command declares as a fixed "1", the second the cycle-in-progress
+# flag, and on the reporting hood they have not moved together since 2023. Folding
+# them would assert an equivalence nothing in the app or the dump supports.
 _HOOD_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
     HonBinarySensorEntityDescription(
         key="light",
@@ -286,6 +400,29 @@ _HOOD_BINARY: tuple[HonBinarySensorEntityDescription, ...] = (
         key="filter_clean_needed",
         attr_key="filterCleaningAlarmStatus",
         device_class=BinarySensorDeviceClass.PROBLEM,
+    ),
+    HonBinarySensorEntityDescription(
+        key="filter_cleaning",
+        icon="mdi:air-filter",
+        attr_key="filterCleaningStatus",
+        value_fn=_hood_filter_cleaning,
+        # An unreadable spelling hides the entity instead of claiming "not
+        # cleaning": see _hood_filter_cleaning.
+        unavailable_when_unmapped=True,
+    ),
+    # The appliance's own on/off flag: on this hood `onOffStatus` is the lit-or-dark
+    # control panel, which the device treats as its power state -- while it is 0 the
+    # hood ignores every speed and light command it receives. Read from there rather
+    # than from windSpeed, which the fan entity already publishes and which answers
+    # the narrower question "is it extracting right now".
+    #
+    # The power SWITCH added for the same field is a control, not a duplicate of
+    # this reading: it is the entity that writes the flag, and it can be gated away
+    # on a hood that declares no startProgram while this sensor still reports.
+    HonBinarySensorEntityDescription(
+        key="running",
+        attr_key="onOffStatus",
+        device_class=BinarySensorDeviceClass.RUNNING,
     ),
 )
 
@@ -465,6 +602,15 @@ async def async_setup_entry(
         attributes = data.get("attributes", {})
         attributes = attributes if isinstance(attributes, dict) else {}
         created: list[str] = []
+        # Which fridge mode flags this appliance also exposes as a SWITCH (#93). Resolved
+        # once per device from the write schema -- the same `flag_codes` the switch
+        # platform gates on, so the two can never disagree about which readings have a
+        # control beside them. Empty for every other appliance type.
+        replaced_by_switch = (
+            {REF_FLAG_TO_PARAM[code] for code in flag_codes(data.get("appliance"))}
+            if app_type in _COOLING_TYPES
+            else frozenset()
+        )
         for description in BINARY_SENSORS.get(app_type, ()):
             # Inferred from incomplete evidence: absent unless explicitly enabled.
             if description.experimental and not experimental:
@@ -475,7 +621,14 @@ async def async_setup_entry(
                     description.key, data.get("name"), redact_id(appliance_id), description.attr_key,
                 )
                 continue
-            entities.append(HonBinarySensor(coordinator, appliance_id, description))
+            entities.append(
+                HonBinarySensor(
+                    coordinator,
+                    appliance_id,
+                    description,
+                    hidden=description.attr_key in replaced_by_switch,
+                )
+            )
             created.append(description.key)
         # Universal capability-gated binaries (any type that reports the attr).
         for description in _UNIVERSAL_GATED:
@@ -507,12 +660,21 @@ class HonBinarySensor(HonBaseEntity, BinarySensorEntity):
         coordinator,
         appliance_id: str,
         description: HonBinarySensorEntityDescription,
+        hidden: bool = False,
     ) -> None:
         super().__init__(coordinator, appliance_id)
         self.entity_description = description
         self._attr_translation_key = description.translation_key or description.key
         self._attr_unique_id = f"{appliance_id}_{description.key}"
         self._attr_entity_registry_enabled_default = description.enabled_default
+        # Set only when this DEVICE also got a control for the same register (#93).
+        # Assigned on the instance rather than declared on the description because the
+        # answer is per appliance: the same row is a duplicate on a fridge whose
+        # `stopProgram` can clear the flag and the only reading there is on one whose
+        # cannot. Home Assistant reads this at FIRST registration only, so it never
+        # removes anything from a user who already has the entity.
+        if hidden:
+            self._attr_entity_registry_enabled_default = False
 
     @property
     def available(self) -> bool:

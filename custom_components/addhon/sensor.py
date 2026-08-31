@@ -110,6 +110,11 @@ from .air_purifier import (
     normalize_error,
 )
 from .debug_utils import redact_id
+from .hon_commands import (
+    find_settings_param,
+    param_range,
+    param_values,
+)
 from .hw_values import (
     HW_ACTIONS,
     HW_HEAT_SOURCES,
@@ -123,6 +128,7 @@ from .hw_values import (
     hw_weekday,
 )
 from .program_labels import for_coordinator
+from .ref_programs import model_zones as _model_zones, my_zone_code_for_value, my_zone_codes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -183,6 +189,14 @@ class HonSensorEntityDescription(SensorEntityDescription):
     # (value_fn returned None). For an experimental mapping that covers a single
     # confirmed raw value, an unconfirmed reading is not knowledge.
     unavailable_when_unmapped: bool = False
+    # Zone the MODEL CATALOGUE must declare for this entity to exist, on top of the
+    # `gated` shadow test. The shadow is not the criterion the app uses for a fridge: it
+    # splits `applianceModel.attributes.zones` on "|" and filters its zone cards on that
+    # alone. The distinction is not academic -- the app's own abandoned helper derived
+    # zones from the truthiness of `tempSelZ*` instead, and would have dropped a My Zone
+    # whose setpoint reads 0, which is a legitimate mode (#93). Defaults to None: no
+    # existing entity changes behaviour.
+    requires_zone: str | None = None
 
 
 # State + remaining time: identical for washer/washer-dryer/tumble dryer.
@@ -656,22 +670,94 @@ def _g_text(key: str, attr: str, icon: str | None = None,
     )
 
 
+def _experimental_text(key: str, attr: str) -> HonSensorEntityDescription:
+    """Gated RAW reading behind the experimental option.
+
+    For a family whose meaning is documented in the app but whose values this
+    integration has never seen move on any real device: the raw code is true, a
+    rendered label would not be, and the option keeps it out of everyone's way
+    until someone with the hardware can report what it does.
+    """
+    return HonSensorEntityDescription(
+        key=key,
+        attr_key=attr,
+        icon="mdi:tag-outline",
+        value_fn=_as_text,
+        gated=True,
+        experimental=True,
+    )
+
+
 def _g_enum(key: str, attr: str, mapping: dict[str, str], *,
             translation_key: str | None = None,
-            icon: str | None = None) -> HonSensorEntityDescription:
+            icon: str | None = None,
+            requires_zone: str | None = None,
+            extra_options: tuple[str, ...] = ()) -> HonSensorEntityDescription:
     """Capability-gated ENUM sensor: native_value is a machine key from `mapping`,
-    rendered per-language via the entity state translations."""
+    rendered per-language via the entity state translations.
+
+    `extra_options` declares states a SUBCLASS can report that the mapping alone cannot
+    produce. Options and state translations must match exactly, so a state reachable
+    only through a subclass still has to be declared here or it would surface as a raw
+    key in the UI."""
     return HonSensorEntityDescription(
         key=key,
         translation_key=translation_key,
         attr_key=attr,
         icon=icon,
         device_class=SensorDeviceClass.ENUM,
-        options=sorted(set(mapping.values())),
+        options=sorted(set(mapping.values()) | set(extra_options)),
         value_fn=_mapped(mapping),
         gated=True,
+        requires_zone=requires_zone,
     )
 
+
+# --- My Zone drawer mode (issue #93) ------------------------------------------
+#
+# `tempSelZ3` is the vtRoom1 drawer's MODE register, not a temperature. For the `myZone`
+# role -- the default for slot 1 when the model catalogue declares no `vtRoom1`
+# attribute -- the app builds a MODE_SELECTION card over it and never a temperature one.
+# A temperature spinner on `tempSelZ3` exists only behind a remote feature flag
+# ("My Zone Pro"), on Casarte Invista, and on the single-compartment uprights where Z3 is
+# the only setpoint there is. Reading it as degrees on a multidoor -- which is what the
+# reporter of #93 asked for -- would publish "0 °C" for a drawer that is simply set to
+# its Zero Fresh preset.
+MY_ZONE_MODE_KEY = "my_zone_mode"
+MY_ZONE_MODE_PARAM = "tempSelZ3"
+MY_ZONE_MODE_ZONE = "vtRoom1"
+
+# FALLBACK ONLY. The app resolves the value against the DEVICE'S OWN program catalogue
+# first and reaches its static table just for numbers no program explains; so does
+# `HonMyZoneModeSensor` below. This table is the second answer, not the first.
+#
+# "2" is `chiller` rather than `quick_cool` on purpose: the app's own 2-branch returns
+# QUICK_COOL only when it is running in demo mode, and COOL_DRINK only on Casarte and
+# one cube90 series. A real fridge that offers a Quick Cool program still reads
+# `quick_cool` here -- through the catalogue lookup, which is where that answer belongs.
+#
+# No entry for 17: the Holiday program's rules pin `tempSelZ3` (and `tempSelZ1`) to it,
+# and while Holiday runs the drawer is in none of its own modes. It falls through to
+# `unknown`, which is what the app shows too (NO_MODE_SELECTED).
+MY_ZONE_MODE_MAP: dict[str, str] = {
+    "0": "zero_fresh",
+    "2": "chiller",
+    "3": "cool_drink",
+    "4": "cheese",
+    "5": "fruit_and_veg",
+}
+
+# States only the catalogue lookup can produce, declared so they have a label. An ENUM
+# sensor may report nothing outside `options`, and options must match the state
+# translations exactly, so a state reachable only through the subclass still has to be
+# named here. `quick_cool` is the one the fallback table cannot reach: it is what a
+# fridge that OFFERS a Quick Cool program means by `tempSelZ3 = 2`, where the table --
+# correctly, for a fridge that does not -- says `chiller`.
+#
+# A model declaring some other drawer program would report its slug untranslated. That
+# is the visible, self-announcing kind of gap, and preferable to guessing at a
+# vocabulary: every drawer program seen so far is one of these.
+MY_ZONE_MODE_PROGRAM_ONLY: tuple[str, ...] = ("quick_cool",)
 
 # Fridge / fridge-freezer / freezer (REF/FR/FRE): per-zone temperatures +
 # ambient. Doors / ice-maker / eco are binary sensors (binary_sensor.py).
@@ -691,7 +777,155 @@ _COOLING: tuple[HonSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         gated=True,
     ),
+    # Fault register (issue #93). Two deliberate differences from the `errors` row the
+    # oven, dishwasher, wine cooler, hood and vacuum already carry:
+    #
+    # `normalize_error` and NOT the raw `_as_text` those five use. A fridge spells "no
+    # fault" four ways at once, and the app accepts all of them: its shared predicate
+    # returns false for '00', '100' and undefined, and the selector behind the fridge
+    # dashboard banner is `errors !== '00' && Number(errors) !== 0`. Publishing the bare
+    # value would give the same healthy appliance four different states depending on how
+    # its firmware spells zero.
+    #
+    # DIAGNOSTIC and not a headline reading, because a set bit alone is not a verdict
+    # here. The app decodes `errors` as a HEX BITMASK and then asks the cloud what each
+    # bit means (`config/troubleshooting`, keyed by brand, model and language); its own
+    # error banner stays dark until that round trip answers. There is no offline table to
+    # copy -- the whole `REF.` namespace holds exactly one error string, a generic status
+    # label -- and Haier ships no REF error push notification at all, while it does for
+    # the oven, washer, dryer, wine cooler, vacuum and water heater.
+    #
+    # The value is NOT decoded into per-bit codes on purpose. REF is the one type the app
+    # exempts from its own bitmask reduction on the REST path, precisely because the
+    # fridge Smart Check-Up wants every bit -- so what arrives here can carry several
+    # simultaneous faults, and rendering it as a single code would be a lie.
+    # Evidence: apk/analysis/issue93-ref-unmapped-values.md section 3.
+    HonSensorEntityDescription(
+        key="errors",
+        attr_key="errors",
+        # The app falls back to the singular `error` when `errors` is absent, and
+        # `COMMON_PARAMS_ENUM` declares both spellings for every appliance type.
+        attr_fallbacks=("error",),
+        icon="mdi:alert-circle-outline",
+        value_fn=normalize_error,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        gated=True,
+    ),
+    # Doubly gated: the shadow has to carry the register AND the model catalogue has to
+    # declare the drawer. See MY_ZONE_MODE_MAP above and HonMyZoneModeSensor below.
+    _g_enum(
+        MY_ZONE_MODE_KEY,
+        MY_ZONE_MODE_PARAM,
+        MY_ZONE_MODE_MAP,
+        icon="mdi:food-apple-outline",
+        requires_zone=MY_ZONE_MODE_ZONE,
+        extra_options=MY_ZONE_MODE_PROGRAM_ONLY,
+    ),
 )
+
+# The three types that share _COOLING. Named because the My Zone correction below
+# is REF-shaped and must not reach a hob, which publishes `tempZ{N}` too.
+_COOLING_TYPES: tuple[str, ...] = (APPLIANCE_REF, APPLIANCE_FR, APPLIANCE_FRE)
+
+# --- My Zone measured temperature, corrected for the cloud bias of issue #75 ----
+#
+# Some fridges publish the My Zone drawer's MEASURED temperature 38 °C below
+# reality while its setpoint stays correct: HFW7918ENMP reports tempZ3 = -43 with
+# tempSelZ4 = -5, HCW58F18EWMP reports tempZ4 = -56 with tempSelZ4 = -18. The
+# other zones of the same appliances are exact, so this is not a device-wide scale.
+#
+# The reading is a real measurement and not the setpoint echoed back. In the debug
+# trace of #75 the setpoint stepped 2 -> -5 in a single push and the reading did
+# NOT follow: it stayed at -36 for seven more minutes, then walked -37, -38, -39,
+# -40, one degree every seven minutes, on its way to -43. Slope 1, offset -38.
+# Corrected, that curve starts at +2 -- the setpoint it had been resting at -- and
+# cools towards -5, which is what a drawer pulling down actually does.
+#
+# Nothing in the hOn app compensates it, because the app never displays tempZ* for
+# a My Zone: it reads tempSel* and only falls back to tempZ* when the setpoint is
+# missing. The bias is upstream, in the model's cloud parameter dictionary, and
+# the integration can correct it only downstream (apk/analysis/issue75-*.md).
+MY_ZONE_TEMP_KEYS: frozenset[str] = frozenset({"temp_zone3", "temp_zone4"})
+MY_ZONE_TEMP_BIAS = 38.0
+# The reading is judged against the WHOLE band its setpoint declares, not just its
+# lower edge: it has to be impossible as a temperature, AND adding the bias has to
+# land it back on a temperature that drawer could really be at.
+#
+# Testing only the lower edge is not enough, and the failure is not academic. The
+# span of a switch zone (-18..+5 on HCW58F18EWMP) is smaller than the bias, so a
+# floor-only threshold wide enough to spare a cold-but-healthy drawer stops
+# recognising the biased one over the warm half of its own range: the same -38 °C
+# error would be corrected with the drawer set to -5 and left alone with it set to
+# +2, and the state would step ~35 °C on the crossing. The upper half of the test
+# closes that, and costs nothing on the models that never needed it.
+#
+# How far below its floor a reading must sit to be impossible rather than merely
+# cold. A drawer overshooting a super-freeze pull-down can sit several degrees
+# under the coldest setpoint it accepts; it does not sit fifteen.
+MY_ZONE_BIAS_MARGIN = 15.0
+# ...and how far above its ceiling the CORRECTED reading may still land and pass:
+# a drawer left open, or an appliance switched off in a warm room, really is above
+# its own maximum for a while.
+MY_ZONE_BIAS_HEADROOM = 10.0
+# My Zone setpoint parameters. A drawer's measure and its setpoint need not share
+# an index -- HFW7918ENMP measures on Z3 and is written on Z4 -- and the app itself
+# resolves the zones from the WRITE command this way (getAvailableRefrigeratorZones
+# maps tempSelZ3 -> MY_ZONE_1 and tempSelZ4 -> MY_ZONE_2).
+_MY_ZONE_SETPOINTS: tuple[str, ...] = ("tempSelZ4", "tempSelZ3")
+# Coordinator-held store for the latch (see HonMyZoneTempSensor).
+_MY_ZONE_BIAS_STORE = "_my_zone_temp_bias"
+
+
+def _my_zone_setpoint(appliance, key: str):
+    """The writable setpoint that governs the drawer whose measure is `key`.
+
+    Its own index first, so a fridge with two My Zones pairs Z3 with Z3 and Z4
+    with Z4; then the other My Zone indices, because HFW7918ENMP exposes no
+    writable tempSelZ3 at all and its Z3 drawer is written through tempSelZ4.
+    Returns the parameter object, or None when the appliance exposes no My Zone
+    setpoint (in which case nothing here can judge the reading).
+    """
+    own = f"tempSelZ{key[-1]}"
+    for name in (own, *_MY_ZONE_SETPOINTS):
+        found = find_settings_param(appliance, name)
+        if found is not None:
+            return found[1]
+    return None
+
+
+def _setpoint_bounds(param) -> tuple[float, float] | None:
+    """(coldest, warmest) value the setpoint accepts, or None if it declares none.
+
+    A range on both appliances of #75, but the app's own fixtures carry enum My
+    Zone setpoints too (HTW7720ENMP: tempSelZ3 enumValues ["0", "2", "5"]), and an
+    enum bounds the drawer just as well as a range does.
+
+    The enum branch is entered on the duck-type, never on `param_range` returning
+    None: a range whose bounds are inconsistent (max < min, step <= 0) is refused
+    by param_range too, and reading `.values` off a RANGE materialises its whole
+    grid -- on a malformed one, without end. Same rule as number._is_enum_param,
+    and the same reason.
+
+    Both bounds are the public ones, which a rule can widen at runtime
+    (rules._apply_fixed moves `min` down or `max` up when a fixed value falls
+    outside them). A colder floor only makes the caller judge less, and a warmer
+    ceiling only loosens the half of the test that is not the one deciding a
+    reading is impossible. The pristine schema values live in a private dict on
+    the parameter, and are not worth reaching into for that.
+    """
+    bounds = param_range(param)
+    if bounds is not None:
+        return bounds[0], bounds[1]
+    if all(hasattr(param, attr) for attr in ("min", "max", "step")):
+        return None
+    numeric: list[float] = []
+    for raw in param_values(param):
+        try:
+            numeric.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return (min(numeric), max(numeric)) if numeric else None
+
 
 # Oven (OV): state, cavity temperature, remaining time, meat probes.
 _OVEN: tuple[HonSensorEntityDescription, ...] = (
@@ -759,23 +993,126 @@ _WINE: tuple[HonSensorEntityDescription, ...] = (
     _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
 )
 
-# Induction hob (IH/HOB): temperature per cooking zone. Pan detection
-# is a binary sensor.
+# The zone index every per-zone hob family is generated over. Six, not the four a
+# HA2MTSJ68MC has: the app's own IH parameter list runs to Z6 and `_HOB_BINARY`
+# has always generated six pan sensors, so the ceiling is the model's and the
+# per-attribute gate decides how many actually exist on a given hob.
+_HOB_ZONES = range(1, 7)
+
+# Attributes the DERIVED per-zone remaining-time sensors read (hours and minutes,
+# combined into one figure). Exported because `diagnostics._mapped_sets` cannot see
+# an entity that has no description row, and without these names its coverage block
+# reports twelve live readings as unmapped on every hob dump.
+HOB_ZONE_TIME_ATTRS: frozenset[str] = frozenset(
+    f"remainingTime{unit}Z{zone}" for zone in _HOB_ZONES for unit in ("HH", "MM")
+)
+
+
+# Induction hob (IH/HOB). Pan detection, zone power state, residual heat and
+# errors are binary sensors; the remaining time per zone is derived from two
+# attributes and so lives in its own class below.
+#
+# `temp_zone{N}` reads `sensorTempZ{N}` and is DELIBERATELY left alone. The hob of
+# issue #84 does not publish those names -- it publishes `tempZ{N}`, which arrives
+# below under the distinct key `plate_temp_zone{N}` -- but other models do publish
+# them, and re-pointing an existing key at a different attribute would silently
+# change what a shipped entity reports.
 _HOB: tuple[HonSensorEntityDescription, ...] = (
     _g_temp("temp_zone1", "sensorTempZ1"),
     _g_temp("temp_zone2", "sensorTempZ2"),
     _g_temp("temp_zone3", "sensorTempZ3"),
     _g_temp("temp_zone4", "sensorTempZ4"),
     _g_temp("temp_zone5", "sensorTempZ5"),
+    _g_temp("temp_zone6", "sensorTempZ6"),
+    # The power LEVEL of each zone, 0..`model_attributes.power` (15 on the
+    # reporting hob). No device_class and no unit: these are panel steps, not
+    # watts, and POWER would make Home Assistant render "15 W" for a zone drawing
+    # a couple of kilowatts.
+    *(
+        HonSensorEntityDescription(
+            key=f"power_zone{zone}",
+            attr_key=f"powerZ{zone}",
+            icon="mdi:fire",
+            state_class=SensorStateClass.MEASUREMENT,
+            gated=True,
+        )
+        for zone in _HOB_ZONES
+    ),
+    # --- families this hob has never moved ------------------------------------
+    # Present in the shadow, unchanged since 2022, and the device declares
+    # `probe = 0`. `experimental` is the mechanism the platforms already have for
+    # exactly this: deterministic, opt-in per config entry, and invisible to
+    # anyone who has not asked for it. It is NOT a liveness heuristic on
+    # `last_update`, which would be non-deterministic across restarts and would
+    # also delete `temp_zone*` from hobs that report it.
+    #
+    # NO device_class, NO unit and NO state_class, unlike every other temperature
+    # in this file. All three are CLAIMS: `device_class=TEMPERATURE` plus `°C`
+    # tells Home Assistant the number is a temperature in Celsius, and
+    # `state_class=MEASUREMENT` records it into long-term statistics under that
+    # unit. On the one hob anyone has, `tempZ{N}` has not moved since 2022 and the
+    # model declares `probe = "0"` -- no temperature probe at all -- so the whole
+    # reading is an inference from a parameter NAME in the decompiled app. The
+    # value is shipped raw, like every other experimental hob family, and a user
+    # with the hardware can report what it turns out to be. Promoting it later is
+    # additive; unpicking a year of statistics recorded in the wrong unit is not.
+    *(
+        HonSensorEntityDescription(
+            key=f"plate_temp_zone{zone}",
+            attr_key=f"tempZ{zone}",
+            icon="mdi:thermometer",
+            gated=True,
+            experimental=True,
+        )
+        for zone in _HOB_ZONES
+    ),
+    # Program code and phase per zone, shipped RAW. The app does carry enums for
+    # both, but the only hob we have has never reported anything other than 0, so
+    # a rendered label would be a claim no observation supports -- and the one
+    # program code this hob does report (212, a residue of the command-history
+    # recovery) already proves the mapping is not the straightforward one it looks.
+    *(
+        _experimental_text(f"program_code_zone{zone}", f"prCodeZ{zone}")
+        for zone in _HOB_ZONES
+    ),
+    *(
+        _experimental_text(f"program_phase_zone{zone}", f"prPhaseZ{zone}")
+        for zone in _HOB_ZONES
+    ),
+    # The hob-wide timer, in two halves as the device reports it. `timerMM` has
+    # moved on the reporting device and `timerHH` never has, but they are one
+    # reading and splitting their gating would ship half a clock.
+    _experimental_text("timer_hh", "timerHH"),
+    _experimental_text("timer_mm", "timerMM"),
 )
 
-# Hood (HO): fan speed. Light/filter alarm are binary sensors.
+# Hood (HO): fan speed, errors, cumulative work time. Light / filter alarm /
+# running are binary sensors, and the SPEED is also a fan entity -- this read-only
+# mirror predates it and stays for the entity_id its users already reference.
 _HOOD: tuple[HonSensorEntityDescription, ...] = (
     HonSensorEntityDescription(
         key="fan_speed",
         attr_key="windSpeed",
         icon="mdi:fan",
         state_class=SensorStateClass.MEASUREMENT,
+        gated=True,
+    ),
+    # Same treatment the oven, dishwasher and wine cooler already give `errors`:
+    # a raw code, not a number. `air_purifier.normalize_error` already folds every
+    # healthy spelling the hood uses (0 and the app's "00") onto one value, so the
+    # optional problem binary below reads correctly without a hood-specific map.
+    _g_text("errors", "errors", icon="mdi:alert-circle-outline"),
+    # No unit, no device_class, no state_class, and DIAGNOSTIC on purpose. The
+    # hood reports 11147 on the device of issue #83 and the decompiled app never
+    # reads the value at all, so whether it counts minutes of lifetime use (~186 h,
+    # credible for a 2022 install) or seconds of the last session (~3.1 h, equally
+    # credible) is unknown. A DURATION class would have to pick one, and a
+    # state_class would start recording long-term statistics in the wrong unit.
+    HonSensorEntityDescription(
+        key="last_work_time",
+        attr_key="lastWorkTime",
+        icon="mdi:timer-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
         gated=True,
     ),
 )
@@ -1402,6 +1739,11 @@ SENSORS: dict[str, tuple[HonSensorEntityDescription, ...]] = {
 }
 
 
+# `_model_zones` now lives in `ref_programs.model_zones`, imported above under its old
+# name. It moved because `select.my_zone_mode` gates on the same catalogue field, and
+# two copies of that rule could disagree about which drawers a fridge has (#93).
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -1417,10 +1759,35 @@ async def async_setup_entry(
         attributes = attributes if isinstance(attributes, dict) else {}
         descriptions = SENSORS.get(app_type, ())
         created: list[str] = []
+        # Resolved once per appliance, and only when a description actually asks for it:
+        # every type but the fridge has no `requires_zone` row at all.
+        zones: frozenset[str] | None = None
+        # Per APPLIANCE, never per description row: the same reading is a duplicate on a
+        # fridge whose catalogue carries drawer programs and the only thing to watch on
+        # one whose does not. Answered where the row is gated, used where it is built.
+        my_zone_hidden = False
         for description in descriptions:
             # Inferred from incomplete evidence: absent unless explicitly enabled.
             if description.experimental and not experimental:
                 continue
+            # Model-catalogue gate, on top of the shadow one below: the compartment has
+            # to be declared by the MODEL, not merely hinted at by a parameter value.
+            if description.requires_zone is not None:
+                if zones is None:
+                    zones = _model_zones(data.get("appliance"))
+                if description.requires_zone not in zones:
+                    continue
+                # The drawer's mode became WRITABLE where its programs exist (#93), so
+                # on those fridges `select.my_zone_mode` reports the same register. The
+                # reading is still BUILT there -- it is hidden, exactly like the four
+                # flag readings the mode switches duplicate (`binary_sensor`, same
+                # issue). 5.21.0 suppressed and then purged it instead, which was the
+                # one place this repo answered the question with a deletion, and it
+                # costs the two things this class can say and a select cannot: the
+                # static table's `chiller` / `cool_drink` / `cheese`, i.e. the modes set
+                # from the fridge's own panel, for which the select must report unknown.
+                if description.key == MY_ZONE_MODE_KEY:
+                    my_zone_hidden = bool(my_zone_codes(data.get("appliance")))
             # Capability-gating (Tier 2 only): skip the sensors whose attribute
             # is not exposed by the device. The historic types (gated=False) stay
             # always created, as before.
@@ -1434,11 +1801,28 @@ async def async_setup_entry(
                 # Needs the appliance type + the coordinator's catalog to resolve the
                 # i18n key, neither of which a value_fn can see (#71).
                 entity_class = HonProgramNameSensor
+            elif app_type in _COOLING_TYPES and description.key == MY_ZONE_MODE_KEY:
+                # Resolving the drawer's mode needs the appliance's own program
+                # catalogue, which a value_fn cannot see -- it only ever gets the
+                # number (#93, same reason as the two classes below).
+                entity_class = HonMyZoneModeSensor
+            elif app_type in _COOLING_TYPES and description.key in MY_ZONE_TEMP_KEYS:
+                # The drawer's measure can arrive with a constant cloud bias, and
+                # spotting it needs the appliance's write command -- a value_fn only
+                # ever sees the number itself (#75).
+                entity_class = HonMyZoneTempSensor
             elif app_type == APPLIANCE_AP:
                 entity_class = HonAirPurifierSensor
             else:
                 entity_class = HonSensor
-            entities.append(entity_class(coordinator, appliance_id, description))
+            if entity_class is HonMyZoneModeSensor:
+                entities.append(
+                    entity_class(
+                        coordinator, appliance_id, description, hidden=my_zone_hidden
+                    )
+                )
+            else:
+                entities.append(entity_class(coordinator, appliance_id, description))
             created.append(description.key)
         # Derived sensors combine MULTIPLE attributes, so they cannot be a
         # description-table row (those read a single attr_key). Mean water per
@@ -1450,6 +1834,18 @@ async def async_setup_entry(
         ):
             entities.append(HonMeanWaterConsumption(coordinator, appliance_id))
             created.append("mean_water_consumption")
+        # Per-zone remaining cooking time: the hob reports it as an hour half and
+        # a minute half, and neither alone is a duration anyone can read. Gated on
+        # BOTH halves, per zone, so a hob reporting three zones gets three.
+        if app_type in (APPLIANCE_IH, APPLIANCE_HOB):
+            for zone in _HOB_ZONES:
+                hours, minutes = f"remainingTimeHHZ{zone}", f"remainingTimeMMZ{zone}"
+                if hours not in attributes or minutes not in attributes:
+                    continue
+                entities.append(
+                    HonHobZoneRemainingTime(coordinator, appliance_id, zone)
+                )
+                created.append(f"remaining_time_zone{zone}")
         _LOGGER.debug(
             "Sensor debug: '%s' (type=%s, id=%s) -> %d/%d sensors %s",
             data.get("name", "Haier"),
@@ -1558,6 +1954,151 @@ class HonProgramNameSensor(HonSensor):
         return label or raw
 
 
+class HonMyZoneTempSensor(HonSensor):
+    """My Zone drawer temperature, corrected for the cloud bias of issue #75.
+
+    The correction is applied only to an appliance that proves it needs one. The
+    reading has to be impossible for the band its own drawer setpoint declares --
+    below its floor by more than a probe can overshoot -- and adding the bias back
+    has to land it where that drawer can really be: inside the declared band, give
+    or take the same tolerance below the floor and a little headroom above the
+    ceiling. A device whose dictionary is sound never trips the first half; a
+    genuinely broken reading never passes the second.
+
+    The verdict is then LATCHED for the session, per appliance and per parameter.
+    Judging every sample instead would un-correct the sensor exactly when the
+    drawer is warm -- the biased reading of a drawer resting near the top of its
+    range climbs back inside the plausible band -- and the state would jump 38 °C
+    between two refreshes. The latch lives on the coordinator, so it is re-earned
+    from scratch after a restart: if the cloud ever fixes the dictionary, the next
+    start simply stops correcting, with no code change and no stale rule.
+
+    Scoped to REF/FR/FRE zones 3 and 4 by async_setup_entry, which is where the
+    app puts its My Zones (getTempSel: MY_ZONE_1 -> Z3, MY_ZONE_2 -> Z4); zones 1
+    and 2 are the fridge and the freezer and have never been seen biased.
+    """
+
+    @property
+    def native_value(self):
+        value = super().native_value
+        if not isinstance(value, (int, float)):
+            return value
+        if not self._bias_applies(float(value)):
+            return value
+        return float(value) + MY_ZONE_TEMP_BIAS
+
+    def _bias_applies(self, value: float) -> bool:
+        """True when this reading is the biased one, latching the verdict once."""
+        store = self._coordinator_store(_MY_ZONE_BIAS_STORE)
+        latch_key = f"{self._appliance_id}:{self.entity_description.attr_key}"
+        if store.get(latch_key):
+            return True
+        appliance = self._appliance
+        if appliance is None:
+            return False
+        setpoint = _my_zone_setpoint(appliance, self.entity_description.key)
+        if setpoint is None:
+            return False
+        bounds = _setpoint_bounds(setpoint)
+        if bounds is None:
+            return False
+        floor, ceiling = bounds
+        impossible = floor - MY_ZONE_BIAS_MARGIN
+        if value > impossible:
+            return False
+        # ...and the bias has to explain it: adding it has to land the reading back
+        # where that drawer can really be. The window is the declared band widened
+        # by the same tolerances the test uses on either side -- a drawer resting at
+        # its floor reads a little past it, and one left open sits above its ceiling
+        # for a while -- so a corrected value is allowed under the floor, but only
+        # as far as `impossible`. A reading so cold that adding 38 still leaves it
+        # further under than that is not a biased measurement, it is a broken one,
+        # and shifting it would only make a wrong number look sane.
+        corrected = value + MY_ZONE_TEMP_BIAS
+        if not impossible <= corrected <= ceiling + MY_ZONE_BIAS_HEADROOM:
+            return False
+        store[latch_key] = True
+        # INFO, not debug: the state this entity reports from now on differs from
+        # what the cloud sent, and that has to be legible without turning debug on.
+        # No nickname in the message -- identity stays redacted at INFO.
+        _LOGGER.info(
+            "Sensor debug: appliance %s reports %s at %.1f °C, impossible for a "
+            "drawer its own setpoint bounds to %.1f..%.1f °C, and %.1f °C once the "
+            "known cloud bias is added back: correcting it by +%.0f °C for the rest "
+            "of this session (issue #75)",
+            redact_id(self._appliance_id),
+            self.entity_description.attr_key,
+            value,
+            floor,
+            ceiling,
+            corrected,
+            MY_ZONE_TEMP_BIAS,
+        )
+        return True
+
+
+class HonMyZoneModeSensor(HonSensor):
+    """My Zone drawer mode, resolved the way the app resolves it.
+
+    `getMyZoneMappedMode` does not start from the value. It first asks
+    `getModeNameFromCommands` which startProgram category pins `tempSelZ3` to exactly
+    this number, and answers with that category's name; only for a value no program
+    explains does it fall back to a static table. So does this class, in the same order.
+
+    Two things follow from the catalogue coming first, and both are the point:
+
+    * the state shares its vocabulary with `select.ref_program`, because both are
+      startProgram category slugs -- so the sensor says `zero_fresh` where the select
+      offers `zero_fresh`, and the pair reads as one control surface;
+    * the ambiguous numbers resolve themselves. `2` is Quick Cool on a fridge that
+      offers a Quick Cool program and the chiller preset on one that does not, and the
+      device's own catalogue settles it without a brand or series list here.
+
+    `options` is therefore widened per entity: the description's static mapping cannot
+    know which program slugs a given model declares, and an ENUM sensor may not report a
+    state outside its options.
+    """
+
+    def __init__(
+        self, coordinator, appliance_id, description, hidden: bool = False
+    ) -> None:
+        super().__init__(coordinator, appliance_id, description)
+        # Set only when this DEVICE also got the writable select for the same register
+        # (#93), the same way the four fridge flag readings step behind their switches.
+        # On the instance and not on the shared description row, because the answer is
+        # per appliance; Home Assistant reads the flag at FIRST registration only, so
+        # nobody who already has the entity loses it.
+        if hidden:
+            self._attr_entity_registry_enabled_default = False
+        # Always assigned, even when the appliance declares no pinning program: the
+        # widening is the only writer, and `native_value` reads the list on every
+        # refresh to keep itself inside its own options. Leaving it to the platform
+        # default made that read depend on a base-class attribute this class does not
+        # own -- and on the one appliance shape where the widening finds nothing (a
+        # category-less startProgram), that is exactly the path taken.
+        # The DRAWER's programs, not every program that pins the parameter (#93). The
+        # wider set was wrong on any fridge whose download presets also pin `tempSelZ3`
+        # -- damigioanna's HDPW5620CNPK declares five of them, pinning 2, 2, 5, 5 and 5 --
+        # because it admitted `iot_extra_cold` and `iot_daily_use` as reportable states of
+        # one drawer, and the lookup below then answered with them.
+        offered = frozenset(my_zone_codes(self._appliance))
+        self._attr_options = sorted(set(description.options or ()) | offered)
+
+    @property
+    def native_value(self):
+        appliance = self._appliance
+        if appliance is not None:
+            code = my_zone_code_for_value(
+                appliance, self._get_attr(self.entity_description.attr_key)
+            )
+            # Only a code this entity may actually report: `options` is frozen at
+            # construction, and a category added to the schema later (or a program the
+            # widening did not see) must not push the sensor into an out-of-options
+            # state. Falling through to the static table is the safe half of the app's
+            # own two-step anyway.
+            if code and code in (self._attr_options or ()):
+                return code
+        return super().native_value
 class HonAirPurifierSensor(HonSensor):
     """AP sensor whose availability can depend on the purifier being powered and
     on whether the reading could be interpreted at all.
@@ -1630,6 +2171,50 @@ class HonMeanWaterConsumption(HonBaseEntity, SensorEntity):
         if denom <= 0:
             return None
         return round(water / denom, 2)
+
+
+class HonHobZoneRemainingTime(HonBaseEntity, SensorEntity):
+    """Remaining cooking time of ONE induction-hob zone, in minutes.
+
+    DERIVED from two attributes -- `remainingTimeHHZ<n>` and `remainingTimeMMZ<n>`
+    -- so it cannot be a description-table row (those read a single attr_key).
+    The device splits the figure the way its panel displays it; Home Assistant
+    wants one DURATION, and the minute half alone would read 5 minutes for a
+    two-hour-five programme.
+
+    Both halves are required. A zone reporting only one of them yields unknown
+    rather than a duration built from half the information: the hour half missing
+    would understate a long programme by whole hours, which is worse than saying
+    nothing.
+    """
+
+    _attr_icon = "mdi:timer-outline"
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_device_class = SensorDeviceClass.DURATION
+
+    def __init__(self, coordinator, appliance_id: str, zone: int) -> None:
+        super().__init__(coordinator, appliance_id)
+        self._hours_key = f"remainingTimeHHZ{zone}"
+        self._minutes_key = f"remainingTimeMMZ{zone}"
+        self._attr_translation_key = f"remaining_time_zone{zone}"
+        self._attr_unique_id = f"{appliance_id}_remaining_time_zone{zone}"
+
+    @property
+    def native_value(self):
+        # The int() conversions belong INSIDE the guard, not after it. float()
+        # accepts "nan" and "inf" happily and only int() rejects them, with
+        # ValueError on the first and OverflowError on the second -- both of which
+        # used to escape a PROPERTY, which Home Assistant surfaces as a broken
+        # entity. Folding them in here answers "unknown" instead, which is what a
+        # reading the device could not express actually means. Catching the two
+        # errors is what does the work: an explicit isfinite() check on top would
+        # be unreachable, and an unreachable guard is one no test can defend.
+        try:
+            hours = float(self._get_attr(self._hours_key))
+            minutes = float(self._get_attr(self._minutes_key))
+            return int(hours) * 60 + int(minutes)
+        except (ValueError, TypeError, OverflowError):
+            return None
 
 
 class HonDebugStatusSensor(HonAccountEntity, SensorEntity):

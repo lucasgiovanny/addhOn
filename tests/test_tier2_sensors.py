@@ -264,21 +264,145 @@ def _binary_keys(app_type: str) -> list[str]:
     return [d.key for d in BINARY_SENSORS.get(app_type, ())]
 
 
-async def _build_sensors(app_type: str, attributes: dict) -> list:
+class FakeFixedParam:
+    """A program's pinned parameter: `typology: "fixed"` plus the value it pins."""
+
+    typology = "fixed"
+
+    def __init__(self, value) -> None:
+        self.value = value
+
+
+class FakeCategory:
+    def __init__(self, parameters: dict | None = None) -> None:
+        self.parameters = parameters or {}
+
+
+class FakeStartProgram:
+    def __init__(self, categories: dict) -> None:
+        self.categories = categories
+        self.parameters = {}
+
+
+class FakeCategorylessStartProgram:
+    """A startProgram with no categories at all.
+
+    `HonCommand.categories` answers `{"_": self}` in that case, so a walk over
+    categories sees the command itself under a placeholder key that is not a program
+    name (commands.py).
+    """
+
+    def __init__(self, parameters: dict) -> None:
+        self.parameters = parameters
+
+    @property
+    def categories(self) -> dict:
+        return {"_": self}
+
+
+class FakeApplianceModel:
+    """Just enough appliance for the model-catalogue gate and the program lookup.
+
+    `model_attributes` is the flattened `applianceModel.attributes` the engine exposes,
+    and `commands["startProgram"].categories` is the per-program schema the My Zone mode
+    is resolved against.
+    """
+
+    def __init__(self, zones: str | None = None, programs: dict | None = None) -> None:
+        self.model_attributes = {} if zones is None else {"zones": zones}
+        self.commands = {}
+        if programs is not None:
+            self.commands["startProgram"] = FakeStartProgram(
+                {
+                    code: FakeCategory(
+                        {} if pinned is None else {"tempSelZ3": FakeFixedParam(pinned)}
+                    )
+                    for code, pinned in programs.items()
+                }
+            )
+
+
+class FakeEnumParam:
+    """A category ancillary (`zone`, `programFamily`), engine-CLEANED to lowercase."""
+
+    typology = "enum"
+
+    def __init__(self, values) -> None:
+        self.values = [str(value) for value in values]
+        self.value = self.values[0] if self.values else ""
+
+
+class FakeProgramParam:
+    """The `program` parameter of `startProgram`: the live enum of offered codes."""
+
+    typology = "enum"
+
+    def __init__(self, values) -> None:
+        self.values = list(values)
+        self.value = self.values[0] if self.values else ""
+
+
+def _drawer_capable_fridge():
+    """A fridge on which `select.my_zone_mode` really can be built (#93).
+
+    Everything `ref_programs.my_zone_codes` demands: the model declares the drawer, the
+    live `startProgram.program` enum offers the three codes, and each of their categories
+    pins `tempSelZ3`, is zoned on the drawer alone and is not a `download` preset. The
+    sensor must step aside on exactly this appliance, and only on it.
+    """
+    appliance = FakeApplianceModel(zones="fridge|freezer|vtRoom1", programs={})
+    codes = {"zero_fresh": "0", "quick_cool": "2", "fruit_and_veg": "5"}
+    categories = {
+        code: FakeCategory(
+            {
+                "tempSelZ3": FakeFixedParam(pinned),
+                "zone": FakeEnumParam(["vtroom1"]),
+                "programFamily": FakeEnumParam(["dashboard"]),
+            }
+        )
+        for code, pinned in codes.items()
+    }
+    start = FakeStartProgram(categories)
+    start.parameters = {"program": FakeProgramParam(list(codes))}
+    appliance.commands["startProgram"] = start
+    return appliance
+
+
+# The fridge of issue #93: a vtRoom1 drawer, and the three programs that drive it by
+# pinning tempSelZ3 -- the shape read off the sibling model's catalogue in the APK.
+def _my_zone_fridge(zones: str | None = "fridge|freezer|vtRoom1"):
+    return FakeApplianceModel(
+        zones=zones,
+        programs={
+            "auto_set": None,
+            "super_cool": None,
+            "quick_cool": "2",
+            "zero_fresh": "0",
+            "fruit_and_veg": "5",
+        },
+    )
+
+
+async def _build_sensors(
+    app_type: str,
+    attributes: dict,
+    options: dict | None = None,
+    appliance=None,
+) -> list:
     from custom_components.addhon import sensor
     from custom_components.addhon.const import DOMAIN
 
-    data = {"x-1": {"type": app_type, "name": "Dev", "attributes": attributes, "settings": {}}}
+    data = {"x-1": {"type": app_type, "name": "Dev", "attributes": attributes, "settings": {}, "appliance": appliance}}
     coordinator = FakeCoordinator(data)
     hass = FakeHass({DOMAIN: {"entry-1": {"coordinator": coordinator, "client": None}}})
     added: list = []
-    await sensor.async_setup_entry(hass, FakeEntry(), added.extend)
+    await sensor.async_setup_entry(hass, FakeEntry(options=options), added.extend)
     # Drop the account-level diagnostic entities so the per-appliance assertions
     # below see only the appliance sensors.
     return [e for e in added if not getattr(e, "_addhon_account", False)]
 
 
-async def _build_binary(app_type: str, attributes: dict) -> list:
+async def _build_binary(app_type: str, attributes: dict, options: dict | None = None) -> list:
     from custom_components.addhon import binary_sensor
     from custom_components.addhon.const import DOMAIN
 
@@ -286,9 +410,39 @@ async def _build_binary(app_type: str, attributes: dict) -> list:
     coordinator = FakeCoordinator(data)
     hass = FakeHass({DOMAIN: {"entry-1": {"coordinator": coordinator, "client": None}}})
     added: list = []
-    await binary_sensor.async_setup_entry(hass, FakeEntry(), added.extend)
+    await binary_sensor.async_setup_entry(hass, FakeEntry(options=options), added.extend)
     # Drop the account-level diagnostic entities (see _build_sensors).
     return [e for e in added if not getattr(e, "_addhon_account", False)]
+
+
+def _experimental(enabled: bool) -> dict:
+    from custom_components.addhon.const import CONF_ENABLE_EXPERIMENTAL
+
+    return {CONF_ENABLE_EXPERIMENTAL: enabled}
+
+
+# The shadow of the reporting HA2MTSJ68MC (issue #84), trimmed to the per-zone
+# families and to the four zones it actually has. Every value is 0 because the hob
+# was offline for ten hours when the dump was taken: the NAMES are evidence, the
+# values are not, which is why nothing below asserts a state this device reported.
+HOB_ATTRIBUTES = {
+    "available": True,
+    **{f"panStatusZ{z}": 0 for z in range(1, 5)},
+    **{f"onOffStatusZ{z}": 0 for z in range(1, 5)},
+    **{f"hotStatusZ{z}": 0 for z in range(1, 5)},
+    **{f"errorZ{z}": 0 for z in range(1, 5)},
+    **{f"powerZ{z}": 0 for z in range(1, 5)},
+    **{f"combiModeZ{z}": 0 for z in range(1, 5)},
+    **{f"tempZ{z}": 0 for z in range(1, 5)},
+    **{f"prCodeZ{z}": 0 for z in range(1, 5)},
+    **{f"prPhaseZ{z}": 0 for z in range(1, 5)},
+    **{f"remainingTimeHHZ{z}": 0 for z in range(1, 5)},
+    **{f"remainingTimeMMZ{z}": 0 for z in range(1, 5)},
+    "lockStatus": 0,
+    "timerHH": 0,
+    "timerMM": 0,
+    "remoteCtrValid": 0,
+}
 
 
 class Tier2TableTest(unittest.TestCase):
@@ -360,11 +514,284 @@ class Tier2TableTest(unittest.TestCase):
             actual = {d.key for d in SENSORS[app_type] if d.gated}
             self.assertEqual(actual, gated_keys, f"{app_type} gated set mismatch")
 
-    def test_hob_binary_has_six_pan_zones(self) -> None:
+    def test_hob_binary_still_has_six_pan_zones_first(self) -> None:
+        """The original assertion, narrowed rather than widened.
+
+        It was the sentinel for the IH/HOB alias -- the two types must resolve to
+        the SAME tuple object -- and for the pan family staying six wide. Growing
+        it into "the whole set" would have retired that sentinel along with it, so
+        the pan check keeps its own test and the full set gets a second one below.
+        """
         self.assertEqual(
-            _binary_keys("IH"),
             [f"pan_zone{z}" for z in range(1, 7)],
+            _binary_keys("IH")[:6],
         )
+
+    def test_hob_binary_full_keys(self) -> None:
+        # Spelled out, in table order: this is what a hob owner's device page
+        # offers, and a row appearing or disappearing here is a user-visible
+        # change that should have to be typed out.
+        zones = range(1, 7)
+        self.assertEqual(
+            [f"pan_zone{z}" for z in zones]
+            + [f"zone_on_zone{z}" for z in zones]
+            + [f"hot_zone{z}" for z in zones]
+            + [f"error_zone{z}" for z in zones]
+            + [f"combi_mode_zone{z}" for z in zones]
+            + ["child_lock"],
+            _binary_keys("IH"),
+        )
+
+    def test_hob_full_keys(self) -> None:
+        # The sensor half, which had no test at all before the per-zone readings
+        # of #84.3 arrived.
+        zones = range(1, 7)
+        self.assertEqual(
+            # sensorTempZ{N} covers the same six zones as every other per-zone
+            # family: the table used to stop at five, so a hob reporting
+            # sensorTempZ6 got no temp_zone6 (PR #87 review).
+            [f"temp_zone{z}" for z in zones]
+            + [f"power_zone{z}" for z in zones]
+            + [f"plate_temp_zone{z}" for z in zones]
+            + [f"program_code_zone{z}" for z in zones]
+            + [f"program_phase_zone{z}" for z in zones]
+            + ["timer_hh", "timer_mm"],
+            _sensor_keys("IH"),
+        )
+
+    def test_the_hob_child_lock_reuses_the_wash_group_description(self) -> None:
+        """Same object, not a twin: same parameter, same meaning, same label.
+
+        Also the guard against giving it `device_class=LOCK`, whose polarity is
+        inverted in Home Assistant -- a hob reporting lockStatus=1 would display
+        as unlocked, which is the opposite of the truth on a safety control.
+        """
+        from custom_components.addhon.binary_sensor import _CHILD_LOCK, BINARY_SENSORS
+
+        child_lock = next(d for d in BINARY_SENSORS["IH"] if d.key == "child_lock")
+        self.assertIs(_CHILD_LOCK, child_lock)
+        self.assertIsNone(child_lock.device_class)
+        self.assertEqual("lockStatus", child_lock.attr_key)
+
+
+class HobZoneReadingsTest(unittest.IsolatedAsyncioTestCase):
+    """The per-zone readings of issue #84 point 3.
+
+    Every family is generated for six zones and gated per attribute, so the four
+    a HA2MTSJ68MC reports produce four entities and a hypothetical six-zone hob
+    produces six -- without either being written down anywhere.
+    """
+
+    async def test_a_four_zone_hob_gets_four_of_each_live_family(self) -> None:
+        keys = {e._attr_unique_id for e in await _build_binary("IH", HOB_ATTRIBUTES)}
+        for family in ("pan_zone", "zone_on_zone", "hot_zone", "error_zone"):
+            self.assertEqual(
+                {f"x-1_{family}{z}" for z in range(1, 5)},
+                {k for k in keys if k.startswith(f"x-1_{family}")},
+                family,
+            )
+        self.assertIn("x-1_child_lock", keys)
+
+    async def test_a_hob_reporting_two_zones_gets_two(self) -> None:
+        attributes = {
+            "available": True,
+            "hotStatusZ1": 0,
+            "hotStatusZ3": 1,
+        }
+        keys = {e._attr_unique_id for e in await _build_binary("IH", attributes)}
+        self.assertEqual(
+            {"x-1_hot_zone1", "x-1_hot_zone3", "x-1_connectivity"}, keys
+        )
+
+    async def test_residual_heat_reads_the_panel_flag(self) -> None:
+        attributes = dict(HOB_ATTRIBUTES, hotStatusZ2=1)
+        added = await _build_binary("IH", attributes)
+        by_id = {e._attr_unique_id: e for e in added}
+        self.assertIs(True, by_id["x-1_hot_zone2"].is_on)
+        self.assertIs(False, by_id["x-1_hot_zone1"].is_on)
+
+    async def test_a_healthy_hob_reports_no_zone_error(self) -> None:
+        """The regression this family exists to avoid.
+
+        A comparison against a raw code lights PROBLEM on every zone forever: the
+        hob spells "no error" as 0 and the app spells it "00", and the client
+        folds "01" to "1" on the way in, so no single literal can be the off
+        value. `has_problem` is the shared rule that already knows all three.
+        """
+        added = await _build_binary("IH", dict(HOB_ATTRIBUTES, errorZ1="00", errorZ2=0))
+        by_id = {e._attr_unique_id: e for e in added}
+        self.assertIs(False, by_id["x-1_error_zone1"].is_on)
+        self.assertIs(False, by_id["x-1_error_zone2"].is_on)
+
+    async def test_a_real_zone_fault_still_reports(self) -> None:
+        added = await _build_binary("IH", dict(HOB_ATTRIBUTES, errorZ3="05"))
+        by_id = {e._attr_unique_id: e for e in added}
+        self.assertIs(True, by_id["x-1_error_zone3"].is_on)
+
+    def test_every_no_error_spelling_reads_as_healthy(self) -> None:
+        # Directly, on the shared rule, so the reason the assertions above pass is
+        # visible rather than inferred.
+        from custom_components.addhon.air_purifier import has_problem
+
+        for healthy in ("0", "00", 0, 0.0, "0.0", ""):
+            self.assertFalse(has_problem(healthy), repr(healthy))
+        for faulty in ("1", "05", "0A", 5):
+            self.assertTrue(has_problem(faulty), repr(faulty))
+
+    async def test_the_power_level_is_a_level_and_not_watts(self) -> None:
+        added = await _build_sensors("IH", dict(HOB_ATTRIBUTES, powerZ1=9))
+        power = next(e for e in added if e._attr_unique_id == "x-1_power_zone1")
+        self.assertEqual(9.0, power.native_value)
+        self.assertIsNone(power.entity_description.device_class)
+        self.assertIsNone(power.entity_description.native_unit_of_measurement)
+
+    async def test_the_remaining_time_combines_both_halves(self) -> None:
+        attributes = dict(HOB_ATTRIBUTES, remainingTimeHHZ1=1, remainingTimeMMZ1=30)
+        added = await _build_sensors("IH", attributes)
+        remaining = next(
+            e for e in added if e._attr_unique_id == "x-1_remaining_time_zone1"
+        )
+        self.assertEqual(90, remaining.native_value)
+
+    async def test_a_non_finite_half_reads_unknown_rather_than_raising(self) -> None:
+        """`float("nan")` parses; `int()` of it does not.
+
+        The guard used to wrap only the two `float()` calls, so a device sending
+        "nan" or "inf" reached `int()` unprotected: ValueError on the first,
+        OverflowError on the second, both escaping a PROPERTY. Home Assistant
+        surfaces that as a broken entity, which is a worse answer than "unknown"
+        to a reading the device itself could not express. Reported on PR #87.
+        """
+        for hours, minutes in (
+            ("nan", 30), (1, "nan"), ("inf", 30), (1, "-inf"), ("nan", "nan"),
+        ):
+            attributes = dict(
+                HOB_ATTRIBUTES, remainingTimeHHZ1=hours, remainingTimeMMZ1=minutes
+            )
+            added = await _build_sensors("IH", attributes)
+            remaining = next(
+                e for e in added if e._attr_unique_id == "x-1_remaining_time_zone1"
+            )
+            self.assertIsNone(remaining.native_value, (hours, minutes))
+
+    async def test_the_remaining_time_needs_both_halves_to_exist(self) -> None:
+        # Half a clock is worse than none: the minute half alone reads 5 minutes
+        # for a two-hour-five programme.
+        attributes = {"available": True, "remainingTimeMMZ1": 30}
+        added = await _build_sensors("IH", attributes)
+        self.assertEqual([], [e for e in added if "remaining_time" in e._attr_unique_id])
+
+    async def test_the_remaining_time_exists_per_reported_zone(self) -> None:
+        added = await _build_sensors("IH", HOB_ATTRIBUTES)
+        self.assertEqual(
+            [f"x-1_remaining_time_zone{z}" for z in range(1, 5)],
+            [e._attr_unique_id for e in added if "remaining_time" in e._attr_unique_id],
+        )
+
+    async def test_an_unreadable_half_reads_unknown(self) -> None:
+        attributes = dict(HOB_ATTRIBUTES, remainingTimeHHZ1="", remainingTimeMMZ1=30)
+        added = await _build_sensors("IH", attributes)
+        remaining = [e for e in added if e._attr_unique_id == "x-1_remaining_time_zone1"]
+        # The key is present in the shadow, so the entity is created; the reading
+        # itself is what refuses to be invented.
+        self.assertEqual(1, len(remaining))
+        self.assertIsNone(remaining[0].native_value)
+
+    async def test_the_child_lock_reads_the_panel_lock(self) -> None:
+        added = await _build_binary("IH", dict(HOB_ATTRIBUTES, lockStatus=1))
+        lock = next(e for e in added if e._attr_unique_id == "x-1_child_lock")
+        self.assertIs(True, lock.is_on)
+
+    async def test_the_dead_families_are_absent_by_default(self) -> None:
+        # tempZ*, prCodeZ*, prPhaseZ*, combiModeZ* and the hob timer are all in
+        # this hob's shadow and none of them has moved since 2022.
+        sensors = {e._attr_unique_id for e in await _build_sensors("IH", HOB_ATTRIBUTES)}
+        binaries = {e._attr_unique_id for e in await _build_binary("IH", HOB_ATTRIBUTES)}
+        for absent in (
+            "x-1_plate_temp_zone1",
+            "x-1_program_code_zone1",
+            "x-1_program_phase_zone1",
+            "x-1_timer_hh",
+            "x-1_timer_mm",
+        ):
+            self.assertNotIn(absent, sensors, absent)
+        self.assertNotIn("x-1_combi_mode_zone1", binaries)
+
+    async def test_the_dead_families_appear_when_experimental_is_on(self) -> None:
+        sensors = {
+            e._attr_unique_id
+            for e in await _build_sensors("IH", HOB_ATTRIBUTES, _experimental(True))
+        }
+        binaries = {
+            e._attr_unique_id
+            for e in await _build_binary("IH", HOB_ATTRIBUTES, _experimental(True))
+        }
+        for present in (
+            "x-1_plate_temp_zone1",
+            "x-1_program_code_zone1",
+            "x-1_program_phase_zone1",
+            "x-1_timer_hh",
+            "x-1_timer_mm",
+        ):
+            self.assertIn(present, sensors, present)
+        self.assertIn("x-1_combi_mode_zone1", binaries)
+
+    async def test_the_live_families_do_not_depend_on_the_option(self) -> None:
+        # The option must add readings, never move the ones a hob owner already
+        # relies on.
+        default = {e._attr_unique_id for e in await _build_binary("IH", HOB_ATTRIBUTES)}
+        enabled = {
+            e._attr_unique_id
+            for e in await _build_binary("IH", HOB_ATTRIBUTES, _experimental(True))
+        }
+        self.assertTrue(default < enabled)
+        self.assertIn("x-1_hot_zone1", default)
+
+    async def test_the_plate_temperature_does_not_replace_the_sensor_one(self) -> None:
+        # `temp_zone{N}` reads sensorTempZ{N} and other hobs publish it; the new
+        # family reads tempZ{N} under its own key so neither displaces the other.
+        attributes = {"available": True, "sensorTempZ1": 40, "tempZ1": 55}
+        added = await _build_sensors("IH", attributes, _experimental(True))
+        by_id = {e._attr_unique_id: e for e in added}
+        self.assertEqual(40.0, by_id["x-1_temp_zone1"].native_value)
+        self.assertEqual(55.0, by_id["x-1_plate_temp_zone1"].native_value)
+
+    async def test_the_plate_temperature_claims_nothing_it_cannot_prove(self) -> None:
+        """It shipped as a TEMPERATURE in °C with statistics enabled, and none of
+        the three is something this integration can stand behind.
+
+        `tempZ{N}` has not moved since 2022 on the only hob anyone has, and that
+        model declares `probe = "0"` -- no probe. The reading being a plate
+        temperature at all is an inference from a parameter NAME in the decompiled
+        app. `device_class` + unit tell Home Assistant what the number IS, and
+        `state_class=MEASUREMENT` writes it into long-term statistics under that
+        unit: promoting the entity later is additive, unpicking a year of
+        statistics recorded in the wrong unit is not.
+
+        The positive control below is the point of the test: the CONFIRMED
+        temperature on the same hob keeps all three, so this is a claim withdrawn
+        where the evidence is missing and not a device_class deleted everywhere.
+        """
+        attributes = {"available": True, "sensorTempZ1": 40, "tempZ1": 55}
+        by_id = {
+            e._attr_unique_id: e
+            for e in await _build_sensors("IH", attributes, _experimental(True))
+        }
+        plate = by_id["x-1_plate_temp_zone1"].entity_description
+        self.assertIsNone(plate.device_class)
+        self.assertIsNone(plate.native_unit_of_measurement)
+        self.assertIsNone(plate.state_class)
+        self.assertTrue(plate.experimental)
+
+        confirmed = by_id["x-1_temp_zone1"].entity_description
+        self.assertIsNotNone(confirmed.device_class)
+        self.assertIsNotNone(confirmed.native_unit_of_measurement)
+        self.assertIsNotNone(confirmed.state_class)
+
+    async def test_the_hob_alias_produces_the_same_entities(self) -> None:
+        ih = [e._attr_unique_id for e in await _build_binary("IH", HOB_ATTRIBUTES)]
+        hob = [e._attr_unique_id for e in await _build_binary("HOB", HOB_ATTRIBUTES)]
+        self.assertEqual(ih, hob)
 
 
 class HeatPumpAttributeRealityTest(unittest.TestCase):
@@ -482,6 +909,290 @@ class Tier2GatingTest(unittest.IsolatedAsyncioTestCase):
     async def test_no_attrs_means_no_entities(self) -> None:
         added = await _build_sensors("REF", {})
         self.assertEqual(added, [])
+
+    async def test_fridge_errors_is_gated_like_every_other_reading(self) -> None:
+        """issue #93: the fridge was the one type with an app error channel and no entity."""
+        self.assertNotIn(
+            "x-1_errors",
+            {e._attr_unique_id for e in await _build_sensors("REF", {"tempZ1": "4"})},
+        )
+        added = await _build_sensors("REF", {"errors": "0"})
+        self.assertEqual({e._attr_unique_id for e in added}, {"x-1_errors"})
+
+    async def test_fridge_errors_reaches_fr_and_fre_too(self) -> None:
+        for app_type in ("FR", "FRE"):
+            added = await _build_sensors(app_type, {"errors": "0"})
+            self.assertIn("x-1_errors", {e._attr_unique_id for e in added}, app_type)
+
+    async def test_fridge_errors_folds_every_healthy_spelling(self) -> None:
+        """The device spells "no fault" four ways and the app accepts all four.
+
+        Without the fold the same healthy appliance would publish 0, "0", "00" and "100"
+        as four different states -- and "100" is a reserved bit the app whitelists by
+        name, not a fault (apk/analysis/issue93-ref-unmapped-values.md section 3.2).
+        """
+        for healthy in (0, "0", "00", "000", "100", "", None):
+            added = await _build_sensors("REF", {"errors": healthy, "tempZ1": "4"})
+            entity = next(e for e in added if e._attr_unique_id == "x-1_errors")
+            self.assertEqual(entity.native_value, "0", repr(healthy))
+
+    async def test_fridge_errors_passes_a_real_code_through(self) -> None:
+        """A hex bitmask is an opaque token: the meaning lives behind a cloud lookup we
+        cannot make, so the raw value is the only honest rendering -- and it may carry
+        several bits at once, REF being the type the app exempts from bit reduction."""
+        for code in ("80", "0A", "E12", "1200"):
+            added = await _build_sensors("REF", {"errors": code})
+            entity = next(e for e in added if e._attr_unique_id == "x-1_errors")
+            self.assertEqual(entity.native_value, code, code)
+
+    async def test_fridge_errors_falls_back_to_the_singular_spelling(self) -> None:
+        """`COMMON_PARAMS_ENUM` declares both `errors` and `error`, and the app reads the
+        singular when the plural is absent."""
+        added = await _build_sensors("REF", {"error": "80"})
+        entity = next(e for e in added if e._attr_unique_id == "x-1_errors")
+        self.assertEqual(entity.native_value, "80")
+
+    async def test_my_zone_mode_needs_the_model_to_declare_the_drawer(self) -> None:
+        """The gate is the MODEL CATALOGUE, not the shadow.
+
+        `zones` is what the app filters its fridge zone cards on. Gating on the shadow
+        instead would be the mistake the app's own abandoned helper made: it derived the
+        zone list from the truthiness of `tempSelZ*` and would have dropped a My Zone
+        whose register reads 0 -- which is a real mode, not an absence (#93).
+        """
+        attrs = {"tempSelZ3": "0"}
+        with_zone = await _build_sensors("REF", attrs, appliance=_my_zone_fridge())
+        self.assertIn("x-1_my_zone_mode", {e._attr_unique_id for e in with_zone})
+
+        for zones in ("fridge|freezer", None):
+            without = await _build_sensors(
+                "REF", attrs, appliance=_my_zone_fridge(zones=zones)
+            )
+            self.assertNotIn(
+                "x-1_my_zone_mode", {e._attr_unique_id for e in without}, repr(zones)
+            )
+
+    async def test_my_zone_mode_still_needs_the_register(self) -> None:
+        """Both gates, not either: a declared drawer with no register reports nothing."""
+        added = await _build_sensors(
+            "REF", {"tempZ1": "4"}, appliance=_my_zone_fridge()
+        )
+        self.assertNotIn("x-1_my_zone_mode", {e._attr_unique_id for e in added})
+
+    async def test_my_zone_mode_denies_when_the_catalogue_is_silent(self) -> None:
+        """No appliance, no catalogue, no entity. Stricter than the app, on purpose: an
+        entity invented out of silence cannot be told from one that belongs."""
+        added = await _build_sensors("REF", {"tempSelZ3": "0"}, appliance=None)
+        self.assertNotIn("x-1_my_zone_mode", {e._attr_unique_id for e in added})
+
+    async def _my_zone_state(self, value, appliance=None):
+        added = await _build_sensors(
+            "REF",
+            {"tempSelZ3": value},
+            appliance=appliance if appliance is not None else _my_zone_fridge(),
+        )
+        return next(e for e in added if e._attr_unique_id == "x-1_my_zone_mode")
+
+    async def test_my_zone_mode_reads_the_devices_own_program_catalogue_first(self) -> None:
+        """The value is a program's signature, and the device says which program.
+
+        `getMyZoneMappedMode` asks `getModeNameFromCommands` before it looks at the
+        number at all, so the answer is a startProgram slug -- the same vocabulary
+        `select.ref_program` offers, which is what makes the two read as one surface.
+        """
+        for value, expected in (("0", "zero_fresh"), ("2", "quick_cool"), ("5", "fruit_and_veg")):
+            entity = await self._my_zone_state(value)
+            self.assertEqual(entity.native_value, expected, value)
+
+    async def test_my_zone_mode_falls_back_to_the_static_table(self) -> None:
+        """A fridge whose catalogue pins nothing still gets the app's second answer.
+
+        And here `2` is `chiller`, not `quick_cool`: the app's own 2-branch only says
+        Quick Cool when a program claims the value (or when it runs in demo mode).
+        """
+        bare = FakeApplianceModel(zones="fridge|freezer|vtRoom1", programs={})
+        for value, expected in (
+            ("0", "zero_fresh"), ("2", "chiller"), ("3", "cool_drink"),
+            ("4", "cheese"), ("5", "fruit_and_veg"),
+        ):
+            entity = await self._my_zone_state(value, appliance=bare)
+            self.assertEqual(entity.native_value, expected, value)
+
+    async def test_my_zone_mode_is_unknown_for_a_value_nothing_explains(self) -> None:
+        """`17` is what the Holiday program's rules pin the register to, and while
+        Holiday runs the drawer is in none of its own modes -- the app shows
+        NO_MODE_SELECTED there too. `1` is simply not a mode on any known model."""
+        for value in ("17", "1", "", "-5"):
+            entity = await self._my_zone_state(value)
+            self.assertIsNone(entity.native_value, value)
+
+    async def test_every_fridge_door_the_shadow_reports_becomes_an_entity(self) -> None:
+        """A four-door fridge gets four doors (discussion #94).
+
+        `doorStatusZ4` was the one zone the cooling table skipped: the reporter's
+        HCW58F18EWMP publishes it, `temp_zone4` was already there, and his diagnostics
+        printed `doorStatusZ4` under `attributes_unmapped` while `doorStatusZ3` sat two
+        lines away under `attributes_expected_absent`.
+        """
+        added = await _build_binary(
+            "REF",
+            {
+                "doorStatusZ1": "0", "door2StatusZ1": "0",
+                "doorStatusZ2": "0", "doorStatusZ4": "0",
+            },
+        )
+        self.assertEqual(
+            ["door_zone1", "door2_zone1", "door_zone2", "door_zone4"],
+            [e.entity_description.key for e in added
+             if e.entity_description.key.startswith("door")],
+        )
+
+    async def test_a_door_the_shadow_does_not_report_is_not_invented(self) -> None:
+        # The capability gate is what keeps the widened table honest: a two-door fridge
+        # must not grow two entities that will never leave `unknown`.
+        added = await _build_binary("REF", {"doorStatusZ1": "0"})
+        keys = {e.entity_description.key for e in added}
+        for absent in ("door_zone2", "door_zone3", "door_zone4"):
+            self.assertNotIn(absent, keys, absent)
+
+    async def test_the_fourth_door_reads_open_and_closed(self) -> None:
+        for raw, expected in (("0", False), ("1", True), (0, False), (1, True)):
+            added = await _build_binary("REF", {"doorStatusZ4": raw})
+            entity = next(
+                e for e in added if e.entity_description.key == "door_zone4"
+            )
+            self.assertIs(expected, entity.is_on, repr(raw))
+
+    async def test_the_sensor_is_built_but_hidden_where_the_select_is(self) -> None:
+        """One drawer, one VISIBLE entity with that name -- and still two entities (#93).
+
+        `select.my_zone_mode` reports the same register under the same label, so on an
+        appliance whose catalogue lets the writable control be built the reading steps
+        behind it: created, and disabled at first registration, exactly like the four
+        flag readings the mode switches duplicate. 5.21.0 skipped creating it and purged
+        it from the registry instead; that cost the states only this class can report --
+        the static table's `chiller` / `cool_drink` / `cheese`, i.e. the modes set from
+        the fridge's own panel, for which the select must answer unknown.
+
+        Home Assistant reads the flag at FIRST registration only, so hiding takes
+        nothing away from a user who already has the entity enabled.
+        """
+        added = await _build_sensors(
+            "REF", {"tempSelZ3": "0"}, appliance=_drawer_capable_fridge()
+        )
+        by_id = {e._attr_unique_id: e for e in added}
+        self.assertIn("x-1_my_zone_mode", by_id)
+        self.assertFalse(
+            by_id["x-1_my_zone_mode"]._attr_entity_registry_enabled_default
+        )
+        # ...and only that one: the decision is keyed on the description, so a careless
+        # gate would take the whole `requires_zone` branch with it.
+        added_all = await _build_sensors(
+            "REF",
+            {"tempSelZ3": "0", "tempZ1": "5"},
+            appliance=_drawer_capable_fridge(),
+        )
+        self.assertIn("x-1_temp_zone1", {e._attr_unique_id for e in added_all})
+
+    async def test_the_sensor_stays_visible_where_no_select_can_be_built(self) -> None:
+        """The other side of the same gate, and the reason it is answered per DEVICE and
+        not on the shared description row: a fridge whose catalogue carries no drawer
+        PROGRAM gets no select, so its reading is the only thing to watch and must be
+        enabled. A static flag on the row would have hidden it there too, permanently.
+        """
+        entity = await self._my_zone_state("0")
+        self.assertTrue(
+            getattr(entity, "_attr_entity_registry_enabled_default", True)
+        )
+        self.assertTrue(
+            getattr(entity.entity_description, "entity_registry_enabled_default", True)
+        )
+
+    async def test_the_sensor_stays_where_no_select_can_be_built(self) -> None:
+        """The other side of the same gate: a fridge whose catalogue carries no drawer
+        PROGRAM keeps the reading, because nothing replaces it."""
+        entity = await self._my_zone_state("0")
+        self.assertEqual("zero_fresh", entity.native_value)
+
+    async def test_my_zone_mode_options_admit_every_state_it_can_report(self) -> None:
+        """An ENUM sensor may not report a state outside its options, and the catalogue
+        lookup can answer with any slug the MODEL declares -- which the static table
+        cannot know. Hence the per-entity widening."""
+        entity = await self._my_zone_state("0")
+        self.assertIn("zero_fresh", entity._attr_options)
+        self.assertIn("quick_cool", entity._attr_options)
+        # ...and the static vocabulary survives the widening.
+        self.assertIn("chiller", entity._attr_options)
+
+    async def test_my_zone_mode_never_reports_outside_its_options(self) -> None:
+        """The catalogue is read at every refresh while options are frozen at
+        construction, so a slug the widening never saw must fall through, not leak."""
+        entity = await self._my_zone_state("0")
+        entity._attr_options = ["chiller"]
+        self.assertEqual(entity.native_value, "zero_fresh")
+
+    async def test_the_fixed_value_lookup_skips_the_synthetic_category(self) -> None:
+        """The helper's own contract, pinned apart from the sensor that uses it.
+
+        `program_code_for_fixed_value` is public in `hon_commands`, and the sensor's
+        options guard would mask a regression here (the placeholder never reaches the
+        allowed set, so it falls through anyway). Tested directly so the function is
+        answerable for itself.
+        """
+        from custom_components.addhon.hon_commands import program_code_for_fixed_value
+
+        appliance = FakeApplianceModel()
+        appliance.commands["startProgram"] = FakeCategorylessStartProgram(
+            {"tempSelZ3": FakeFixedParam("0")}
+        )
+        self.assertIsNone(
+            program_code_for_fixed_value(appliance, "tempSelZ3", "0")
+        )
+        # A real category with the same pinned value still answers.
+        appliance.commands["startProgram"] = FakeStartProgram(
+            {"zero_fresh": FakeCategory({"tempSelZ3": FakeFixedParam("0")})}
+        )
+        self.assertEqual(
+            program_code_for_fixed_value(appliance, "tempSelZ3", "0"), "zero_fresh"
+        )
+
+    async def test_my_zone_mode_never_reports_the_synthetic_category(self) -> None:
+        """A category-less startProgram must not be mistaken for a program.
+
+        `HonCommand.categories` reports such a command as `{"_": self}`, so a naive walk
+        answers "_" -- and because the same walk also widens `options`, the
+        out-of-options guard would have admitted it. The sensor would have shown a bare
+        "_", with no translation, as the drawer's mode.
+        """
+        appliance = FakeApplianceModel(zones="fridge|freezer|vtRoom1")
+        appliance.commands["startProgram"] = FakeCategorylessStartProgram(
+            {"tempSelZ3": FakeFixedParam("0")}
+        )
+        added = await _build_sensors("REF", {"tempSelZ3": "0"}, appliance=appliance)
+        entity = next(e for e in added if e._attr_unique_id == "x-1_my_zone_mode")
+        self.assertNotIn("_", entity._attr_options)
+        # ...and it falls through to the static table, which is the right answer here.
+        self.assertEqual(entity.native_value, "zero_fresh")
+
+    async def test_my_zone_mode_reaches_fr_and_fre_too(self) -> None:
+        for app_type in ("FR", "FRE"):
+            added = await _build_sensors(
+                app_type, {"tempSelZ3": "0"}, appliance=_my_zone_fridge()
+            )
+            self.assertIn(
+                "x-1_my_zone_mode", {e._attr_unique_id for e in added}, app_type
+            )
+
+    async def test_fridge_errors_is_diagnostic(self) -> None:
+        """Not a headline reading: the app keeps its own fridge error banner dark until a
+        `config/troubleshooting` verdict comes back, and ships no REF error push at all."""
+        from homeassistant.const import EntityCategory
+
+        added = await _build_sensors("REF", {"errors": "0"})
+        entity = next(e for e in added if e._attr_unique_id == "x-1_errors")
+        self.assertEqual(
+            entity.entity_description.entity_category, EntityCategory.DIAGNOSTIC
+        )
 
     async def test_unknown_type_no_entities(self) -> None:
         added = await _build_sensors("ZZ", {"tempZ1": "4"})

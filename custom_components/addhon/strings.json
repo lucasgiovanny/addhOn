@@ -109,54 +109,6 @@
           "description": "Log level to apply to the hOn MQTT realtime channel."
         }
       }
-    },
-    "probe_settings_operation": {
-      "name": "Find a settings operation name (advanced)",
-      "description": "Diagnostic. Tries a ladder of candidate `operationName` values against one parameter until the appliance honours one, then reports the winner as a notification. This is how a read-only setting (a timer, a schedule window) can be made writable: the operation it belongs to cannot be read anywhere, only tried.",
-      "fields": {
-        "device_id": {
-          "name": "Appliance",
-          "description": "The appliance to probe."
-        },
-        "parameter": {
-          "name": "Parameter",
-          "description": "The parameter to move, as the appliance spells it. For example `sterilizationTime`."
-        },
-        "value": {
-          "name": "Value",
-          "description": "A value the parameter does NOT currently hold, so a hit is unmistakable. For example \"07:00\"."
-        },
-        "command": {
-          "name": "Command",
-          "description": "Command carrying the parameter. Usually `settings`."
-        },
-        "operations": {
-          "name": "Candidate names",
-          "description": "Operation names to try, in order. Leave empty to derive them from the parameter name."
-        },
-        "settle": {
-          "name": "Wait between attempts",
-          "description": "Seconds to wait for the appliance to apply and report back before reading the parameter. Raise it if a name that should work reads as a miss."
-        }
-      }
-    },
-    "send_command": {
-      "name": "Send a raw command (advanced)",
-      "description": "Diagnostic. Sends one command to one appliance exactly as given, with no safety gate. Use it to test a single `operationName` candidate on appliances whose `settings` command only performs one operation at a time. A wrong operation name changes nothing.",
-      "fields": {
-        "device_id": {
-          "name": "Appliance",
-          "description": "The appliance to send the command to."
-        },
-        "command": {
-          "name": "Command",
-          "description": "Command name, as the appliance's schema spells it. Usually `settings`."
-        },
-        "parameters": {
-          "name": "Parameters",
-          "description": "The parameters to send, as name: value. Include `operationName` when testing an operation."
-        }
-      }
     }
   },
   "device": {
@@ -641,67 +593,6 @@
           "cheese": "Cheese",
           "fruit_and_veg": "Fruit and vegetables"
         }
-      },
-      "heating_status": {
-        "name": "Heating status",
-        "state": {
-          "off": "Off",
-          "idle": "Idle",
-          "heating": "Heating"
-        }
-      },
-      "heat_source": {
-        "name": "Heat source",
-        "state": {
-          "none": "None",
-          "compressor": "Compressor",
-          "electric_heater": "Electric heater",
-          "aux_electric_heater": "Auxiliary heater",
-          "boiler": "Boiler",
-          "multiple": "Multiple sources"
-        }
-      },
-      "hot_water_level": {
-        "name": "Hot water level"
-      },
-      "tank_volume": {
-        "name": "Tank volume"
-      },
-      "compressor_energy_month": {
-        "name": "Compressor energy this month"
-      },
-      "compressor_energy_year": {
-        "name": "Compressor energy this year"
-      },
-      "heater_energy_month": {
-        "name": "Electric heater energy this month"
-      },
-      "heater_energy_year": {
-        "name": "Electric heater energy this year"
-      },
-      "heat_output_month": {
-        "name": "Heat output this month"
-      },
-      "heat_output_year": {
-        "name": "Heat output this year"
-      },
-      "compressor_energy_day": {
-        "name": "Compressor energy today"
-      },
-      "heater_energy_day": {
-        "name": "Heater energy today"
-      },
-      "heat_output_day": {
-        "name": "Heat produced today"
-      },
-      "sterilization_time": {
-        "name": "Anti-legionella time"
-      },
-      "power_supply_source": {
-        "name": "Power supply source"
-      },
-      "heating_window": {
-        "name": "Heating window"
       }
     },
     "binary_sensor": {
@@ -914,30 +805,6 @@
       },
       "combi_mode_zone6": {
         "name": "Zone 6 bridged"
-      },
-      "compressor_running": {
-        "name": "Compressor"
-      },
-      "electric_heater_running": {
-        "name": "Electric heater"
-      },
-      "aux_heater_running": {
-        "name": "Auxiliary heater"
-      },
-      "boiler_heating": {
-        "name": "Boiler heating"
-      },
-      "antifreeze": {
-        "name": "Antifreeze protection"
-      },
-      "defrost": {
-        "name": "Defrost"
-      },
-      "vacation_active": {
-        "name": "Vacation active"
-      },
-      "sterilization_running": {
-        "name": "Anti-legionella cycle"
       }
     },
     "switch": {
@@ -1054,12 +921,6 @@
       },
       "holiday_mode": {
         "name": "Holiday mode"
-      },
-      "boost": {
-        "name": "Boost"
-      },
-      "silent_mode": {
-        "name": "Silent mode"
       }
     },
     "number": {
@@ -1098,18 +959,6 @@
       },
       "delay_off_time": {
         "name": "Switch-off delay"
-      },
-      "target_temp_hc": {
-        "name": "Target temperature (heater + compressor)"
-      },
-      "target_temp_pv": {
-        "name": "Target temperature (PV mode)"
-      },
-      "target_temp_sg": {
-        "name": "Target temperature (smart grid)"
-      },
-      "sterilization_temp": {
-        "name": "Anti-legionella temperature"
       }
     },
     "select": {
@@ -1274,9 +1123,6 @@
       },
       "reset_debug": {
         "name": "Reset debug"
-      },
-      "clear_vacation": {
-        "name": "Clear vacation window"
       }
     },
     "fan": {
@@ -1285,58 +1131,6 @@
       },
       "hood": {
         "name": "Hood"
-      }
-    },
-    "date": {
-      "vacation_start_date": {
-        "name": "Vacation start"
-      },
-      "vacation_end_date": {
-        "name": "Vacation end"
-      }
-    },
-    "water_heater": {
-      "water_heater": {
-        "state_attributes": {
-          "action": {
-            "name": "Action",
-            "state": {
-              "off": "Off",
-              "idle": "Idle",
-              "heating": "Heating"
-            }
-          },
-          "heat_source": {
-            "name": "Heat source",
-            "state": {
-              "none": "None",
-              "compressor": "Compressor",
-              "electric_heater": "Electric heater",
-              "aux_electric_heater": "Auxiliary heater",
-              "boiler": "Boiler",
-              "multiple": "Multiple sources"
-            }
-          },
-          "hot_water_level": {
-            "name": "Hot water level"
-          }
-        },
-        "state": {
-          "off": "Off",
-          "on": "On",
-          "heat_pump": "Auto",
-          "eco": "Eco",
-          "electric": "Electric",
-          "vac": "Holiday"
-        }
-      }
-    },
-    "time": {
-      "heating_window_start": {
-        "name": "Heating window start"
-      },
-      "heating_window_end": {
-        "name": "Heating window end"
       }
     }
   },
@@ -1382,24 +1176,6 @@
     },
     "speed_not_supported": {
       "message": "This purifier runs in discrete modes and has no fan speed. Set a preset mode instead of a percentage."
-    },
-    "probe_parameter_not_reported": {
-      "message": "The appliance does not report \"{parameter}\", so the probe could not tell whether a candidate worked."
-    },
-    "probe_value_already_set": {
-      "message": "\"{parameter}\" already reads {value}: pick a different value, or every candidate would look like a hit."
-    },
-    "send_command_no_parameters": {
-      "message": "No parameters given: addhon.send_command needs at least one parameter to write."
-    },
-    "send_command_unknown_device": {
-      "message": "Device {device} is not a Haier hOn appliance of this integration."
-    },
-    "settings_operation_locked": {
-      "message": "\"{param}\" cannot be written on this appliance: its settings command only performs the \"{operation}\" operation, so the appliance would ignore the change. Set it in the hOn app instead."
-    },
-    "vacation_dates_inverted": {
-      "message": "Invalid vacation window: start {start} is after end {end}."
     }
   },
   "issues": {

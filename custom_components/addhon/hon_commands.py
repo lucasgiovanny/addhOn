@@ -17,7 +17,7 @@ everywhere (a missing parameter does not generate an entity).
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from decimal import Decimal
 import logging
 
@@ -33,6 +33,11 @@ _LOGGER = logging.getLogger(__name__)
 # top-level key: "settings" is the AC's and the real fridge's one (the active
 # category exposes setParameters); "setParameters" as a fallback for other models.
 SETTINGS_COMMANDS: tuple[str, ...] = ("settings", "setParameters")
+
+# `HonCommand.categories` returns `{"_": self}` for a command that has no categories at
+# all (commands.py), so a caller walking categories sees this placeholder alongside real
+# program codes. It is not a program name and must never reach a user-facing state.
+SYNTHETIC_CATEGORY = "_"
 
 
 def get_commands(appliance) -> dict:
@@ -226,6 +231,71 @@ def settings_write_blocked(
     if param_name in SETTINGS_PARAM_OPERATIONS:
         return None
     return operation
+
+
+def program_code_for_fixed_value(
+    appliance,
+    param_name: str,
+    value,
+    *,
+    codes: Collection[str] | None = None,
+) -> str | None:
+    """Program code whose `param_name` is PINNED to `value`, or None.
+
+    Some device settings are not free values but a program's signature: the fridge My
+    Zone drawer has no writable mode of its own, and each of its programs instead pins
+    `tempSelZ3` to one fixed number. Reading that number back out of the shadow says
+    which program is running -- so this is a lookup, not a guess.
+
+    It is what the official app does, and in the same order: `getMyZoneMappedMode` calls
+    `getModeNameFromCommands` FIRST and only falls back to a static value table for
+    numbers no program explains (apk/analysis/issue93-ref-unmapped-values.md section 4.4).
+
+    Deliberately restricted to FIXED parameters. A range or an enum member merely ALLOWS
+    a value; only `typology: "fixed"` means "this program is the reason the value is what
+    it is", so a free setpoint that happens to sit on a program's number is never
+    mistaken for that program running. `HonParameterFixed` is duck-typed through
+    `.typology` rather than imported, like every other reader in this module.
+
+    Returns the CATEGORY key, which the loader has already reduced to the same slug the
+    program select offers (`PROGRAMS.REF.ZERO_FRESH` -> `zero_fresh`), so callers can
+    compare it against the select's options without a second translation.
+
+    `codes` NARROWS the walk to a caller-supplied set of program codes, and it is a
+    correction rather than an optimisation. The unrestricted walk answers with the FIRST
+    category that pins the number, and "a program pins this value" is not the same claim
+    as "this program is the reason the value is what it is" once several programs pin the
+    same parameter. On damigioanna's HDPW5620CNPK (apk/dump/ref_10136/commands.json)
+    five DOWNLOAD presets pin `tempSelZ3` to 2, 2, 5, 5 and 5, so an unrestricted lookup
+    calls the My Zone drawer `iot_extra_cold` at 2 and `iot_daily_use` at 5 -- a
+    whole-appliance preset reported as the state of one drawer. A caller that knows which
+    programs OWN the parameter passes them (`ref_programs.my_zone_code_for_value` passes
+    the drawer's); a caller with a parameter only one program can pin passes nothing and
+    gets exactly today's behaviour.
+    """
+    if value is None:
+        return None
+    command = get_command(appliance, "startProgram")
+    categories = getattr(command, "categories", None) if command is not None else None
+    if not isinstance(categories, dict):
+        return None
+    allowed = None if codes is None else {str(code) for code in codes}
+    wanted = str(value).strip()
+    for code, category in categories.items():
+        if allowed is not None and str(code) not in allowed:
+            continue
+        # Not a program: a category-less command reports itself under `SYNTHETIC_CATEGORY`,
+        # and its own parameters would otherwise be answered as if a program had pinned
+        # them. Returning that placeholder would put a bare "_" in front of the user.
+        if str(code) == SYNTHETIC_CATEGORY:
+            continue
+        params = getattr(category, "parameters", None)
+        param = params.get(param_name) if isinstance(params, dict) else None
+        if param is None or str(getattr(param, "typology", "")) != "fixed":
+            continue
+        if str(getattr(param, "value", "")).strip() == wanted:
+            return str(code)
+    return None
 
 
 def param_values(param) -> list[str]:

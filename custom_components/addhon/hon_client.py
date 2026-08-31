@@ -276,6 +276,34 @@ def _must_propagate(err: BaseException) -> bool:
     return _requires_reauth(err) or _is_retryable_server_error(err)
 
 
+def _poll_census(
+    returned: int, kept: int, failures: list[tuple[str, Exception]]
+) -> dict[str, Any]:
+    """Leak-proof account of ONE completed poll cycle, for the downloadable diagnostics.
+
+    A dump of a broken account reads `"appliances": []` whether the cloud returned
+    nothing or the poll dropped every appliance it was handed, and the only thing that
+    ever separated the two is the `Partial update: %d/%d` WARNING below, which no dump
+    carries. The two counts answer that; each drop then carries the ADDHON label of its
+    cause and NOTHING else -- the redacted names in `failures` belong to that WARNING,
+    and an exception message routinely carries a MAC, a nickname or a URL, so neither
+    is read here.
+
+    The label comes from the same picker the total-failure raise uses, so a census and
+    the `last_error` beside it in the dump can never name one failure two ways. `kept`
+    plus the drops normally account for `returned`; a shortfall is a finding of its own
+    (two appliances sharing an id collapse into a single snapshot entry).
+    """
+    dropped: list[dict[str, Any]] = []
+    for _name, err in failures:
+        # The name is dropped on the floor rather than forwarded: the picker never
+        # reads it, and passing "" keeps identity out of this call by construction
+        # instead of by trusting a helper never to grow a use for it.
+        code, _cause = _representative_failure([("", err)])
+        dropped.append({"code": code.label, "reason": code.reason_en})
+    return {"returned": returned, "kept": kept, "dropped": dropped}
+
+
 class HonClient:
     """Manages the connection to the Haier hOn APIs via the native client.
 
@@ -319,6 +347,24 @@ class HonClient:
         # phase names, rounded seconds, ok/error/timeout). This is the artefact that
         # makes a report like #76 diagnosable without a live probe.
         self.last_phase_ledger: list[dict] | None = None
+        # The appliance-list census as it stood when setup_sync FAILED, snapshotted
+        # before _close_sync tears the session down. Part of the failure record with
+        # the three fields above, and cleared with them.
+        #
+        # This is deliberately the mirror `last_appliance_fetch` (:840) argues against,
+        # and the argument does not reach it: what that property refuses is a mirror of
+        # a LIVE census, which drifts because the session keeps writing after the copy.
+        # This one is written once, on the path that has just decided there will be no
+        # more writes, and is read by __init__ into a hass.data record that is never
+        # updated afterwards. Without it the census of a setup that raised inside
+        # load_appliances dies with the session, and `outcome: "raised"` -- the state
+        # that says "the call never reached a body" -- stays unreachable in a dump.
+        self.last_setup_fetch: dict | None = None
+        # Census of the last COMPLETED poll cycle (see _poll_census): how many
+        # appliances the cloud returned, how many survived, one catalog label per
+        # drop. None until a cycle finishes, which is the third state the dump has
+        # to distinguish -- no poll ever ran.
+        self.last_poll_census: dict | None = None
         self._hon_instance = None
         self._api = None
         self._hon_loop: asyncio.AbstractEventLoop | None = None
@@ -620,6 +666,12 @@ class HonClient:
             self.last_error_phase = None
             self.last_mfa_summary = None
             self.last_phase_ledger = None
+            self.last_setup_fetch = None
+            # Not part of that failure record: a census is a statement about ONE
+            # session's poll, and this attempt builds a new session. Carrying it over
+            # would let a dump answer "how did the last poll go" with a cycle that ran
+            # on a session this client has since thrown away.
+            self.last_poll_census = None
             try:
                 if self._hon_loop is None or not self._hon_loop.is_running():
                     self._start_hon_loop()
@@ -694,6 +746,11 @@ class HonClient:
                     self.last_error_phase or "setup",
                     classify_failure_reason(err),
                 )
+                # BEFORE _close_sync, which nulls _hon_instance and with it the only
+                # reader of the census (`last_appliance_fetch`). This is the whole
+                # reason the failure record can say "the POST never reached a body":
+                # after the next line that fact exists nowhere else in the process.
+                self.last_setup_fetch = self.last_appliance_fetch
                 self._close_sync()
                 raise
 
@@ -797,6 +854,89 @@ class HonClient:
         except Exception as err:
             _LOGGER.error("Error fetching appliances: %s", err)
             raise RuntimeError(f"Error fetching appliances: {err}") from err
+
+    @property
+    def last_appliance_fetch(self) -> dict | None:
+        """The live session's appliance-list fetch census, or None if there is none.
+
+        Read LIVE off the session rather than mirrored into a field of this client. A
+        mirror would need a clear beside the ones at the top of setup_sync and a second
+        write on the MFA-resume path, and forgetting either is how a census ends up
+        describing a session the client has already thrown away. Reading through
+        `_hon_instance` cannot drift: `_close_sync` nulls it under the lifecycle lock,
+        so the answer is either this session's census or None.
+
+        getattr, not an attribute read: `_hon_instance` is None before the first setup
+        and after a close, and a session double is free not to carry the field.
+        """
+        return getattr(self._hon_instance, "last_appliance_fetch", None)
+
+    @property
+    def appliance_count(self) -> int | None:
+        """How many appliances the live session actually built (None: no session).
+
+        The same number as `last_poll.returned` whenever both describe the same
+        session -- that one is a recount of this list at the end of a poll cycle
+        (`_poll_census`, written at :1300) -- but the two have INDEPENDENT
+        resets, and the window where that matters is a SUCCESSFUL runtime re-auth:
+        `last_poll_census` is nulled at the top of every setup_sync (:660) and
+        rewritten only when a whole cycle closes, so between the end of setup_sync
+        and the end of the first poll `last_poll` is null and this is the only
+        number in the dump that says how many appliances the setup built. That
+        window is exactly when someone downloads a dump saying "I reloaded and my
+        entities are gone".
+
+        isinstance before len(): `_hon_instance` can be a session double, and a
+        length taken off an arbitrary object is how a convenience field in a dump
+        learns to raise.
+        """
+        appliances = getattr(self._hon_instance, "appliances", None)
+        return len(appliances) if isinstance(appliances, list) else None
+
+    @property
+    def setup_expanded(self) -> int | None:
+        """How many appliance objects the live session's setup accounted for.
+
+        Read off the session for the reason `last_appliance_fetch` above gives at
+        length: a copy kept on this client would need a clear that someone will
+        eventually forget, and would then describe a session already discarded.
+        With `built` beside it the reader can check
+        `built + sum(skipped.values()) == expanded` and know the census accounts
+        for every appliance the cloud sent.
+        """
+        return getattr(self._hon_instance, "setup_expanded", None)
+
+    @property
+    def setup_drops(self) -> dict[str, int] | None:
+        """Reason -> count for the appliances the live setup dropped, or None.
+
+        The session already reduced this to tokens it declares itself
+        (`client/session.py:SETUP_DROP_REASONS`), so no identity crosses this
+        boundary and the diagnostics reader still filters it against its own
+        allowlist rather than trusting the mapping it receives.
+        """
+        return getattr(self._hon_instance, "setup_drops", None)
+
+    @property
+    def degraded_census(self) -> dict[str, int] | None:
+        """ADDHON label -> count for the appliances the live setup KEPT broken.
+
+        The other half of the account beside `setup_drops`, and the half that
+        answers the commoner report: `setup_drops` counts appliances that never
+        became entities at all, this counts the ones that exist with an empty
+        `commands` map and therefore lost their select/number/switch/button/
+        climate/fan entities until a manual reload (`client/session.py:393-394`).
+        Read together they say whether a shrunken entity list is missing devices or
+        missing capabilities, which nothing in the dump could distinguish before.
+
+        Deliberately NOT `degraded_appliances`, which is the same information keyed
+        by f"{mac}#{zone}". The session publishes the reduced form itself
+        (`client/session.py:581`) so a plaintext MAC is never handed across this
+        boundary for a reader to remember not to write down; the diagnostics reader
+        then still shape-checks every label it receives (`_degraded_census`) instead
+        of trusting the mapping, for the same reason `setup_drops` is filtered above.
+        """
+        return getattr(self._hon_instance, "degraded_census", None)
 
     def _needs_rehydration(self, appliance) -> bool:
         """Did setup append this appliance without its commands, for a retryable reason?
@@ -1052,7 +1192,11 @@ class HonClient:
                         ),
                     )
             else:
-                _LOGGER.debug(
+                # INFO, not DEBUG: it is the pointer to the WARNING that carries the
+                # whole diagnosis, and a pointer that only appears when debug is on is
+                # a pointer nobody follows. It fires only on the empty-list branch, so
+                # a working install never sees it.
+                _LOGGER.info(
                     "Discovery: the hOn cloud returned 0 appliances for this "
                     "account (request OK). With the unified-api endpoint the list "
                     "also includes offline devices, so 0 = a truly empty/not-shared "
@@ -1168,6 +1312,17 @@ class HonClient:
 
             if retry_after_reauth:
                 continue
+
+            # Every appliance has been attempted, so THIS is the cycle the census
+            # describes -- including the total failure just below, which raises and
+            # would otherwise leave the dump with nothing but a stale snapshot to
+            # explain itself. Deliberately not recorded on the strict first-poll
+            # re-raise above: that one aborts mid-loop, and counting the appliances
+            # the loop never reached as survivors would be a false statement about
+            # exactly the dump this exists to explain.
+            self.last_poll_census = _poll_census(
+                len(appliances), len(data), failed_appliances
+            )
 
             if appliances and not data and failed_appliances:
                 # Every appliance failed this cycle: surface a failed update (the

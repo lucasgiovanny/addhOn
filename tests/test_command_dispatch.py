@@ -40,6 +40,15 @@ _EXPECTED_LEGACY_CALL_EDGES = {
     "climate.py": {
         "HaierClimateEntity.async_set_hvac_mode": ("async_send_command",),
     },
+    # NO legacy edge left in fan.py, and the empty dict is the assertion. Both fans
+    # in this module now dispatch: the purifier always did, and the cooker hood's
+    # last legacy leg -- a full-command `stopProgram` for the fan's off -- is gone,
+    # because switching the appliance off turned out to be the power switch's job
+    # and not the fan's. Keeping it would also have been a bug in its own right: the
+    # full-command sender transmits the whole group, and the hood's
+    # `startProgram.lightStatus` loads at 1, so every speed change would have
+    # switched the light on. See `hood.py` for the three-state model.
+    "fan.py": {},
     "number.py": {
         "HonNumber.async_set_native_value": ("async_send_command",),
     },
@@ -49,6 +58,7 @@ _EXPECTED_LEGACY_CALL_EDGES = {
     },
     "select.py": {
         "HonRefProgramSelect.async_select_option": ("async_send_command",),
+        "HonHobPowerLimitSelect.async_select_option": ("async_send_command",),
     },
     "switch.py": {
         "HonWashingMachinePauseSwitch._send_pause_command._do": (
@@ -282,6 +292,10 @@ def test_dispatcher_has_no_production_entity_caller() -> None:
         Path("command_dispatch.py"),
         Path("hon_client.py"),
         Path("air_purifier.py"),
+        # The cooker hood's counterpart to air_purifier.py: `hood.hood_patch` is the
+        # single builder every HO write goes through, and it is where the
+        # `programName` suppression is pinned.
+        Path("hood.py"),
         Path("fan.py"),
         Path("light.py"),
         # Mixed files: the AP entities dispatch, the legacy ones stay legacy.
@@ -721,6 +735,9 @@ class _DispatchCommand(HonCommand):
         self.send_error: BaseException | None = None
         self.before_send: Callable[[], None] | None = None
         self.sent_payloads: list[dict[str, str | float]] = []
+        # What the dispatcher asked the transport to stamp as `programName`:
+        # None means "use my own category", "" means "suppress the field".
+        self.program_names: list[str | None] = []
         super().__init__(
             name,
             attributes,
@@ -729,7 +746,13 @@ class _DispatchCommand(HonCommand):
             category_name=category_name,
         )
 
-    async def send_exact(self, payload: dict[str, str | float]) -> bool:
+    async def send_exact(
+        self,
+        payload: dict[str, str | float],
+        *,
+        program_name: str | None = None,
+    ) -> bool:
+        self.program_names.append(program_name)
         self.sent_payloads.append(dict(payload))
         if self.before_send is not None:
             self.before_send()
@@ -808,7 +831,11 @@ def _block_command_sends(
 ) -> None:
     call_index = 0
 
-    async def send_exact(payload: dict[str, str | float]) -> bool:
+    async def send_exact(
+        payload: dict[str, str | float],
+        *,
+        program_name: str | None = None,
+    ) -> bool:
         nonlocal call_index
         release = releases[call_index]
         call_index += 1
@@ -904,6 +931,40 @@ def test_dispatch_transaction_success_syncs_exact_payload_once() -> None:
         dict(appliance.attributes["parameters"]["untouched"].__dict__)
         == untouched_before
     )
+
+
+def test_dispatch_leaves_the_program_name_to_the_command_by_default() -> None:
+    """None is the default and it means "use your own category".
+
+    Every caller but the cooker hood relies on this: a washer or a fridge program
+    start MUST carry its `programName`, and the value is the command's own cloud
+    category, which only the command knows.
+    """
+    appliance, _first, second = _dispatch_appliance()
+
+    asyncio.run(CommandDispatcher().dispatch(appliance, _category_patch()))
+
+    assert second.program_names == [None]
+
+
+def test_dispatch_forwards_an_explicit_program_name_suppression() -> None:
+    """An empty string reaches the transport, which drops the field entirely.
+
+    The cooker hood is the only caller that asks for it: its `startProgram` is
+    filed under a placeholder category the official app never names, and the app's
+    own hood body carries no `programName` at all.
+    """
+    appliance, _first, second = _dispatch_appliance()
+    patch = CommandPatch(
+        "settings",
+        {"category": "second", "mode": "target"},
+        action="select_category_mode",
+        program_name="",
+    )
+
+    asyncio.run(CommandDispatcher().dispatch(appliance, patch))
+
+    assert second.program_names == [""]
 
 
 def test_dispatch_post_commit_sync_error_keeps_committed_state(
@@ -1372,7 +1433,11 @@ def test_dispatch_rollback_preserves_update_landing_while_send_is_suspended() ->
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def send_exact(payload: dict[str, str | float]) -> bool:
+        async def send_exact(
+            payload: dict[str, str | float],
+            *,
+            program_name: str | None = None,
+        ) -> bool:
             second.sent_payloads.append(dict(payload))
             started.set()
             await release.wait()
@@ -1866,21 +1931,37 @@ def test_mixed_platform_legacy_classes_keep_the_legacy_sender() -> None:
 
     from custom_components.addhon import number, select
 
-    expected = {
-        switch.HonSettingsSwitch: "async_send_settings",
+    legacy_only = {
         switch.HonWashingMachinePauseSwitch: "run_command_sync",
         select.HonAcDirectionSelect: "async_send_settings",
         select.HonRefProgramSelect: "async_send_command",
-        number.HonNumber: "async_send_command",
         # Buffers onto startProgram instead of sending; the buffering IS its write
         # path, so losing it would be the same regression as losing a sender.
         number.HonProgramOptionNumber: "self._buffer(",
     }
-    for entity_class, legacy_callee in expected.items():
+    for entity_class, legacy_callee in legacy_only.items():
         source = inspect.getsource(entity_class)
         assert legacy_callee in source, entity_class.__name__
         for forbidden in _FORBIDDEN_DISPATCH_SYMBOLS:
             assert forbidden not in source, f"{entity_class.__name__}: {forbidden}"
+
+    # Classes serving BOTH families at once: the air conditioner and the wine
+    # cooler (and the fridge/oven setpoints) need the whole `settings` group on the
+    # wire, the cooker hood must never send it, and one description field picks the
+    # channel. Both senders therefore have to survive in the source, and losing
+    # EITHER is a regression -- dropping the legacy one would silently make every
+    # AC toggle sparse, dropping the dispatcher one would put the hood's clock back
+    # in the payload. Which appliance gets which channel is a behavioural claim a
+    # source scan cannot make: `test_ac_write_path.SettingsSwitchChannelTest` and
+    # `test_hood_entities.HoodSparseWritePayloadTest` pin the two payloads.
+    mixed = {
+        switch.HonSettingsSwitch: ("async_send_settings", "async_dispatch_patch"),
+        number.HonNumber: ("async_send_command", "async_dispatch_patch"),
+    }
+    for entity_class, callees in mixed.items():
+        source = inspect.getsource(entity_class)
+        for callee in callees:
+            assert callee in source, f"{entity_class.__name__}: {callee}"
 
 
 def _ap_dispatch_appliance() -> tuple[_DispatchAppliance, _DispatchCommand]:

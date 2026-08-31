@@ -589,6 +589,119 @@
       },
       "heating_window": {
         "name": "Janela de aquecimento"
+      },
+      "temp_zone6": {
+        "name": "Temperatura da zona 6"
+      },
+      "last_work_time": {
+        "name": "Tempo do último funcionamento"
+      },
+      "power_zone1": {
+        "name": "Nível de potência da zona 1"
+      },
+      "power_zone2": {
+        "name": "Nível de potência da zona 2"
+      },
+      "power_zone3": {
+        "name": "Nível de potência da zona 3"
+      },
+      "power_zone4": {
+        "name": "Nível de potência da zona 4"
+      },
+      "power_zone5": {
+        "name": "Nível de potência da zona 5"
+      },
+      "power_zone6": {
+        "name": "Nível de potência da zona 6"
+      },
+      "remaining_time_zone1": {
+        "name": "Tempo restante da zona 1"
+      },
+      "remaining_time_zone2": {
+        "name": "Tempo restante da zona 2"
+      },
+      "remaining_time_zone3": {
+        "name": "Tempo restante da zona 3"
+      },
+      "remaining_time_zone4": {
+        "name": "Tempo restante da zona 4"
+      },
+      "remaining_time_zone5": {
+        "name": "Tempo restante da zona 5"
+      },
+      "remaining_time_zone6": {
+        "name": "Tempo restante da zona 6"
+      },
+      "plate_temp_zone1": {
+        "name": "Temperatura da placa da zona 1"
+      },
+      "plate_temp_zone2": {
+        "name": "Temperatura da placa da zona 2"
+      },
+      "plate_temp_zone3": {
+        "name": "Temperatura da placa da zona 3"
+      },
+      "plate_temp_zone4": {
+        "name": "Temperatura da placa da zona 4"
+      },
+      "plate_temp_zone5": {
+        "name": "Temperatura da placa da zona 5"
+      },
+      "plate_temp_zone6": {
+        "name": "Temperatura da placa da zona 6"
+      },
+      "program_code_zone1": {
+        "name": "Código do programa da zona 1"
+      },
+      "program_code_zone2": {
+        "name": "Código do programa da zona 2"
+      },
+      "program_code_zone3": {
+        "name": "Código do programa da zona 3"
+      },
+      "program_code_zone4": {
+        "name": "Código do programa da zona 4"
+      },
+      "program_code_zone5": {
+        "name": "Código do programa da zona 5"
+      },
+      "program_code_zone6": {
+        "name": "Código do programa da zona 6"
+      },
+      "program_phase_zone1": {
+        "name": "Fase do programa da zona 1"
+      },
+      "program_phase_zone2": {
+        "name": "Fase do programa da zona 2"
+      },
+      "program_phase_zone3": {
+        "name": "Fase do programa da zona 3"
+      },
+      "program_phase_zone4": {
+        "name": "Fase do programa da zona 4"
+      },
+      "program_phase_zone5": {
+        "name": "Fase do programa da zona 5"
+      },
+      "program_phase_zone6": {
+        "name": "Fase do programa da zona 6"
+      },
+      "timer_hh": {
+        "name": "Horas do temporizador"
+      },
+      "timer_mm": {
+        "name": "Minutos do temporizador"
+      },
+      "my_zone_mode": {
+        "name": "Modo My Zone (leitura)",
+        "state": {
+          "zero_fresh": "Fresco 0 °C",
+          "quick_cool": "Arrefecimento rápido",
+          "chiller": "Chiller",
+          "cool_drink": "Bebidas frescas",
+          "cheese": "Queijos",
+          "fruit_and_veg": "Fruta e legumes"
+        }
       }
     },
     "binary_sensor": {
@@ -665,16 +778,16 @@
         "name": "Poupança de energia"
       },
       "quick_cool": {
-        "name": "Super arrefecimento"
+        "name": "Super arrefecimento (leitura)"
       },
       "quick_freeze": {
-        "name": "Super congelação"
+        "name": "Super congelação (leitura)"
       },
       "auto_set": {
-        "name": "Ajuste automático"
+        "name": "Ajuste automático (leitura)"
       },
       "holiday_mode": {
-        "name": "Modo férias"
+        "name": "Modo férias (leitura)"
       },
       "filter_change": {
         "name": "Substituição do filtro"
@@ -744,6 +857,87 @@
       },
       "sterilization_running": {
         "name": "Ciclo anti-legionela"
+      },
+      "door_zone4": {
+        "name": "Porta da zona 4"
+      },
+      "filter_cleaning": {
+        "name": "Limpeza do filtro"
+      },
+      "running": {
+        "name": "Em funcionamento"
+      },
+      "zone_on_zone1": {
+        "name": "Zona 1 ligada"
+      },
+      "zone_on_zone2": {
+        "name": "Zona 2 ligada"
+      },
+      "zone_on_zone3": {
+        "name": "Zona 3 ligada"
+      },
+      "zone_on_zone4": {
+        "name": "Zona 4 ligada"
+      },
+      "zone_on_zone5": {
+        "name": "Zona 5 ligada"
+      },
+      "zone_on_zone6": {
+        "name": "Zona 6 ligada"
+      },
+      "hot_zone1": {
+        "name": "Zona 1 quente"
+      },
+      "hot_zone2": {
+        "name": "Zona 2 quente"
+      },
+      "hot_zone3": {
+        "name": "Zona 3 quente"
+      },
+      "hot_zone4": {
+        "name": "Zona 4 quente"
+      },
+      "hot_zone5": {
+        "name": "Zona 5 quente"
+      },
+      "hot_zone6": {
+        "name": "Zona 6 quente"
+      },
+      "error_zone1": {
+        "name": "Erro na zona 1"
+      },
+      "error_zone2": {
+        "name": "Erro na zona 2"
+      },
+      "error_zone3": {
+        "name": "Erro na zona 3"
+      },
+      "error_zone4": {
+        "name": "Erro na zona 4"
+      },
+      "error_zone5": {
+        "name": "Erro na zona 5"
+      },
+      "error_zone6": {
+        "name": "Erro na zona 6"
+      },
+      "combi_mode_zone1": {
+        "name": "Zona 1 em ponte"
+      },
+      "combi_mode_zone2": {
+        "name": "Zona 2 em ponte"
+      },
+      "combi_mode_zone3": {
+        "name": "Zona 3 em ponte"
+      },
+      "combi_mode_zone4": {
+        "name": "Zona 4 em ponte"
+      },
+      "combi_mode_zone5": {
+        "name": "Zona 5 em ponte"
+      },
+      "combi_mode_zone6": {
+        "name": "Zona 6 em ponte"
       }
     },
     "switch": {
@@ -848,6 +1042,24 @@
       },
       "silent_mode": {
         "name": "Modo silencioso"
+      },
+      "delay_timer": {
+        "name": "Temporizador de desligamento"
+      },
+      "power": {
+        "name": "Alimentação"
+      },
+      "auto_set": {
+        "name": "Auto-Set"
+      },
+      "super_cool": {
+        "name": "Super Cool"
+      },
+      "super_freeze": {
+        "name": "Super Freeze"
+      },
+      "holiday_mode": {
+        "name": "Modo férias"
       }
     },
     "date": {
@@ -903,6 +1115,9 @@
       },
       "aroma_time_off": {
         "name": "Tempo de aroma desligado (experimental)"
+      },
+      "delay_off_time": {
+        "name": "Atraso de desligamento"
       }
     },
     "select": {
@@ -1012,6 +1227,29 @@
           "position_6": "Posição 6",
           "swing": "Oscilação"
         }
+      },
+      "my_zone_mode": {
+        "name": "Modo My Zone",
+        "state": {
+          "zero_fresh": "Fresco 0 °C",
+          "quick_cool": "Arrefecimento rápido",
+          "fruit_and_veg": "Fruta e legumes"
+        }
+      },
+      "power_limit": {
+        "name": "Limite de potência",
+        "state": {
+          "no_limit": "Sem limite",
+          "kw_2_5": "2,5 kW",
+          "kw_3_5": "3,5 kW",
+          "kw_4_5": "4,5 kW",
+          "kw_5_5": "5,5 kW",
+          "kw_6_5": "6,5 kW",
+          "kw_2_0": "2,0 kW",
+          "kw_3_0": "3,0 kW",
+          "kw_6_8": "6,8 kW",
+          "kw_7_2": "7,2 kW"
+        }
       }
     },
     "water_heater": {
@@ -1065,11 +1303,32 @@
       },
       "clear_vacation": {
         "name": "Limpar janela de férias"
+      },
+      "ref_preset_iot_daily_use": {
+        "name": "Aplicar uso diário"
+      },
+      "ref_preset_iot_extra_cold": {
+        "name": "Aplicar frio extra"
+      },
+      "ref_preset_iot_extra_cold_water": {
+        "name": "Aplicar frio extra (água)"
+      },
+      "ref_preset_iot_extra_ice": {
+        "name": "Aplicar gelo extra"
+      },
+      "ref_preset_iot_high_efficiency": {
+        "name": "Aplicar alta eficiência"
+      },
+      "ref_preset_iot_special_food_core": {
+        "name": "Aplicar alimentos especiais"
       }
     },
     "fan": {
       "purifier": {
         "name": "Purificador"
+      },
+      "hood": {
+        "name": "Exaustor"
       }
     },
     "time": {
@@ -1138,6 +1397,15 @@
     },
     "vacation_dates_inverted": {
       "message": "Período de férias inválido: o início {start} é posterior ao fim {end}."
+    },
+    "setpoint_owned_by_mode": {
+      "message": "{mode} está ativo e é o aparelho que escolhe esta temperatura. Desligue o modo primeiro."
+    }
+  },
+  "issues": {
+    "ref_program_select_replaced": {
+      "title": "A lista de programas do frigorífico foi substituída",
+      "description": "A lista única de programas do seu frigorífico (`select.…_ref_program`) foi removida, porque o aparelho não funciona assim: Super Cool, Super Freeze, Auto-Set e Modo férias são quatro definições independentes e podem estar ativas ao mesmo tempo, e desligar uma delas desligava as outras três com ela.\n\nAgora são quatro interruptores. A gaveta My Zone tem o seu próprio seletor de modo, e cada predefinição descarregada tem um botão que a envia.\n\n**Qualquer automação ou script que chamava `select.select_option` na entidade antiga precisa de ser atualizado.** Não vai dar erro: o Home Assistant responde a uma chamada para uma entidade que já não existe com um aviso no registo e uma chamada de serviço bem-sucedida, por isso a automação continua a correr e não faz nada.\n\nDispense este aviso depois de verificar."
     }
   }
 }
